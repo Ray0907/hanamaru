@@ -4,6 +4,381 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/tests/fixtures/annotation.html');
 });
 
+test('load trigger listens once before DOMContentLoaded and destroy removes the listener', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+
+    async function createLoadingFrame({ destroy = false } = {}) {
+      const frame = document.createElement('iframe');
+      document.body.append(frame);
+      const doc = frame.contentDocument;
+      doc.open();
+      doc.write('<!doctype html><html><body><span id="target" style="display:inline-block">Loading target</span></body></html>');
+      const target = doc.querySelector('#target');
+      const events = [];
+      target.addEventListener('hana:start', () => events.push('start'));
+      target.addEventListener('hana:complete', () => events.push('complete'));
+      const controller = annotate(target, {
+        mark: 'underline', trigger: 'load', motion: 'never',
+      });
+      const before = { state: controller.state, events: [...events] };
+      if (destroy) controller.destroy();
+      const loaded = new Promise((resolve) => {
+        doc.addEventListener('DOMContentLoaded', () => queueMicrotask(resolve), { once: true });
+      });
+      doc.close();
+      await loaded;
+      doc.dispatchEvent(new frame.contentWindow.Event('DOMContentLoaded'));
+      await Promise.resolve();
+      const after = {
+        state: controller.state,
+        events: [...events],
+        owned: doc.querySelectorAll('[data-hana-id]').length,
+      };
+      controller.destroy();
+      frame.remove();
+      return { before, after };
+    }
+
+    return {
+      loaded: await createLoadingFrame(),
+      destroyed: await createLoadingFrame({ destroy: true }),
+    };
+  });
+
+  expect(result).toEqual({
+    loaded: {
+      before: { state: 'idle', events: [] },
+      after: { state: 'visible', events: ['start', 'complete'], owned: 1 },
+    },
+    destroyed: {
+      before: { state: 'idle', events: [] },
+      after: { state: 'destroyed', events: [], owned: 0 },
+    },
+  });
+});
+
+test('load trigger schedules one guarded microtask after DOMContentLoaded', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const first = document.querySelector('#direct-target');
+    const second = document.querySelector('#selector-target');
+    const firstEvents = [];
+    const secondEvents = [];
+    first.addEventListener('hana:start', () => firstEvents.push('start'));
+    first.addEventListener('hana:complete', () => firstEvents.push('complete'));
+    second.addEventListener('hana:start', () => secondEvents.push('start'));
+
+    const controller = annotate(first, {
+      mark: 'highlight', trigger: 'load', motion: 'never',
+    });
+    const stale = annotate(second, {
+      mark: 'box', trigger: 'load', motion: 'never',
+    });
+    const immediate = {
+      state: controller.state,
+      staleState: stale.state,
+      events: [...firstEvents],
+    };
+    stale.update({ note: 'Invalidate the queued load operation' });
+    await Promise.resolve();
+    const after = {
+      state: controller.state,
+      staleState: stale.state,
+      events: [...firstEvents],
+      staleEvents: [...secondEvents],
+    };
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+    await Promise.resolve();
+    const finalEvents = [...firstEvents];
+    controller.destroy();
+    stale.destroy();
+    return { immediate, after, finalEvents };
+  });
+
+  expect(result).toEqual({
+    immediate: { state: 'idle', staleState: 'idle', events: [] },
+    after: {
+      state: 'visible', staleState: 'idle', events: ['start', 'complete'], staleEvents: [],
+    },
+    finalEvents: ['start', 'complete'],
+  });
+});
+
+test('viewport trigger uses the shared threshold, shows once, and stays visible on exit', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const result = await page.evaluate(async () => {
+    class FakeIntersectionObserver {
+      static instances = [];
+
+      constructor(callback, options) {
+        this.callback = callback;
+        this.options = options;
+        this.targets = new Set();
+        this.unobserved = [];
+        this.disconnects = 0;
+        FakeIntersectionObserver.instances.push(this);
+      }
+
+      observe(target) { this.targets.add(target); }
+
+      unobserve(target) {
+        this.targets.delete(target);
+        this.unobserved.push(target.id);
+      }
+
+      disconnect() {
+        this.targets.clear();
+        this.disconnects += 1;
+      }
+
+      emit(target, intersectionRatio, isIntersecting = intersectionRatio > 0) {
+        this.callback([{ target, intersectionRatio, isIntersecting }], this);
+      }
+    }
+    window.IntersectionObserver = FakeIntersectionObserver;
+
+    const { annotate } = await import('/src/index.js');
+    const target = document.querySelector('#direct-target');
+    const events = [];
+    target.addEventListener('hana:start', () => events.push('start'));
+    target.addEventListener('hana:complete', () => events.push('complete'));
+    const controller = annotate(target, {
+      mark: 'circle', trigger: 'viewport', duration: 900,
+    });
+    const observer = FakeIntersectionObserver.instances[0];
+    if (observer === undefined) {
+      controller.destroy();
+      return { observerCount: 0 };
+    }
+    const initial = {
+      state: controller.state,
+      threshold: observer?.options.threshold,
+      observed: observer?.targets.has(target),
+    };
+    observer.emit(target, 0.24, true);
+    const below = { state: controller.state, events: [...events] };
+    observer.emit(target, 0.25, true);
+    const entered = {
+      state: controller.state,
+      events: [...events],
+      unobserved: observer.unobserved,
+      disconnects: observer.disconnects,
+    };
+    observer.emit(target, 0, false);
+    observer.emit(target, 1, true);
+    const afterExitAndReentry = { state: controller.state, events: [...events] };
+    controller.destroy();
+    return { initial, below, entered, afterExitAndReentry };
+  });
+
+  expect(result).toEqual({
+    initial: { state: 'idle', threshold: 0.25, observed: true },
+    below: { state: 'idle', events: [] },
+    entered: {
+      state: 'visible', events: ['start', 'complete'],
+      unobserved: ['direct-target'], disconnects: 1,
+    },
+    afterExitAndReentry: { state: 'visible', events: ['start', 'complete'] },
+  });
+});
+
+test('viewport trigger destroy and generation guards unsubscribe without showing', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    class FakeIntersectionObserver {
+      static instances = [];
+
+      constructor(callback, options) {
+        Object.assign(this, { callback, options, target: null, unobserved: 0, disconnects: 0 });
+        FakeIntersectionObserver.instances.push(this);
+      }
+
+      observe(target) { this.target = target; }
+
+      unobserve() { this.unobserved += 1; }
+
+      disconnect() { this.disconnects += 1; }
+
+      emit(ratio = 1) {
+        this.callback([{
+          target: this.target, intersectionRatio: ratio, isIntersecting: ratio > 0,
+        }], this);
+      }
+    }
+    window.IntersectionObserver = FakeIntersectionObserver;
+
+    const { annotate } = await import('/src/index.js');
+    const first = document.querySelector('#direct-target');
+    const second = document.querySelector('#selector-target');
+    const events = [];
+    document.body.addEventListener('hana:start', (event) => events.push(event.target.id));
+    const destroyed = annotate(first, {
+      mark: 'underline', trigger: 'viewport', motion: 'never',
+    });
+    const stale = annotate(second, {
+      mark: 'box', trigger: 'viewport', motion: 'never',
+    });
+    const [destroyedObserver, staleObserver] = FakeIntersectionObserver.instances;
+    if (destroyedObserver === undefined || staleObserver === undefined) {
+      destroyed.destroy();
+      stale.destroy();
+      return { observerCount: FakeIntersectionObserver.instances.length };
+    }
+    destroyed.destroy();
+    stale.refresh();
+    destroyedObserver.emit();
+    staleObserver.emit();
+    await Promise.resolve();
+    const output = {
+      destroyedState: destroyed.state,
+      staleState: stale.state,
+      events,
+      destroyedCleanup: [destroyedObserver.unobserved, destroyedObserver.disconnects],
+      staleCleanupBeforeDestroy: [staleObserver.unobserved, staleObserver.disconnects],
+    };
+    stale.destroy();
+    output.staleCleanupAfterDestroy = [staleObserver.unobserved, staleObserver.disconnects];
+    return output;
+  });
+
+  expect(result).toEqual({
+    destroyedState: 'destroyed',
+    staleState: 'idle',
+    events: [],
+    destroyedCleanup: [1, 1],
+    staleCleanupBeforeDestroy: [1, 1],
+    staleCleanupAfterDestroy: [1, 1],
+  });
+});
+
+test('viewport trigger cleanup survives release failure and hana:start destroy reentrancy', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    class FakeIntersectionObserver {
+      static instances = [];
+
+      constructor(callback) {
+        Object.assign(this, {
+          callback, target: null, failUnobserve: false, unobserved: 0, disconnects: 0,
+        });
+        FakeIntersectionObserver.instances.push(this);
+      }
+
+      observe(target) { this.target = target; }
+
+      unobserve() {
+        this.unobserved += 1;
+        if (this.failUnobserve) throw new Error('observer cleanup failed');
+      }
+
+      disconnect() { this.disconnects += 1; }
+
+      enter() {
+        this.callback([{
+          target: this.target, intersectionRatio: 1, isIntersecting: true,
+        }], this);
+      }
+    }
+    window.IntersectionObserver = FakeIntersectionObserver;
+    const { annotate } = await import('/src/index.js');
+
+    const cleanupTarget = document.querySelector('#direct-target');
+    const cleanupErrors = [];
+    cleanupTarget.addEventListener('hana:error', (event) => {
+      cleanupErrors.push(event.detail.error.code);
+    });
+    const cleanupController = annotate(cleanupTarget, {
+      mark: 'underline', trigger: 'viewport', motion: 'never',
+    });
+    const cleanupObserver = FakeIntersectionObserver.instances[0];
+    cleanupObserver.failUnobserve = true;
+    cleanupController.destroy();
+    cleanupObserver.enter();
+    const failedCleanup = {
+      state: cleanupController.state,
+      errors: cleanupErrors,
+      unobserved: cleanupObserver.unobserved,
+      owned: document.querySelectorAll('[data-hana-id]').length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+
+    const reentrantTarget = document.querySelector('#selector-target');
+    const reentrantEvents = [];
+    let reentrantController;
+    reentrantTarget.addEventListener('hana:start', () => {
+      reentrantEvents.push('start');
+      reentrantController.destroy();
+    });
+    reentrantTarget.addEventListener('hana:complete', () => reentrantEvents.push('complete'));
+    reentrantController = annotate(reentrantTarget, {
+      mark: 'circle', trigger: 'viewport', motion: 'never',
+    });
+    const reentrantObserver = FakeIntersectionObserver.instances[1];
+    reentrantObserver.enter();
+    reentrantObserver.enter();
+    await Promise.resolve();
+    const reentrant = {
+      state: reentrantController.state,
+      events: reentrantEvents,
+      unobserved: reentrantObserver.unobserved,
+      disconnects: reentrantObserver.disconnects,
+      owned: document.querySelectorAll('[data-hana-id]').length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+    return { failedCleanup, reentrant };
+  });
+
+  expect(result).toEqual({
+    failedCleanup: {
+      state: 'destroyed', errors: ['HANA_STATE_RUNTIME'], unobserved: 1, owned: 0, overlays: 0,
+    },
+    reentrant: {
+      state: 'destroyed', events: ['start'], unobserved: 1, disconnects: 1, owned: 0, overlays: 0,
+    },
+  });
+});
+
+test('IntersectionObserver fallback uses load semantics before and after DOMContentLoaded', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    window.IntersectionObserver = undefined;
+    const { annotate } = await import('/src/index.js');
+    const loadedTarget = document.querySelector('#direct-target');
+    const loadedController = annotate(loadedTarget, {
+      mark: 'highlight', trigger: 'viewport', motion: 'never',
+    });
+    const afterReadyImmediate = loadedController.state;
+    await Promise.resolve();
+    const afterReadyMicrotask = loadedController.state;
+    loadedController.destroy();
+
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const doc = frame.contentDocument;
+    doc.open();
+    doc.write('<!doctype html><html><body><span id="target" style="display:inline-block">Fallback target</span></body></html>');
+    frame.contentWindow.IntersectionObserver = undefined;
+    const loadingController = annotate(doc.querySelector('#target'), {
+      mark: 'strike', trigger: 'viewport', motion: 'never',
+    });
+    const beforeReady = loadingController.state;
+    const loaded = new Promise((resolve) => {
+      doc.addEventListener('DOMContentLoaded', () => queueMicrotask(resolve), { once: true });
+    });
+    doc.close();
+    await loaded;
+    const afterFrameReady = loadingController.state;
+    loadingController.destroy();
+    frame.remove();
+    return { afterReadyImmediate, afterReadyMicrotask, beforeReady, afterFrameReady };
+  });
+
+  expect(result).toEqual({
+    afterReadyImmediate: 'idle',
+    afterReadyMicrotask: 'visible',
+    beforeReady: 'idle',
+    afterFrameReady: 'visible',
+  });
+});
+
 test('annotation lifecycle renders, dispatches exact events, transfers ARIA, and cleans resources', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');

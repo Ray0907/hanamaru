@@ -353,6 +353,7 @@ export function createAnnotation(target, rawOptions, env) {
   let generation;
   let renderer;
   let stopLayout = null;
+  let stopTrigger = null;
 
   try {
     generation = shared.registerController(id);
@@ -372,6 +373,7 @@ export function createAnnotation(target, rawOptions, env) {
   let run = null;
   let requestedVisible = false;
   let destroyed = false;
+  let triggerActive = false;
   let operationEpoch = 0;
   let activeCancelDispatchDepth = 0;
   let disconnectedEpisode = false;
@@ -391,13 +393,82 @@ export function createAnnotation(target, rawOptions, env) {
   };
   setActiveRenderer();
 
-  function acceptOperation() {
+  function acceptOperation(cleanupTrigger = true) {
+    if (cleanupTrigger) stopAutomaticTrigger(true);
     operationEpoch += 1;
     return operationEpoch;
   }
 
   function isCurrentOperation(candidate) {
     return !destroyed && candidate === operationEpoch;
+  }
+
+  function stopAutomaticTrigger(suppressFailure = false) {
+    triggerActive = false;
+    const cleanup = stopTrigger;
+    stopTrigger = null;
+    if (cleanup === null) return;
+    if (!suppressFailure) {
+      cleanup();
+      return;
+    }
+    try { cleanup(); } catch { /* Controller teardown will still release shared resources. */ }
+  }
+
+  function ownTriggerCleanup(cleanup) {
+    if (triggerActive && !destroyed) {
+      stopTrigger = cleanup;
+      return;
+    }
+    try { cleanup(); } catch { /* The trigger is already logically inactive. */ }
+  }
+
+  function acceptTriggeredShow(operation, triggerGeneration) {
+    if (!triggerActive
+      || !isCurrentOperation(operation)
+      || triggerGeneration !== generation) return;
+    stopAutomaticTrigger(true);
+    show();
+  }
+
+  function installLoadTrigger(operation, triggerGeneration) {
+    const doc = record.ownerElement.ownerDocument;
+    const start = () => acceptTriggeredShow(operation, triggerGeneration);
+    if (doc.readyState === 'loading') {
+      doc.addEventListener('DOMContentLoaded', start, { once: true });
+      ownTriggerCleanup(() => doc.removeEventListener('DOMContentLoaded', start));
+      return;
+    }
+    env.microtask(start);
+  }
+
+  function installViewportTrigger(operation, triggerGeneration) {
+    let unavailable = false;
+    const cleanup = shared.observeIntersection({
+      id,
+      target: record.ownerElement,
+      threshold: 0.25,
+      onEnter() { acceptTriggeredShow(operation, triggerGeneration); },
+      onExit() {},
+      onUnavailable() {
+        unavailable = true;
+        installLoadTrigger(operation, triggerGeneration);
+      },
+    });
+    if (unavailable) {
+      try { cleanup(); } catch { /* The fallback trigger remains authoritative. */ }
+    } else {
+      ownTriggerCleanup(cleanup);
+    }
+  }
+
+  function installAutomaticTrigger() {
+    if (options.trigger === 'manual') return;
+    triggerActive = true;
+    const operation = operationEpoch;
+    const triggerGeneration = generation;
+    if (options.trigger === 'load') installLoadTrigger(operation, triggerGeneration);
+    else installViewportTrigger(operation, triggerGeneration);
   }
 
   function setActiveRenderer() {
@@ -794,7 +865,7 @@ export function createAnnotation(target, rawOptions, env) {
 
   function destroy() {
     if (destroyed) return controller;
-    acceptOperation();
+    acceptOperation(false);
     const wasActive = state === 'showing' || state === 'visible'
       || activeCancelDispatchDepth > 0;
     destroyed = true;
@@ -802,6 +873,7 @@ export function createAnnotation(target, rawOptions, env) {
     const cleanup = (operation) => {
       try { operation(); } catch (error) { failure ??= error; }
     };
+    cleanup(() => stopAutomaticTrigger());
     cleanup(() => stopLayout?.());
     cleanup(() => renderer.destroy());
     forceRemoveRenderer(renderer, knownOwners);
@@ -821,9 +893,11 @@ export function createAnnotation(target, rawOptions, env) {
 
   try {
     bindLayout();
+    installAutomaticTrigger();
     commitRenderer(renderer);
   } catch (error) {
     activeRenderers.delete(controller);
+    try { stopAutomaticTrigger(); } catch { /* Preserve binding or trigger failure. */ }
     cleanupUncommittedRenderer(renderer);
     try { shared.releaseController(id); } catch { /* Preserve binding failure. */ }
     try { lease.release(); } catch { /* Preserve binding failure. */ }
