@@ -326,6 +326,76 @@ test('a hana:cancel destroy prevents outer replay from creating a pending run', 
   );
 });
 
+test('hana:cancel refresh and update inherit a coherent hidden state from hide and replay', async () => {
+  for (const action of ['hide', 'replay']) {
+    for (const listenerAction of ['refresh', 'update']) {
+      const { controller, environment } = create();
+      controller.show();
+      const cancelledRun = controller.finished;
+      let listenerState = null;
+      let listenerRun = null;
+      environment.setEventHandler((event) => {
+        if (event.type !== 'hana:cancel' || event.detail.reason !== action) return;
+        listenerState = controller.state;
+        listenerRun = controller.finished;
+        if (listenerAction === 'refresh') controller.refresh();
+        else controller.update({ note: 'listener update' });
+      });
+
+      controller[action]();
+
+      await assert.rejects(
+        cancelledRun,
+        (error) => error instanceof DOMException && error.name === 'AbortError',
+        `${action} -> ${listenerAction}`,
+      );
+      assert.equal(listenerState, 'hidden', `${action} -> ${listenerAction}`);
+      assert.equal(listenerRun, cancelledRun, `${action} -> ${listenerAction}`);
+      assert.equal(controller.finished, cancelledRun, `${action} -> ${listenerAction}`);
+      assert.equal(controller.state, 'hidden', `${action} -> ${listenerAction}`);
+      assert.equal(
+        environment.calls.filter((call) => Array.isArray(call) && call[0] === 'animate').length,
+        1,
+        `${action} -> ${listenerAction}`,
+      );
+      controller.destroy();
+    }
+  }
+});
+
+test('a hana:cancel show can replace either hide or replay without stale outer work', async () => {
+  for (const action of ['hide', 'replay']) {
+    const { controller, environment } = create();
+    controller.show();
+    const cancelledRun = controller.finished;
+    let replacementRun = null;
+    environment.setEventHandler((event) => {
+      if (event.type !== 'hana:cancel' || event.detail.reason !== action) return;
+      assert.equal(controller.state, 'hidden');
+      controller.show();
+      replacementRun = controller.finished;
+    });
+
+    controller[action]();
+
+    await assert.rejects(
+      cancelledRun,
+      (error) => error instanceof DOMException && error.name === 'AbortError',
+    );
+    assert.notEqual(replacementRun, cancelledRun);
+    assert.equal(controller.finished, replacementRun);
+    assert.equal(controller.state, 'showing');
+    environment.animation.resolve();
+    await replacementRun;
+    assert.equal(controller.state, 'visible');
+    assert.equal(
+      environment.calls.filter((call) => Array.isArray(call) && call[0] === 'animate').length,
+      2,
+    );
+    controller.destroy();
+  }
+});
+
 test('non-suspended transitions replay every live state with a fresh run', async () => {
   for (const startingState of ['idle', 'showing', 'visible', 'hidden']) {
     const { controller, environment } = create();

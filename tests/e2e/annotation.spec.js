@@ -247,6 +247,80 @@ test('hana:cancel destroy stops outer hide and replay continuations', async ({ p
   });
 });
 
+test('hana:cancel refresh and update take over from a coherent hidden state', async ({ page }) => {
+  const results = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const output = [];
+
+    for (const action of ['hide', 'replay']) {
+      for (const listenerAction of ['refresh', 'update']) {
+        const target = document.createElement('span');
+        target.textContent = `${action} ${listenerAction} target`;
+        target.style.display = 'inline-block';
+        document.querySelector('#arena').append(target);
+        const controller = annotate(target, {
+          mark: 'circle', note: 'Pending note', accessible: true, duration: 800,
+        });
+        controller.show();
+        const cancelledRun = controller.finished;
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        let listenerState = null;
+        let listenerSameRun = null;
+        target.addEventListener('hana:cancel', (event) => {
+          if (event.detail.reason !== action) return;
+          listenerState = controller.state;
+          listenerSameRun = controller.finished === cancelledRun;
+          if (listenerAction === 'refresh') controller.refresh();
+          else controller.update({ note: 'Listener update' });
+        });
+
+        controller[action]();
+        const rejection = await cancelledRun.then(() => null, (error) => error.name);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const group = document.querySelector('.hana-annotation');
+        const note = document.querySelector('.hana-note');
+        output.push({
+          action,
+          listenerAction,
+          listenerState,
+          listenerSameRun,
+          sameRun: controller.finished === cancelledRun,
+          rejection,
+          state: controller.state,
+          groupHidden: group.hasAttribute('hidden'),
+          groupDisplay: getComputedStyle(group).display,
+          noteHidden: note.hidden || getComputedStyle(note).visibility === 'hidden',
+          description: target.getAttribute('aria-describedby'),
+          owned: document.querySelectorAll('[data-hana-id]').length,
+        });
+        controller.destroy();
+        target.remove();
+      }
+    }
+    return output;
+  });
+
+  expect(results).toEqual([
+    ['hide', 'refresh'],
+    ['hide', 'update'],
+    ['replay', 'refresh'],
+    ['replay', 'update'],
+  ].map(([action, listenerAction]) => ({
+    action,
+    listenerAction,
+    listenerState: 'hidden',
+    listenerSameRun: true,
+    sameRun: true,
+    rejection: 'AbortError',
+    state: 'hidden',
+    groupHidden: true,
+    groupDisplay: 'none',
+    noteHidden: true,
+    description: null,
+    owned: 2,
+  })));
+});
+
 test('selector replacement while visibility is not requested recovers hidden without drawing', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');

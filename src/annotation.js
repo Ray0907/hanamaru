@@ -373,6 +373,7 @@ export function createAnnotation(target, rawOptions, env) {
   let requestedVisible = false;
   let destroyed = false;
   let operationEpoch = 0;
+  let activeCancelDispatchDepth = 0;
   let disconnectedEpisode = false;
   let renderabilityEpisode = false;
   const resolutionFailures = new WeakSet();
@@ -634,7 +635,12 @@ export function createAnnotation(target, rawOptions, env) {
       rejectRun(abortError());
     }
     if (notify) {
-      dispatch(env, record.ownerElement, 'hana:cancel', { controller, reason });
+      activeCancelDispatchDepth += 1;
+      try {
+        dispatch(env, record.ownerElement, 'hana:cancel', { controller, reason });
+      } finally {
+        activeCancelDispatchDepth -= 1;
+      }
     }
   }
 
@@ -643,9 +649,10 @@ export function createAnnotation(target, rawOptions, env) {
     const operation = acceptOperation();
     const wasActive = state === 'showing' || state === 'visible';
     requestedVisible = false;
+    state = 'hidden';
+    forceHideRenderer(renderer, knownOwners);
     cancelPending('hide', wasActive);
     if (!isCurrentOperation(operation)) return controller;
-    state = 'hidden';
     try {
       renderer.hide();
     } catch (error) {
@@ -660,6 +667,9 @@ export function createAnnotation(target, rawOptions, env) {
     if (destroyed) return controller;
     const operation = acceptOperation();
     const wasActive = state === 'showing' || state === 'visible';
+    requestedVisible = false;
+    state = 'hidden';
+    forceHideRenderer(renderer, knownOwners);
     cancelPending('replay', wasActive);
     if (!isCurrentOperation(operation)) return controller;
     startDeferredRun();
@@ -764,7 +774,8 @@ export function createAnnotation(target, rawOptions, env) {
   function destroy() {
     if (destroyed) return controller;
     acceptOperation();
-    const wasActive = state === 'showing' || state === 'visible';
+    const wasActive = state === 'showing' || state === 'visible'
+      || activeCancelDispatchDepth > 0;
     destroyed = true;
     let failure = null;
     const cleanup = (operation) => {
