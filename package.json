@@ -1,0 +1,32 @@
+{
+  "name": "hanamaru-annotations",
+  "version": "0.1.0",
+  "description": "A reliable, human annotation runtime for the DOM",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.13.0 <25"
+  },
+  "exports": {
+    ".": "./dist/hanamaru.esm.js",
+    "./style.css": "./dist/hanamaru.css"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "check:dist": "node scripts/check-size.mjs",
+    "test:unit": "node scripts/test-unit.mjs",
+    "test:e2e": "playwright test",
+    "verify": "npm run test:unit && npm run build && npm run check:dist && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@playwright/test": "^1.55.0",
+    "esbuild": "^0.25.0"
+  }
+}
