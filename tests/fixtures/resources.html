@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Shared document resources fixture</title>
+    <style>
+      #outer-scroll { overflow-y: auto; height: 180px; }
+      #inner-scroll { overflow-x: scroll; width: 260px; }
+      #scroll-content { min-height: 420px; min-width: 520px; }
+      #move-scroll { overflow: overlay; height: 120px; }
+      #move-scroll > div { min-height: 280px; }
+    </style>
+  </head>
+  <body>
+    <main id="scope-root">
+      <div id="outer-scroll">
+        <div id="inner-scroll">
+          <div id="scroll-content">
+            <div id="direct-container"><p id="direct-target">Direct target</p></div>
+            <div id="selector-container"><p id="selector-target">Selector target</p></div>
+            <div id="element-locator-container"><section id="element-locator">An element locator phrase</section></div>
+            <div id="selector-locator-container"><section id="selector-locator">A selector locator phrase</section></div>
+            <p id="range-owner"><span id="range-text">Native range target</span></p>
+          </div>
+        </div>
+      </div>
+      <div id="move-scroll"><div id="move-destination"></div></div>
+      <aside id="unrelated-scope"><span id="unrelated-target">Unrelated target</span></aside>
+    </main>
+    <div id="rendered-note">Rendered note</div>
+  </body>
+</html>
