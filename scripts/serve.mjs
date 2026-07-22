@@ -7,7 +7,7 @@ const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
+  '.json': 'application/json',
 };
 
 function notFound(response) {
@@ -28,9 +28,7 @@ export async function createStaticServer({ root = process.cwd(), port = 4173 } =
       return;
     }
 
-    const relativePath = pathname === '/'
-      ? (await exists(path.join(resolvedRoot, 'demo', 'index.html')) ? 'demo/index.html' : 'index.html')
-      : pathname.replace(/^\/+/, '');
+    const relativePath = pathname === '/' ? 'demo/index.html' : pathname.replace(/^\/+/, '');
     const filePath = path.resolve(resolvedRoot, relativePath);
 
     if (filePath !== resolvedRoot && !filePath.startsWith(rootPrefix)) {
@@ -70,12 +68,4 @@ if (isDirectExecution) {
   const { server, url } = await createStaticServer();
   console.log(url);
   process.once('SIGTERM', () => server.close(() => process.exit(0)));
-}
-
-async function exists(filePath) {
-  try {
-    return (await stat(filePath)).isFile();
-  } catch {
-    return false;
-  }
 }
