@@ -132,6 +132,18 @@ test('keeps the narrow page contained while code remains locally scrollable', as
   expect(containment.codeOverflow).toBe('auto');
 });
 
+test('exposes valid named proof, source, and action semantics with no serious axe findings', async ({ page }) => {
+  await page.goto('/');
+
+  await expect(page.getByRole('figure', { name: 'Annotation proof specimen' })).toHaveCount(1);
+  await expect(page.getByRole('region', { name: 'Source proof' })).toHaveCount(1);
+  await expect(page.getByRole('region', { name: 'Try Hanamaru locally' })).toHaveCount(1);
+
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations.filter(({ impact }) => impact === 'serious' || impact === 'critical'))
+    .toEqual([]);
+});
+
 test('keeps the primary correction stamp inside the 1440 by 900 first viewport', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');

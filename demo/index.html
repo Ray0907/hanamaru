@@ -51,7 +51,10 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
                 notes can move, and the source stays untouched.
               </p>
 
-              <div class="demo-specimen" aria-label="Annotation proof specimen">
+              <figure class="demo-specimen" aria-labelledby="demo-specimen-caption">
+                <figcaption id="demo-specimen-caption" class="demo-sr-only">
+                  Annotation proof specimen
+                </figcaption>
                 <span class="demo-specimen__folio" aria-hidden="true">原稿</span>
                 <p>
                   A reliable annotation should follow the phrase it explains—not the box it
@@ -61,7 +64,7 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
                 <p class="demo-redline-note">
                   <span aria-hidden="true">↳</span> geometry is evidence, not decoration
                 </p>
-              </div>
+              </figure>
 
               <dl class="demo-registration-data" aria-label="Runtime registration data">
                 <div><dt>Targets</dt><dd>Element · Range · exact text</dd></div>
@@ -72,10 +75,10 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
 
             <aside class="demo-code-tray" aria-label="Synchronized source proof">
               <div class="demo-code-tray__heading">
-                <span>Source proof</span>
+                <span id="demo-source-proof-label">Source proof</span>
                 <span>ESM / public build</span>
               </div>
-              <pre data-demo-code-region tabindex="0" aria-label="Hanamaru source example"><code><span class="demo-code-dim">import</span> { annotate } <span class="demo-code-dim">from</span>
+              <pre data-demo-code-region tabindex="0" role="region" aria-labelledby="demo-source-proof-label"><code><span class="demo-code-dim">import</span> { annotate } <span class="demo-code-dim">from</span>
 <span class="demo-code-string">'./dist/hanamaru.esm.js'</span>
 
 <span class="demo-code-dim">const</span> note = annotate(
@@ -99,7 +102,7 @@ note.show()</code></pre>
           <span class="demo-registration-cross demo-registration-cross--south" aria-hidden="true"></span>
         </div>
 
-        <div class="demo-actions" aria-label="Try Hanamaru locally">
+        <section class="demo-actions" aria-label="Try Hanamaru locally">
           <a class="demo-stamp demo-stamp--primary" href="#playground">Open Live Playground</a>
           <div class="demo-starter-action">
             <button class="demo-stamp demo-stamp--secondary" type="button" data-demo-copy>
@@ -112,7 +115,7 @@ note.show()</code></pre>
             </label>
           </div>
           <p class="demo-status" role="status" aria-live="polite">Local proof ready.</p>
-        </div>
+        </section>
       </section>
 
       <section id="quick-start" class="demo-doc-section" aria-labelledby="quick-start-title">
