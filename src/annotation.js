@@ -18,6 +18,7 @@ const TRIGGERS = new Set(['manual', 'load', 'viewport']);
 const MOTIONS = new Set(['system', 'never']);
 const KEYS = new Set(['mark', 'note', 'placement', 'trigger', 'accessible', 'seed', 'duration', 'motion']);
 const activeRenderers = new WeakMap();
+const pausedControllers = new WeakSet();
 const pendingRendererMounts = new WeakMap();
 let nextAnnotationId = 0;
 
@@ -330,10 +331,12 @@ export function annotate(target, options) {
 export function pauseAnnotationRun(controller) {
   const active = activeRenderers.get(controller);
   if (active === undefined) return;
+  pausedControllers.add(controller);
   try { active.renderer.pause(); } catch (error) { active.onFailure(error); }
 }
 
 export function resumeAnnotationRun(controller) {
+  pausedControllers.delete(controller);
   const active = activeRenderers.get(controller);
   if (active === undefined) return;
   try { active.renderer.resume(); } catch (error) { active.onFailure(error); }
@@ -480,6 +483,7 @@ export function createAnnotation(target, rawOptions, env) {
     if (!isCurrentOperation(operation)
       || activeRun === null || activeRun !== run || activeRun.settled) return;
     activeRun.settled = true;
+    pausedControllers.delete(controller);
     state = 'visible';
     activeRun.resolve();
     dispatch(env, record.ownerElement, 'hana:complete', { controller, state });
@@ -495,6 +499,7 @@ export function createAnnotation(target, rawOptions, env) {
     const error = stateError(cause);
     if (destroyed) return error;
     requestedVisible ||= state === 'showing' || state === 'visible';
+    pausedControllers.delete(controller);
     try { renderer.hide(); } catch { /* Preserve the originating runtime failure. */ }
     forceHideRenderer(renderer, knownOwners);
     rejectRun(error);
@@ -631,6 +636,15 @@ export function createAnnotation(target, rawOptions, env) {
       if (!animate) return;
       const reduced = env.reducedMotion(options);
       const motion = renderer.animate(reduced ? 0 : options.duration);
+      if (pausedControllers.has(controller)) {
+        try {
+          renderer.pause();
+        } catch (error) {
+          if (isCurrentOperation(operation)) handleRuntimeFailure(error);
+          return;
+        }
+        if (!isCurrentOperation(operation)) return;
+      }
       if (reduced && synchronous) {
         motion.finished.catch((error) => {
           if (isCurrentOperation(operation) && error?.name !== 'AbortError') {
@@ -681,6 +695,7 @@ export function createAnnotation(target, rawOptions, env) {
   function reportTargetFailure(error) {
     requestedVisible ||= state === 'showing' || state === 'visible';
     state = 'suspended';
+    pausedControllers.delete(controller);
     try {
       renderer.hide();
     } catch (rendererError) {
@@ -750,6 +765,7 @@ export function createAnnotation(target, rawOptions, env) {
 
   function hide() {
     if (destroyed) return controller;
+    pausedControllers.delete(controller);
     const operation = acceptOperation();
     const wasActive = state === 'showing' || state === 'visible';
     requestedVisible = false;
@@ -776,6 +792,7 @@ export function createAnnotation(target, rawOptions, env) {
 
   function replay() {
     if (destroyed) return controller;
+    pausedControllers.delete(controller);
     const operation = acceptOperation();
     const wasActive = state === 'showing' || state === 'visible';
     requestedVisible = false;
@@ -891,6 +908,7 @@ export function createAnnotation(target, rawOptions, env) {
 
   function destroy() {
     if (destroyed) return controller;
+    pausedControllers.delete(controller);
     acceptOperation(false);
     const wasActive = state === 'showing' || state === 'visible'
       || activeCancelDispatchDepth > 0;

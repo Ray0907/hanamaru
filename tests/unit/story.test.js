@@ -24,6 +24,7 @@ function fakeEnvironment({ reducedMotion = false } = {}) {
   const events = [];
   const annotations = [];
   const failures = new Map();
+  const refreshedOwners = new Map();
   let clock = 0;
   let nextTimer = 0;
   const timers = new Map();
@@ -86,6 +87,7 @@ function fakeEnvironment({ reducedMotion = false } = {}) {
     setAnnotationHandler(handler) { annotationHandler = handler; },
     setEventHandler(handler) { eventHandler = handler; },
     failTarget(target, error) { failures.set(target, error); },
+    refreshOwner(target, owner) { refreshedOwners.set(target, owner); },
     clearTargetFailure(target) { failures.delete(target); },
     advance(milliseconds) {
       const end = clock + milliseconds;
@@ -121,6 +123,7 @@ function fakeEnvironment({ reducedMotion = false } = {}) {
           refresh() {
             calls.push(['record:refresh', target]);
             if (failures.has(target)) throw failures.get(target);
+            if (refreshedOwners.has(target)) this.ownerElement = refreshedOwners.get(target);
             return this;
           },
         };
@@ -290,6 +293,44 @@ test('play sequence advances in order and resolves at complete', async () => {
   assert.deepEqual(environment.events.at(-1).detail, { controller: story, state: 'complete' });
 });
 
+test('play refreshes the first target once before start and dispatches from its current owner', () => {
+  const environment = fakeEnvironment();
+  const currentOwner = { target: 'replacement-first' };
+  const story = createStory(steps(), {}, environment.env);
+  environment.refreshOwner('first', currentOwner);
+  environment.calls.length = 0;
+
+  story.play();
+
+  assert.deepEqual(environment.events.slice(0, 2).map(({ type, owner }) => [type, owner]), [
+    ['hana:start', currentOwner],
+    ['hana:step', currentOwner],
+  ]);
+  assert.equal(
+    environment.calls.filter(([name, target]) => name === 'record:refresh' && target === 'first').length,
+    1,
+  );
+  assert.deepEqual(environment.calls.slice(0, 2), [
+    ['record:refresh', 'first'],
+    ['annotation:show', 'first'],
+  ]);
+
+  story.cancel();
+  const replayOwner = { target: 'replay-first' };
+  environment.refreshOwner('first', replayOwner);
+  environment.calls.length = 0;
+  environment.events.length = 0;
+  story.replay();
+  assert.deepEqual(environment.events.slice(0, 2).map(({ type, owner }) => [type, owner]), [
+    ['hana:start', replayOwner],
+    ['hana:step', replayOwner],
+  ]);
+  assert.equal(
+    environment.calls.filter(([name, target]) => name === 'record:refresh' && target === 'first').length,
+    1,
+  );
+});
+
 test('gaps use the configured non-negative duration', async () => {
   const environment = fakeEnvironment();
   const story = createStory(steps(), { gap: 42 }, environment.env);
@@ -429,7 +470,7 @@ test('replay aborts a pending run, clears all marks, preflights every target, an
     ['annotation:hide', 'second'],
     ['record:refresh', 'first'],
     ['record:refresh', 'second'],
-    ['record:refresh', 'first'],
+    ['annotation:show', 'first'],
   ]);
   assert.deepEqual(environment.annotations.map(({ state }) => state), ['showing', 'hidden']);
   assert.equal(environment.events.filter(({ type }) => type === 'hana:cancel').at(-1).detail.reason, 'replay');
@@ -490,6 +531,7 @@ test('current target loss cancels with its typed error and leaves every mark unt
   await assert.rejects(run, (thrown) => thrown === error);
   assert.deepEqual(environment.annotations.map(({ state }) => state), ['idle', 'idle']);
   assert.equal(environment.timerCount, 0);
+  assert.deepEqual(environment.events.map(({ type }) => type), ['hana:error']);
   assert.deepEqual(environment.events.at(-1).detail, { controller: story, error, index: 0 });
 });
 

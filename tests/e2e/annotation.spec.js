@@ -667,6 +667,40 @@ test('annotation lifecycle renders, dispatches exact events, transfers ARIA, and
   expect(result.final).toEqual({ state: 'destroyed', owned: 0, overlay: 0, description: 'author-token' });
 });
 
+test('private pause intent survives until same-task show motion is created', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const result = await page.evaluate(async () => {
+    const { annotate, pauseAnnotationRun, resumeAnnotationRun } = await import('/src/annotation.js');
+    const controller = annotate('#direct-target', {
+      mark: 'circle', note: 'Paused before the frame', duration: 120,
+    });
+
+    controller.show();
+    const run = controller.finished;
+    pauseAnnotationRun(controller);
+    await new Promise((resolve) => setTimeout(resolve, 260));
+    const paused = {
+      state: controller.state,
+      sameRun: controller.finished === run,
+      settled: await Promise.race([
+        run.then(() => true, () => true),
+        new Promise((resolve) => setTimeout(() => resolve(false), 0)),
+      ]),
+    };
+
+    resumeAnnotationRun(controller);
+    await run;
+    const resumed = { state: controller.state, sameRun: controller.finished === run };
+    controller.destroy();
+    return { paused, resumed };
+  });
+
+  expect(result).toEqual({
+    paused: { state: 'showing', sameRun: true, settled: false },
+    resumed: { state: 'visible', sameRun: true },
+  });
+});
+
 test('reduced motion reaches final styles and no-note layout stays connector-free', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const result = await page.evaluate(async () => {

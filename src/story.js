@@ -215,14 +215,17 @@ export function createStory(steps, rawOptions = {}, env) {
     return error;
   }
 
-  function startStep(operation, index) {
+  function startStep(operation, index, alreadyRefreshed = false) {
     if (!isCurrent(operation) || state !== 'playing') return;
-    phase = { kind: 'before-step', index };
-    try {
-      prepared[index].record.refresh();
-    } catch (error) {
-      failRun(operation, index, error);
-      return;
+    phase = { kind: 'before-step', index, refreshed: alreadyRefreshed };
+    if (!alreadyRefreshed) {
+      try {
+        prepared[index].record.refresh();
+        phase.refreshed = true;
+      } catch (error) {
+        failRun(operation, index, error);
+        return;
+      }
     }
     if (!isCurrent(operation) || state !== 'playing'
       || phase?.kind !== 'before-step' || phase.index !== index) return;
@@ -267,16 +270,25 @@ export function createStory(steps, rawOptions = {}, env) {
     }
   }
 
-  function beginRun() {
+  function beginRun({ firstAlreadyRefreshed = false } = {}) {
     operationEpoch += 1;
     const operation = operationEpoch;
     run = createDeferred();
     state = 'playing';
-    phase = { kind: 'before-step', index: 0 };
+    phase = { kind: 'before-step', index: 0, refreshed: firstAlreadyRefreshed };
+    if (!firstAlreadyRefreshed) {
+      try {
+        prepared[0].record.refresh();
+        phase.refreshed = true;
+      } catch (error) {
+        failRun(operation, 0, error);
+        return;
+      }
+    }
     dispatch('hana:start', { controller, state });
     if (isCurrent(operation) && state === 'playing'
       && phase?.kind === 'before-step' && phase.index === 0) {
-      startStep(operation, 0);
+      startStep(operation, 0, true);
     }
   }
 
@@ -313,7 +325,9 @@ export function createStory(steps, rawOptions = {}, env) {
     if (state !== 'paused') return controller;
     state = 'playing';
     const operation = operationEpoch;
-    if (phase?.kind === 'before-step') startStep(operation, phase.index);
+    if (phase?.kind === 'before-step') {
+      startStep(operation, phase.index, phase.refreshed);
+    }
     else if (phase?.kind === 'before-annotation') startAnnotation(operation, phase.index);
     else if (phase?.kind === 'annotation' && !phase.mounting) {
       const index = phase.index;
@@ -402,7 +416,7 @@ export function createStory(steps, rawOptions = {}, env) {
       if (!isCurrent(operation)) return controller;
     }
     if (!isCurrent(operation)) return controller;
-    beginRun();
+    beginRun({ firstAlreadyRefreshed: true });
     return controller;
   }
 
