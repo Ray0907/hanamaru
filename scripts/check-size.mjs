@@ -3,24 +3,44 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { constants, gzipSync } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
 
-const executeFile = promisify(execFile);
 const distributionFiles = ['hanamaru.esm.js', 'hanamaru.iife.js'];
 
-export function npmExecutableFor(platform) {
-  return platform === 'win32' ? 'npm.cmd' : 'npm';
+export function npmInvocationFor(platform = process.platform, env = process.env) {
+  if (platform === 'win32') {
+    return {
+      file: env.ComSpec || 'cmd.exe',
+      args: ['/d', '/s', '/c', 'npm.cmd ls --omit=dev --json'],
+    };
+  }
+  return { file: 'npm', args: ['ls', '--omit=dev', '--json'] };
 }
 
-async function assertNoProductionPackages(root) {
+function executeNpm(invocation, root, execFileImpl) {
+  return new Promise((resolve, reject) => {
+    execFileImpl(invocation.file, invocation.args, { cwd: root }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function assertNoProductionPackages(root, options) {
   let result;
   try {
-    result = await executeFile(npmExecutableFor(process.platform), ['ls', '--omit=dev', '--json'], { cwd: root });
+    result = await executeNpm(
+      npmInvocationFor(options.platform, options.env),
+      root,
+      options.execFileImpl ?? execFile,
+    );
   } catch {
     throw new Error('dist-check: npm ls --omit=dev failed');
   }
 
-  const tree = JSON.parse(result.stdout);
+  const tree = JSON.parse(result);
   if (Object.keys(tree.dependencies ?? {}).length > 0) {
     throw new Error('dist-check: production dependency tree must be empty');
   }
@@ -37,7 +57,7 @@ export async function checkDistribution(root = process.cwd(), options = {}) {
   }
 
   if (options.checkNpmTree !== false) {
-    await assertNoProductionPackages(projectRoot);
+    await assertNoProductionPackages(projectRoot, options);
   }
 
   const css = await readFile(path.join(distributionDirectory, 'hanamaru.css'));

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { checkDistribution, npmExecutableFor } from '../../scripts/check-size.mjs';
+import { checkDistribution, npmInvocationFor } from '../../scripts/check-size.mjs';
 
 async function createDistribution(pkg = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-size-'));
@@ -48,9 +48,37 @@ test('checkDistribution returns ESM then IIFE metric rows', async (t) => {
   assert.deepEqual(rows.map((row) => row.file), ['hanamaru.esm.js', 'hanamaru.iife.js']);
 });
 
-test('npmExecutableFor selects the Windows command shim only on win32', () => {
-  assert.equal(npmExecutableFor('win32'), 'npm.cmd');
-  assert.equal(npmExecutableFor('linux'), 'npm');
+test('checkDistribution runs npm through cmd.exe on Windows', async (t) => {
+  const root = await createDistribution({});
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let invocation;
+
+  const rows = await checkDistribution(root, {
+    platform: 'win32',
+    env: { ComSpec: 'C:\\Windows\\System32\\cmd.exe' },
+    execFileImpl(file, args, options, callback) {
+      invocation = { file, args, options };
+      callback(null, JSON.stringify({}), '');
+    },
+  });
+
+  assert.deepEqual(invocation, {
+    file: 'C:\\Windows\\System32\\cmd.exe',
+    args: ['/d', '/s', '/c', 'npm.cmd ls --omit=dev --json'],
+    options: { cwd: root },
+  });
+  assert.equal(rows.length, 2);
+});
+
+test('npmInvocationFor uses a static command on each platform', () => {
+  assert.deepEqual(npmInvocationFor('linux'), {
+    file: 'npm',
+    args: ['ls', '--omit=dev', '--json'],
+  });
+  assert.deepEqual(npmInvocationFor('win32', {}), {
+    file: 'cmd.exe',
+    args: ['/d', '/s', '/c', 'npm.cmd ls --omit=dev --json'],
+  });
 });
 
 test('checkDistribution validates the actual production npm tree by default', async (t) => {
