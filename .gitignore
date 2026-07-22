@@ -5,7 +5,7 @@ playwright-report/
 test-results/
 .superpowers/
 .impeccable/
+.worktrees/
 work/
 outputs/
 .DS_Store
-
