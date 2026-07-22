@@ -773,12 +773,15 @@
   width: 100%;
   min-width: 0;
   margin-top: 1rem;
-  overflow: visible;
+  padding-bottom: 0.7rem;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-color: var(--demo-red) rgb(31 39 51 / 12%);
 }
 
 .demo-reflow-specimen {
   width: 760px;
-  max-width: 100%;
+  max-width: none;
   min-height: 10rem;
   padding: 1.25rem clamp(1rem, 4vw, 2rem);
   border-top: 3px solid var(--demo-ink);
@@ -878,7 +881,7 @@
 }
 
 .demo-mode-work .demo-mode-state {
-  margin-top: 1.5rem;
+  margin-top: clamp(5.5rem, 8vw, 7.5rem);
   padding-top: 0.65rem;
   border-top: 1px solid rgb(255 254 249 / 28%);
   color: var(--demo-yellow);

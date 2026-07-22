@@ -9,6 +9,43 @@ function capturePageFailures(page) {
   return failures;
 }
 
+function overlaps(first, second, inset = 0) {
+  return first.left < second.right - inset
+    && first.right > second.left + inset
+    && first.top < second.bottom - inset
+    && first.bottom > second.top + inset;
+}
+
+async function clientRect(locator) {
+  return locator.evaluate((node) => {
+    const { left, right, top, bottom } = node.getBoundingClientRect();
+    return { left, right, top, bottom };
+  });
+}
+
+async function expectActiveElementInsideViewport(page, locator) {
+  await expect(locator).toBeFocused();
+  await expect.poll(() => locator.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.top >= 0 && rect.bottom <= innerHeight;
+  })).toBe(true);
+  const result = await locator.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const style = getComputedStyle(node);
+    return {
+      bottom: rect.bottom,
+      height: innerHeight,
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth,
+      top: rect.top,
+    };
+  });
+  expect(result.top).toBeGreaterThanOrEqual(0);
+  expect(result.bottom).toBeLessThanOrEqual(result.height);
+  expect(result.outlineStyle).not.toBe('none');
+  expect(Number.parseFloat(result.outlineWidth)).toBeGreaterThanOrEqual(3);
+}
+
 async function noteAndConnector(page, mark) {
   const note = page.locator('.hana-note:not(.hana-is-hidden)', {
     hasText: 'Placed again after reflow.',
@@ -191,3 +228,178 @@ test('Task 22 controls stay contained and practical at 390px', async ({ page }) 
   }
   expect(failures).toEqual([]);
 });
+
+test('supporting notes leave with offscreen targets and redraw without collisions or leaks', async ({ page }) => {
+  const failures = capturePageFailures(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+
+  const ruler = page.locator('[data-demo-reflow-control]');
+  await ruler.scrollIntoViewIfNeeded();
+  await ruler.fill('320');
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)', {
+    hasText: 'Placed again after reflow.',
+  })).toBeVisible();
+
+  const reliability = page.getByRole('region', { name: 'Reliability docket' });
+  await reliability.scrollIntoViewIfNeeded();
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
+
+  await page.getByRole('tab', { name: 'JSON', exact: true }).click();
+  await page.getByRole('button', { name: 'Apply active mode' }).click();
+  const note = page.locator('.hana-note:not(.hana-is-hidden)', {
+    hasText: 'Parsed locally, rendered through annotate().',
+  });
+  await expect(note).toBeVisible();
+  const [noteRect, headingRect, targetRect] = await Promise.all([
+    clientRect(note),
+    clientRect(page.locator('#mode-proof-title')),
+    clientRect(page.locator('[data-demo-mode-target]')),
+  ]);
+  expect(overlaps(noteRect, headingRect)).toBe(false);
+  expect(overlaps(noteRect, targetRect)).toBe(false);
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(1);
+
+  await page.locator('#quick-start').scrollIntoViewIfNeeded();
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
+  await page.locator('[data-demo-mode-target]').scrollIntoViewIfNeeded();
+  await expect(note).toBeVisible();
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(1);
+  expect(failures).toEqual([]);
+});
+
+test('390px supporting notes stay with visible proof copy and never cover its heading', async ({ page }) => {
+  const failures = capturePageFailures(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.getByRole('tab', { name: 'JSON', exact: true }).click();
+  await page.getByRole('button', { name: 'Apply active mode' }).click();
+
+  const note = page.locator('.hana-note:not(.hana-is-hidden)', {
+    hasText: 'Parsed locally, rendered through annotate().',
+  });
+  await expect(note).toBeVisible();
+  const [noteRect, headingRect, targetRect, stateRect] = await Promise.all([
+    clientRect(note),
+    clientRect(page.locator('#mode-proof-title')),
+    clientRect(page.locator('[data-demo-mode-target]')),
+    clientRect(page.locator('[data-demo-mode-state]')),
+  ]);
+  expect(overlaps(noteRect, headingRect)).toBe(false);
+  expect(overlaps(noteRect, targetRect)).toBe(false);
+  expect(overlaps(noteRect, stateRect)).toBe(false);
+
+  await page.getByRole('region', { name: 'Reliability docket' }).scrollIntoViewIfNeeded();
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  expect(failures).toEqual([]);
+});
+
+test('390px ruler preserves the exact 320 to 760 measure inside a contained preview', async ({ page }) => {
+  const failures = capturePageFailures(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  const ruler = page.locator('[data-demo-reflow-control]');
+  const specimen = page.locator('[data-demo-reflow-specimen]');
+  const stage = page.locator('.demo-reflow-stage');
+  const target = page.locator('[data-demo-reflow-target]');
+  await ruler.scrollIntoViewIfNeeded();
+  await expect(target).toHaveCount(1);
+
+  for (const width of [320, 400, 540, 760]) {
+    await ruler.fill(String(width));
+    await expect.poll(async () => Math.round((await specimen.boundingBox()).width)).toBe(width);
+    await expect(page.locator('[data-demo-reflow-value]')).toHaveText(`${width}px`);
+    await expect(page.locator('.demo-reflow-specimen__register'))
+      .toHaveText(`${width} / responsive copy measure`);
+    await expect(page.getByRole('status')).toHaveText(`Proof remeasured at ${width}px.`);
+    const containment = await stage.evaluate((node) => ({
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+      overflowX: getComputedStyle(node).overflowX,
+    }));
+    expect(containment.scrollWidth).toBeGreaterThanOrEqual(width);
+    expect(containment.clientWidth).toBeLessThanOrEqual(366);
+    expect(containment.overflowX).toBe('auto');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await expect.poll(() => target.evaluate((node) => {
+      const stageRect = node.closest('.demo-reflow-stage').getBoundingClientRect();
+      return [...node.getClientRects()].some((rect) => (
+        rect.left >= stageRect.left && rect.right <= stageRect.right
+      ));
+    })).toBe(true);
+  }
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)', {
+    hasText: 'Placed again after reflow.',
+  })).toBeVisible();
+  expect(failures).toEqual([]);
+});
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'mobile', width: 390, height: 844 },
+]) {
+  test(`keyboard mode apply leaves visible focus and a logical next Tab on ${viewport.name}`, async ({ page }) => {
+    const failures = capturePageFailures(page);
+    await page.setViewportSize(viewport);
+    await page.goto('/');
+    await page.getByRole('tab', { name: 'JSON', exact: true }).click();
+    const apply = page.getByRole('button', { name: 'Apply active mode' });
+    await apply.focus();
+    await apply.press('Enter');
+    const state = page.locator('[data-demo-mode-state]');
+    await expectActiveElementInsideViewport(page, state);
+    await state.press('Tab');
+    await expect(page.locator('.demo-inline-code')).toBeFocused();
+    expect(failures).toEqual([]);
+  });
+}
+
+const validSizeReport = {
+  budgets: { hardCombinedGzip: 20_480, stretchCombinedGzip: 18_432 },
+  css: { file: 'hanamaru.css', gzip: 851 },
+  formats: [
+    {
+      combined: 18_128,
+      cssGzip: 851,
+      file: 'hanamaru.esm.js',
+      gzip: 17_277,
+      raw: 54_114,
+      stretch: true,
+    },
+    {
+      combined: 18_322,
+      cssGzip: 851,
+      file: 'hanamaru.iife.js',
+      gzip: 17_471,
+      raw: 54_597,
+      stretch: true,
+    },
+  ],
+  schemaVersion: 1,
+};
+
+for (const { name, mutate } of [
+  { name: 'future schema', mutate: (report) => { report.schemaVersion = 2; } },
+  { name: 'negative combined bytes', mutate: (report) => { report.formats[0].combined = -1; } },
+  { name: 'fractional CSS bytes', mutate: (report) => { report.css.gzip = 850.5; } },
+  { name: 'malformed format metric', mutate: (report) => { report.formats[1].gzip = null; } },
+]) {
+  test(`size docket rejects ${name} with the exact local fallback`, async ({ page }) => {
+    const failures = capturePageFailures(page);
+    const report = structuredClone(validSizeReport);
+    mutate(report);
+    await page.route('**/dist/size-report.json', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(report),
+    }));
+    await page.goto('/');
+    await expect(page.locator('[data-demo-size-state]'))
+      .toHaveText('size unavailable in this local build');
+    await expect(page.getByTestId('size-esm')).toHaveText('size unavailable in this local build');
+    await expect(page.getByTestId('size-iife')).toHaveText('size unavailable in this local build');
+    await expect(page.getByTestId('size-css')).toHaveText('size unavailable in this local build');
+    expect(failures).toEqual([]);
+  });
+}

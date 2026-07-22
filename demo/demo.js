@@ -52,6 +52,8 @@ const playground = document.querySelector('#playground');
 const reflowControl = document.querySelector('[data-demo-reflow-control]');
 const reflowValue = document.querySelector('[data-demo-reflow-value]');
 const reflowSpecimen = document.querySelector('[data-demo-reflow-specimen]');
+const reflowStage = document.querySelector('.demo-reflow-stage');
+const reflowTarget = document.querySelector('[data-demo-reflow-target]');
 const reflowRegister = reflowSpecimen.querySelector('.demo-reflow-specimen__register');
 const ledgerButtons = [...document.querySelectorAll('[data-demo-mark]')];
 const ledgerTarget = document.querySelector('[data-demo-ledger-target]');
@@ -80,6 +82,8 @@ let reflowController = null;
 let ledgerController = null;
 let ledgerMark = 'underline';
 let modeController = null;
+let reflowRequested = false;
+let appliedMode = null;
 
 const proofStory = story(storySteps, {
   trigger: 'manual',
@@ -203,7 +207,7 @@ for (const tab of tabs) {
 
 storyButtons.play.addEventListener('click', () => {
   suspendSectionProofs();
-  destroyModeProof();
+  destroyModeProof({ forget: true });
   proofStory.play();
   renderStoryState();
 });
@@ -222,7 +226,7 @@ storyButtons.resume.addEventListener('click', () => {
 });
 storyButtons.replay.addEventListener('click', () => {
   suspendSectionProofs();
-  destroyModeProof();
+  destroyModeProof({ forget: true });
   proofStory.replay();
   renderStoryState();
 });
@@ -350,11 +354,21 @@ function suspendSectionProofs() {
   ledgerController = null;
 }
 
+function centerReflowTarget() {
+  const targetRect = reflowTarget.getBoundingClientRect();
+  const stageRect = reflowStage.getBoundingClientRect();
+  const targetOffset = reflowStage.scrollLeft + targetRect.left - stageRect.left;
+  const centered = targetOffset - (reflowStage.clientWidth - targetRect.width) / 2;
+  reflowStage.scrollTo({ left: Math.max(0, centered), behavior: 'auto' });
+}
+
 reflowControl.addEventListener('input', () => {
   const width = Number(reflowControl.value);
+  reflowRequested = true;
   reflowSpecimen.style.width = `${width}px`;
   reflowValue.textContent = `${width}px`;
   reflowRegister.textContent = `${width} / responsive copy measure`;
+  centerReflowTarget();
   if (reflowController === null) createReflowProof();
   reflowController.refresh();
   status.textContent = `Proof remeasured at ${width}px.`;
@@ -373,18 +387,24 @@ ledgerReplay.addEventListener('click', () => {
   status.textContent = `${ledgerMark} specimen replayed.`;
 });
 
-function destroyModeProof() {
+function destroyModeProof({ forget = false } = {}) {
   modeController?.destroy();
   modeController = null;
   delete modeTarget.dataset.hana;
   delete modeTarget.dataset.hanaNote;
   delete modeTarget.dataset.hanaDuration;
   delete modeTarget.dataset.hanaMotion;
+  delete modeTarget.dataset.hanaPlacement;
+  if (forget) {
+    appliedMode = null;
+    delete modeTarget.dataset.demoModeApplied;
+  }
 }
 
 function runHtmlMode() {
   modeTarget.dataset.hana = 'highlight';
   modeTarget.dataset.hanaNote = 'Scanned from authored HTML.';
+  modeTarget.dataset.hanaPlacement = 'bottom';
   modeTarget.dataset.hanaDuration = '0';
   modeTarget.dataset.hanaMotion = 'never';
   const result = scan(modeProof);
@@ -401,6 +421,7 @@ function runStoryMode() {
     target: modeTarget,
     mark: 'circle',
     note: 'Played through the Story API.',
+    placement: 'bottom',
     duration: 0,
   }], {
     trigger: 'manual',
@@ -415,7 +436,8 @@ function runJsonMode() {
   const definition = JSON.parse(`{
     "target": "#api-mode-target",
     "mark": "box",
-    "note": "Parsed locally, rendered through annotate()."
+    "note": "Parsed locally, rendered through annotate().",
+    "placement": "bottom"
   }`);
   const { target, ...options } = definition;
   modeController = annotate(target, {
@@ -427,18 +449,94 @@ function runJsonMode() {
   return { mark: definition.mark, method: 'JSON → annotate()' };
 }
 
-modeApplyButton.addEventListener('click', () => {
+function runMode(format) {
   destroyModeProof();
-  let result;
-  if (activeFormat === 'html') result = runHtmlMode();
-  else if (activeFormat === 'story') result = runStoryMode();
-  else result = runJsonMode();
-  modeTarget.dataset.demoModeApplied = activeFormat;
-  const label = tabs.find((tab) => tab.dataset.demoTab === activeFormat).textContent.trim();
+  if (format === 'html') return runHtmlMode();
+  if (format === 'story') return runStoryMode();
+  return runJsonMode();
+}
+
+function modeLabel(format) {
+  return tabs.find((tab) => tab.dataset.demoTab === format).textContent.trim();
+}
+
+modeApplyButton.addEventListener('click', () => {
+  appliedMode = activeFormat;
+  modeTarget.scrollIntoView({ block: 'center', behavior: 'auto' });
+  const result = runMode(appliedMode);
+  modeTarget.dataset.demoModeApplied = appliedMode;
+  const label = modeLabel(appliedMode);
   modeState.textContent = `${label} · ${result.method} · ${result.mark} applied.`;
   status.textContent = `${label} mode rendered the ${result.mark} proof.`;
-  modeTarget.scrollIntoView({ block: 'center', behavior: 'auto' });
+  modeState.focus({ preventScroll: true });
+  modeState.scrollIntoView({ block: 'center', behavior: 'auto' });
 });
+
+function isInViewport(node) {
+  const rect = node.getBoundingClientRect();
+  return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+}
+
+function observeViewport(node, onChange) {
+  let prior;
+  const update = (visible) => {
+    if (visible === prior) return;
+    prior = visible;
+    onChange(visible);
+  };
+
+  if ('IntersectionObserver' in window) {
+    const observer = new IntersectionObserver(([entry]) => {
+      update(entry.isIntersecting && entry.intersectionRatio > 0);
+    }, { threshold: [0, 0.01] });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }
+
+  let frame = null;
+  const check = () => {
+    frame = null;
+    update(isInViewport(node));
+  };
+  const schedule = () => {
+    if (frame === null) frame = requestAnimationFrame(check);
+  };
+  document.addEventListener('scroll', schedule, { capture: true, passive: true });
+  window.addEventListener('resize', schedule, { passive: true });
+  schedule();
+  return () => {
+    if (frame !== null) cancelAnimationFrame(frame);
+    document.removeEventListener('scroll', schedule, true);
+    window.removeEventListener('resize', schedule);
+  };
+}
+
+const visibilityCleanups = [
+  observeViewport(reflowSpecimen, (visible) => {
+    if (!reflowRequested) return;
+    if (!visible) {
+      reflowController?.hide();
+      return;
+    }
+    if (reflowController === null) createReflowProof();
+    else {
+      reflowController.show();
+      reflowController.refresh();
+    }
+  }),
+  observeViewport(modeTarget, (visible) => {
+    if (appliedMode === null) return;
+    if (!visible) {
+      if (modeController !== null) destroyModeProof();
+      modeState.textContent = `${modeLabel(appliedMode)} result is offscreen · return to redraw.`;
+      return;
+    }
+    if (modeController !== null) return;
+    const result = runMode(appliedMode);
+    modeTarget.dataset.demoModeApplied = appliedMode;
+    modeState.textContent = `${modeLabel(appliedMode)} · ${result.method} · ${result.mark} redrawn.`;
+  }),
+];
 
 function showUnavailableSize() {
   const message = 'size unavailable in this local build';
@@ -451,9 +549,23 @@ async function loadSizeReport() {
     const response = await fetch('/dist/size-report.json');
     if (!response.ok) throw new Error('Size report unavailable');
     const report = await response.json();
+    const isByteMetric = (value) => Number.isInteger(value) && value >= 0;
+    const hasValidBudgets = isByteMetric(report.budgets?.hardCombinedGzip)
+      && isByteMetric(report.budgets?.stretchCombinedGzip);
+    const hasValidCss = report.css?.file === 'hanamaru.css'
+      && isByteMetric(report.css.gzip);
+    if (report.schemaVersion !== 1 || !hasValidBudgets || !hasValidCss
+      || !Array.isArray(report.formats) || report.formats.length !== 2) {
+      throw new Error('Size report invalid');
+    }
     const esm = report.formats.find(({ file }) => file === 'hanamaru.esm.js');
     const iife = report.formats.find(({ file }) => file === 'hanamaru.iife.js');
-    if (!esm || !iife || !Number.isInteger(report.css?.gzip)) {
+    const validFormat = (entry) => entry !== undefined
+      && ['combined', 'cssGzip', 'gzip', 'raw'].every((key) => isByteMetric(entry[key]))
+      && typeof entry.stretch === 'boolean'
+      && entry.cssGzip === report.css.gzip
+      && entry.combined === entry.gzip + entry.cssGzip;
+    if (!validFormat(esm) || !validFormat(iife)) {
       throw new Error('Size report invalid');
     }
     const format = (value) => value.toLocaleString('en-US');
@@ -506,10 +618,11 @@ rangeButton.addEventListener('click', () => {
 
 window.addEventListener('pagehide', (event) => {
   if (event.persisted) return;
+  for (const cleanup of visibilityCleanups) cleanup();
   proofStory.destroy();
   rangeProof.destroy();
   suspendSectionProofs();
-  destroyModeProof();
+  destroyModeProof({ forget: true });
 });
 
 selectTab(document.querySelector('[data-demo-tab="story"]'));

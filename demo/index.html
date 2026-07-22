@@ -112,7 +112,8 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
   …redraws the correction when the document changes…
 &lt;/p&gt;</span></span>
 <span class="demo-mode-definition" data-demo-code-fragment>&lt;span id="api-mode-target" data-hana="highlight"
-  data-hana-note="Scanned from authored HTML."&gt;…&lt;/span&gt;
+  data-hana-note="Scanned from authored HTML."
+  data-hana-placement="bottom"&gt;…&lt;/span&gt;
 &lt;script type="module"&gt;
   import { scan } from '/dist/hanamaru.esm.js'
   const { annotations } = scan(document.querySelector('#mode-proof'))
@@ -129,7 +130,7 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
   text: 'redraws the correction when the document changes' },
   mark: 'circle', note: 'Measured again.' }</span></span>
 <span class="demo-mode-definition" data-demo-code-fragment>story([{ target: '#api-mode-target', mark: 'circle',
-  note: 'Played through the Story API.' }],
+  note: 'Played through the Story API.', placement: 'bottom' }],
   { trigger: 'manual', motion: 'never' }).play()</span></code></pre>
               </section>
 
@@ -142,7 +143,8 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
   "text": "redraws the correction when the document changes" },
   "mark": "circle", "note": "Measured again." }</span></span>
 <span class="demo-mode-definition" data-demo-code-fragment>{ "target": "#api-mode-target", "mark": "box",
-  "note": "Parsed locally, rendered through annotate()." }</span></code></pre>
+  "note": "Parsed locally, rendered through annotate().",
+  "placement": "bottom" }</span></code></pre>
               </section>
 
               <div class="demo-story-controls" data-demo-story-controls>
@@ -217,7 +219,8 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
                 <p class="demo-reflow-specimen__register">760 / responsive copy measure</p>
                 <p id="reflow-copy">
                   Narrow this proof until the sentence folds. Through every line break,
-                  this note stays attached to the phrase it corrects.
+                  <span data-demo-reflow-target>this note stays attached</span> to the phrase it
+                  corrects.
                 </p>
               </article>
             </div>
@@ -260,7 +263,7 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
             <p id="api-mode-target" data-demo-mode-target>
               One target can be declared, sequenced, or parsed without changing the renderer.
             </p>
-            <p class="demo-mode-state" data-demo-mode-state>
+            <p class="demo-mode-state" tabindex="-1" data-demo-mode-state>
               Choose HTML, Story, or JSON above, then apply that runnable definition.
             </p>
           </div>
