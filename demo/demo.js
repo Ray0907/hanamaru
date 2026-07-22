@@ -77,7 +77,7 @@ function followRuntimeMotion(annotation) {
   const epoch = phaseEpoch;
   const readAnimations = () => {
     if (epoch !== phaseEpoch || activeAnnotation !== annotation
-      || (proofStory.state !== 'playing' && proofStory.state !== 'paused')) return;
+      || proofStory.state !== 'playing') return;
     const animations = (document.getAnimations?.() ?? []).filter((animation) => {
       const target = animation.effect?.target;
       return animation.playState !== 'finished'
@@ -187,6 +187,9 @@ storyButtons.pause.addEventListener('click', () => {
 });
 storyButtons.resume.addEventListener('click', () => {
   proofStory.resume();
+  if (proofStory.state === 'playing' && activeAnnotation !== null) {
+    followRuntimeMotion(activeAnnotation);
+  }
   renderStoryState();
   status.textContent = `Story resumed at step ${activeIndex + 1}.`;
 });
@@ -315,10 +318,11 @@ rangeButton.addEventListener('click', () => {
   status.textContent = 'Native Range target reset.';
 });
 
-window.addEventListener('pagehide', () => {
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) return;
   proofStory.destroy();
   rangeProof.destroy();
-}, { once: true });
+});
 
 selectTab(document.querySelector('[data-demo-tab="story"]'));
 renderStoryState();

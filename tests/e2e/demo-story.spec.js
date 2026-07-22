@@ -122,6 +122,62 @@ test('playback controls pause, resume, complete, and replay the same real story'
   await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
 });
 
+test('phase sampling stops while paused and restarts only when the story resumes', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__demoAnimationReads = 0;
+    const getAnimations = document.getAnimations.bind(document);
+    Object.defineProperty(document, 'getAnimations', {
+      configurable: true,
+      value() {
+        window.__demoAnimationReads += 1;
+        return getAnimations();
+      },
+    });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Play story', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__demoAnimationReads))
+    .toBeGreaterThan(2);
+
+  await page.getByRole('button', { name: 'Pause story' }).click();
+  await expect(page.locator('[data-demo-story-state]')).toHaveText('paused');
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
+  const readsAtPause = await page.evaluate(() => window.__demoAnimationReads);
+  await page.waitForTimeout(180);
+  expect(await page.evaluate(() => window.__demoAnimationReads)).toBe(readsAtPause);
+
+  await page.getByRole('button', { name: 'Resume story' }).click();
+  await expect.poll(() => page.evaluate(() => window.__demoAnimationReads))
+    .toBeGreaterThan(readsAtPause);
+  await expect(page.locator('[data-demo-story-state]')).toHaveText('complete', { timeout: 8_000 });
+});
+
+test('persisted page lifecycle keeps controllers live while final pagehide cleans resources', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('[data-hana-overlay]')).toHaveCount(1);
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  });
+  await expect(page.locator('[data-hana-overlay]')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Play story', exact: true }).click();
+  await expect(page.locator('[data-demo-story-state]')).toHaveText('complete', { timeout: 8_000 });
+  await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
+
+  await page.getByRole('button', { name: 'Show native Range proof' }).click();
+  await expect(page.locator('.hana-annotation[data-hana-mark="box"]:not([hidden])')).toHaveCount(1);
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));
+  });
+  await expect(page.locator('[data-hana-overlay]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Replay story' }).click();
+  await expect(page.locator('[data-demo-story-state]')).toHaveText('destroyed');
+});
+
 test('native tabs select, wrap, and move focus with the standard keyboard model', async ({ page }) => {
   await page.goto('/');
   const tabs = page.getByRole('tab');
