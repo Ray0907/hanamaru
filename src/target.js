@@ -175,9 +175,10 @@ function isExcludedTextNode(node) {
   return false;
 }
 
-function collectLocatorText(within, doc) {
-  const walker = doc.createTreeWalker(within, 4);
-  const map = [];
+function collectLocatorTextSegments(within, doc) {
+  const walker = doc.createTreeWalker(within, 5);
+  const segments = [];
+  let map = [];
   let normalized = '';
   let pendingWhitespace = null;
 
@@ -191,9 +192,22 @@ function collectLocatorText(within, doc) {
     }
   }
 
+  function finishSegment() {
+    if (normalized.length > 0) {
+      segments.push({ text: normalized, map });
+    }
+    map = [];
+    normalized = '';
+    pendingWhitespace = null;
+  }
+
   let node = walker.nextNode();
   while (node !== null) {
-    if (!isExcludedTextNode(node)) {
+    if (node.nodeType === 1 && node.matches(EXCLUDED_TEXT_ANCESTORS)) {
+      finishSegment();
+    } else if (node.nodeType === 3 && isExcludedTextNode(node)) {
+      finishSegment();
+    } else if (node.nodeType === 3) {
       let offset = 0;
       for (const character of node.data) {
         const nextOffset = offset + character.length;
@@ -214,14 +228,16 @@ function collectLocatorText(within, doc) {
     }
     node = walker.nextNode();
   }
+  finishSegment();
 
-  return { text: normalized, map };
+  return segments;
 }
 
 function locatorRange(within, text, occurrence, doc) {
-  const collected = collectLocatorText(within, doc);
-  const matches = findMatchOffsets(collected.text, text).filter(([start, end]) => (
-    collected.map[start]?.start !== null && collected.map[end - 1]?.end !== null
+  const matches = collectLocatorTextSegments(within, doc).flatMap((segment) => (
+    findMatchOffsets(segment.text, text)
+      .filter(([start, end]) => segment.map[start]?.start !== null && segment.map[end - 1]?.end !== null)
+      .map(([start, end]) => ({ segment, start, end }))
   ));
 
   if (matches.length === 0 || (occurrence !== undefined && occurrence >= matches.length)) {
@@ -239,9 +255,9 @@ function locatorRange(within, text, occurrence, doc) {
     });
   }
 
-  const [start, end] = matches[occurrence ?? 0];
-  const [startNode, startOffset] = collected.map[start].start;
-  const [endNode, endOffset] = collected.map[end - 1].end;
+  const { segment, start, end } = matches[occurrence ?? 0];
+  const [startNode, startOffset] = segment.map[start].start;
+  const [endNode, endOffset] = segment.map[end - 1].end;
   const range = doc.createRange();
   range.setStart(startNode, startOffset);
   range.setEnd(endNode, endOffset);

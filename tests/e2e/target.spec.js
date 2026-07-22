@@ -270,6 +270,35 @@ test('@locator-map excludes text when direct and selector within containers have
   ]);
 });
 
+test('@locator-map treats excluded subtrees as hard match barriers while preserving eligible segment order', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const within = document.querySelector('#locator-barrier-host');
+    const markup = within.innerHTML;
+    const bridgeCodes = ['ab', 'left right'].map((text) => {
+      try { resolveTarget({ within, text }); return 'ok'; } catch (error) { return error.code; }
+    });
+    const singleNodes = ['a', 'b'].map((text) => {
+      const record = resolveTarget({ within, text });
+      return {
+        start: record.range.startContainer === within.querySelector('[data-barrier-' + (text === 'a' ? 'before' : 'after') + ']').firstChild,
+        selected: record.range.toString(),
+      };
+    });
+    const duplicateNodes = [0, 1].map((occurrence) => {
+      const record = resolveTarget({ within, text: 'echo', occurrence });
+      const expected = within.querySelector('[data-segment-duplicate="' + (occurrence === 0 ? 'first' : 'second') + '"]').firstChild;
+      return record.range.startContainer === expected && record.range.endContainer === expected;
+    });
+    return { bridgeCodes, singleNodes, duplicateNodes, unchanged: within.innerHTML === markup };
+  })()`);
+  expect(result).toEqual({
+    bridgeCodes: ['HANA_TARGET_MISSING', 'HANA_TARGET_MISSING'],
+    singleNodes: [{ start: true, selected: 'a' }, { start: true, selected: 'b' }],
+    duplicateNodes: [true, true],
+    unchanged: true,
+  });
+});
+
 test('@locator reports missing, ambiguous, and out-of-range text matches with exact codes', async ({ page }) => {
   const result = await resolve(page, `(() => {
     const within = '#locator-root';
