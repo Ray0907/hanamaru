@@ -653,6 +653,7 @@ test('coalesces mutation bursts, runs every read before writes, and isolates cal
     const state = window.__resources;
     const record = resolveTarget('#selector-target');
     const events = [];
+    document.documentElement.removeAttribute('data-scheduler-error-reported');
     const subscriptions = [
       {
         id: 'ok',
@@ -663,11 +664,17 @@ test('coalesces mutation bursts, runs every read before writes, and isolates cal
         id: 'read-error',
         read() { events.push('read:read-error'); throw new Error('read failed'); },
         write() { events.push('write:read-error'); },
-        onError(error) { events.push(`error:read-error:${error.message}`); },
+        onError(error) {
+          document.documentElement.setAttribute('data-scheduler-error-reported', '');
+          events.push(`error:read-error:${error.message}`);
+        },
       },
       {
         id: 'write-error',
-        read() { events.push('read:write-error'); return 'write-value'; },
+        read() {
+          events.push(`read:write-error:mutated=${document.documentElement.hasAttribute('data-scheduler-error-reported')}`);
+          return 'write-value';
+        },
         write() { events.push('write:write-error'); throw new Error('write failed'); },
         onError(error) { events.push(`error:write-error:${error.message}`); },
       },
@@ -688,6 +695,7 @@ test('coalesces mutation bursts, runs every read before writes, and isolates cal
     for (const unsubscribe of unsubscribes) unsubscribe();
     for (const { id } of subscriptions) shared.releaseController(id);
     lease.release();
+    document.documentElement.removeAttribute('data-scheduler-error-reported');
     return { events, remainingFrames, scheduledFrames };
   });
 
@@ -696,8 +704,8 @@ test('coalesces mutation bursts, runs every read before writes, and isolates cal
   expect(result.events).toEqual([
     'read:ok',
     'read:read-error',
+    'read:write-error:mutated=false',
     'error:read-error:read failed',
-    'read:write-error',
     'write:ok:ok-value',
     'write:write-error',
     'error:write-error:write failed',

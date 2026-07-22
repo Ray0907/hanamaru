@@ -245,6 +245,185 @@ test('invalid construction leaves no overlay or owned DOM behind', async ({ page
   });
 });
 
+test('failure fallbacks hide and remove only the failing renderer DOM', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { createAnnotation } = await import('/src/annotation.js');
+    const { annotate } = await import('/src/index.js');
+    const { createRenderer, readThemeMetrics } = await import('/src/renderer.js');
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { resolveTarget } = await import('/src/target.js');
+
+    function createEnvironment(id, rendererFactory) {
+      const lease = acquireDocumentResources(document);
+      return {
+        id,
+        lease,
+        createEvent(type, detail, owner) {
+          owner.dispatchEvent(new CustomEvent(type, { detail, bubbles: true, composed: true }));
+        },
+        createRenderer(args) { return rendererFactory(args); },
+        direction(owner) { return getComputedStyle(owner).direction; },
+        readThemeMetrics,
+        reducedMotion(options) { return options.motion === 'never'; },
+        resolveTarget(target) { return resolveTarget(target, document); },
+        targetRects(record) {
+          const rects = record.range === null
+            ? [record.element.getBoundingClientRect()]
+            : [...record.range.getClientRects()];
+          return rects.map((rect) => ({
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            left: rect.left,
+          }));
+        },
+      };
+    }
+
+    const direct = document.querySelector('#direct-target');
+    const hideErrors = [];
+    direct.addEventListener('hana:error', (event) => hideErrors.push(event.detail.error.code));
+    const hideController = createAnnotation(direct, {
+      mark: 'circle', note: 'Must disappear', accessible: true, duration: 800,
+    }, createEnvironment('hide-failure', (args) => {
+      const real = createRenderer(args);
+      return { ...real, hide() { throw new Error('hide failed'); } };
+    }));
+    hideController.show();
+    hideController.finished.catch(() => {});
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const hideGroup = document.querySelector('[data-hana-id="hide-failure"].hana-annotation');
+    const hideNote = document.querySelector('[data-hana-id="hide-failure"].hana-note');
+    hideController.hide();
+    const hideAnimations = [
+      ...hideGroup.getAnimations({ subtree: true }),
+      ...hideNote.getAnimations({ subtree: true }),
+    ];
+    const hideFailure = {
+      state: hideController.state,
+      groupHidden: hideGroup.hidden || hideGroup.hasAttribute('hidden'),
+      groupDisplay: getComputedStyle(hideGroup).display,
+      noteHidden: hideNote.hidden,
+      noteDisplay: getComputedStyle(hideNote).display,
+      noteVisibility: getComputedStyle(hideNote).visibility,
+      groupClasses: hideGroup.className.baseVal,
+      noteClasses: hideNote.className,
+      tabindex: hideNote.getAttribute('tabindex'),
+      description: direct.getAttribute('aria-describedby'),
+      activeAnimations: hideAnimations.filter((animation) => animation.playState !== 'idle').length,
+      errors: [...hideErrors],
+    };
+    hideController.refresh();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    hideFailure.recoveredState = hideController.state;
+    hideFailure.recoveredGroupHidden = hideGroup.hasAttribute('hidden');
+    hideFailure.recoveredNoteHidden = hideNote.hidden;
+    hideController.destroy();
+
+    const currentDestroy = createAnnotation(direct, {
+      mark: 'box', note: 'Throwing teardown', accessible: true, motion: 'never',
+    }, createEnvironment('current-destroy-failure', (args) => {
+      const real = createRenderer(args);
+      return { ...real, destroy() { throw new Error('destroy failed'); } };
+    }));
+    const peer = document.querySelector('#selector-target');
+    const peerController = annotate(peer, {
+      mark: 'underline', note: 'Peer stays mounted', accessible: true, motion: 'never',
+    });
+    currentDestroy.show();
+    peerController.show();
+    await peerController.finished;
+    currentDestroy.destroy();
+    const concurrentDestroy = {
+      state: currentDestroy.state,
+      failedOwned: document.querySelectorAll('[data-hana-id="current-destroy-failure"]').length,
+      peerOwned: document.querySelectorAll(`[data-hana-id="${document.querySelector('.hana-note:not([data-hana-id="current-destroy-failure"])')?.dataset.hanaId}"]`).length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      directDescription: direct.getAttribute('aria-describedby'),
+      peerDescription: peer.getAttribute('aria-describedby'),
+    };
+    peerController.destroy();
+    concurrentDestroy.afterPeerDestroy = document.querySelectorAll('[data-hana-overlay]').length;
+
+    let updateCreation = 0;
+    const updateController = createAnnotation(direct, {
+      mark: 'circle', note: 'Old renderer', accessible: true, motion: 'never',
+    }, createEnvironment('update-destroy-failure', (args) => {
+      updateCreation += 1;
+      const real = createRenderer(args);
+      return updateCreation === 1
+        ? { ...real, destroy() { throw new Error('old destroy failed'); } }
+        : real;
+    }));
+    const updateErrors = [];
+    direct.addEventListener('hana:error', (event) => updateErrors.push(event.detail.error.code));
+    updateController.show();
+    const oldGroup = document.querySelector('[data-hana-id="update-destroy-failure"].hana-annotation');
+    const oldNote = document.querySelector('[data-hana-id="update-destroy-failure"].hana-note');
+    updateController.update({ mark: 'strike', note: 'New renderer' });
+    const currentGroup = document.querySelector('[data-hana-id="update-destroy-failure"].hana-annotation');
+    const currentNote = document.querySelector('[data-hana-id="update-destroy-failure"].hana-note');
+    const updateDestroy = {
+      state: updateController.state,
+      owned: document.querySelectorAll('[data-hana-id="update-destroy-failure"]').length,
+      oldGroupConnected: oldGroup.isConnected,
+      oldNoteConnected: oldNote.isConnected,
+      currentGroupHidden: currentGroup.hasAttribute('hidden'),
+      currentNoteHidden: currentNote.hidden,
+      currentNoteDisplay: getComputedStyle(currentNote).display,
+      description: direct.getAttribute('aria-describedby'),
+      errors: updateErrors,
+    };
+    updateController.destroy();
+    updateDestroy.afterDestroy = document.querySelectorAll('[data-hana-id="update-destroy-failure"]').length;
+
+    return { hideFailure, concurrentDestroy, updateDestroy };
+  });
+
+  expect(result.hideFailure).toEqual({
+    state: 'suspended',
+    groupHidden: true,
+    groupDisplay: 'none',
+    noteHidden: true,
+    noteDisplay: 'none',
+    noteVisibility: 'hidden',
+    groupClasses: 'hana-annotation',
+    noteClasses: 'hana-note hana-is-hidden',
+    tabindex: null,
+    description: 'author-token',
+    activeAnimations: 0,
+    errors: ['HANA_STATE_RUNTIME'],
+    recoveredState: 'hidden',
+    recoveredGroupHidden: true,
+    recoveredNoteHidden: true,
+  });
+  expect(result.concurrentDestroy).toEqual({
+    state: 'destroyed',
+    failedOwned: 0,
+    peerOwned: 2,
+    overlays: 1,
+    directDescription: 'author-token',
+    peerDescription: expect.stringMatching(/^hana-note-/),
+    afterPeerDestroy: 0,
+  });
+  expect(result.updateDestroy).toEqual({
+    state: 'suspended',
+    owned: 2,
+    oldGroupConnected: false,
+    oldNoteConnected: false,
+    currentGroupHidden: true,
+    currentNoteHidden: true,
+    currentNoteDisplay: 'none',
+    description: 'author-token',
+    errors: ['HANA_STATE_RUNTIME'],
+    afterDestroy: 0,
+  });
+});
+
 test('direct target suspends once and recovers only when the same node reconnects', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');

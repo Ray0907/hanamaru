@@ -113,6 +113,7 @@ export class FrameQueue {
     const jobs = this.#pending;
     this.#pending = new Map();
     const reads = [];
+    const readErrors = [];
 
     for (const job of jobs.values()) {
       if (!this.#alive) {
@@ -123,7 +124,7 @@ export class FrameQueue {
       try {
         currentGeneration = this.#generationFor(job.key);
       } catch (error) {
-        this.#report(job, error);
+        readErrors.push({ job, error });
         continue;
       }
       if (currentGeneration !== job.generation) {
@@ -133,8 +134,27 @@ export class FrameQueue {
       try {
         reads.push({ job, value: job.read() });
       } catch (error) {
-        this.#report(job, error);
+        readErrors.push({ job, error });
       }
+    }
+
+    for (const entry of readErrors) {
+      if (!this.#alive) {
+        return;
+      }
+
+      let currentGeneration;
+      try {
+        currentGeneration = this.#generationFor(entry.job.key);
+      } catch (error) {
+        this.#report(entry.job, error);
+        continue;
+      }
+      if (currentGeneration !== entry.job.generation) {
+        continue;
+      }
+
+      this.#report(entry.job, entry.error);
     }
 
     for (const entry of reads) {

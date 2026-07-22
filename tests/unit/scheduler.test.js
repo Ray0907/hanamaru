@@ -138,9 +138,77 @@ test('isolates a read failure, skips its write, and reports it once', () => {
 
   assert.deepEqual(events, [
     'read:broken',
-    'error:broken:read failed',
     'read:peer',
+    'error:broken:read failed',
     'write:peer:value:peer',
+  ]);
+});
+
+test('defers read error reporting until every candidate read has completed', () => {
+  const { generations, queue, runFrame } = createHarness();
+  const events = [];
+  let reportMutatedState = false;
+  generations.set('broken', 1);
+  generations.set('peer', 1);
+
+  queue.enqueue(job('broken', 1, events, 'broken', {
+    read() {
+      events.push('read:broken');
+      throw new Error('read failed');
+    },
+    onError(error) {
+      reportMutatedState = true;
+      events.push(`error:broken:${error.message}`);
+    },
+  }));
+  queue.enqueue(job('peer', 1, events, 'peer', {
+    read() {
+      events.push(`read:peer:mutated=${reportMutatedState}`);
+      return 'value:peer';
+    },
+  }));
+  runFrame();
+
+  assert.deepEqual(events, [
+    'read:broken',
+    'read:peer:mutated=false',
+    'error:broken:read failed',
+    'write:peer:value:peer',
+  ]);
+});
+
+test('drops a deferred read error made stale and rechecks liveness after reporting', () => {
+  const { generations, queue, runFrame } = createHarness();
+  const events = [];
+  generations.set('stale-error', 1);
+  generations.set('fatal-error', 1);
+  generations.set('peer', 1);
+
+  queue.enqueue(job('stale-error', 1, events, 'stale-error', {
+    read() {
+      events.push('read:stale-error');
+      throw new Error('stale failure');
+    },
+  }));
+  queue.enqueue(job('fatal-error', 1, events, 'fatal-error', {
+    read() {
+      events.push('read:fatal-error');
+      generations.set('stale-error', 2);
+      throw new Error('fatal failure');
+    },
+    onError(error) {
+      events.push(`error:fatal-error:${error.message}`);
+      queue.destroy();
+    },
+  }));
+  queue.enqueue(job('peer', 1, events));
+  runFrame();
+
+  assert.deepEqual(events, [
+    'read:stale-error',
+    'read:fatal-error',
+    'read:peer',
+    'error:fatal-error:fatal failure',
   ]);
 });
 
@@ -189,8 +257,8 @@ test('does not let a throwing onError block peer jobs', () => {
   assert.doesNotThrow(() => runFrame());
   assert.deepEqual(events, [
     'read:broken',
-    'error:broken:read failed',
     'read:peer',
+    'error:broken:read failed',
     'write:peer:value:peer',
   ]);
 });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import * as annotationModule from '../../src/annotation.js';
-import { HanamaruConfigError, HanamaruStateError } from '../../src/errors.js';
+import { HanamaruConfigError, HanamaruStateError, HanamaruTargetError } from '../../src/errors.js';
 
 function deferred() {
   let resolve;
@@ -301,6 +301,31 @@ test('suspended transitions reject a showing run and emit one error per disconne
   environment.setResolveFailure(new Error('disconnected again'));
   controller.refresh();
   assert.equal(environment.events.filter((event) => event.type === 'hana:error').length, 2);
+  controller.destroy();
+});
+
+test('target resolution and runtime failures report as separate error episodes', () => {
+  const { controller, environment } = create();
+  const targetFailure = new HanamaruTargetError(
+    'HANA_TARGET_MISSING',
+    'Target disconnected',
+  );
+  const rebindFailure = new Error('scheduler rebind failed after resolution');
+  environment.setResolveFailure(targetFailure);
+
+  controller.refresh();
+  environment.setResolveFailure(null);
+  environment.setRebindFailure(rebindFailure);
+  controller.refresh();
+
+  const errors = environment.events
+    .filter((event) => event.type === 'hana:error')
+    .map((event) => event.detail.error);
+  assert.equal(errors.length, 2);
+  assert.equal(errors[0], targetFailure);
+  assert.ok(errors[1] instanceof HanamaruStateError);
+  assert.equal(errors[1].details.cause, rebindFailure);
+  environment.setRebindFailure(null);
   controller.destroy();
 });
 
