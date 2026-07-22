@@ -69,8 +69,9 @@ export class FrameQueue {
       return;
     }
 
-    this.#cancelFrame(this.#scheduled.id);
+    const scheduled = this.#scheduled;
     this.#scheduled = null;
+    this.#cancelFrame(scheduled.id);
   }
 
   destroy() {

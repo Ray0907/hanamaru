@@ -217,6 +217,39 @@ test('cancel removes pending jobs and cancels the scheduled frame only when empt
   assert.deepEqual(events, ['read:new', 'write:new:value:new']);
 });
 
+test('preserves a new frame scheduled reentrantly by cancelFrame', () => {
+  const generations = new Map([
+    ['old', 1],
+    ['new', 1],
+  ]);
+  const requested = [];
+  const events = [];
+  let nextFrameId = 1;
+  let queue;
+
+  queue = new FrameQueue({
+    requestFrame(callback) {
+      const frame = { id: nextFrameId, callback };
+      nextFrameId += 1;
+      requested.push(frame);
+      return frame.id;
+    },
+    cancelFrame() {
+      queue.enqueue(job('new', 1, events));
+    },
+    generationFor(key) {
+      return generations.get(key);
+    },
+  });
+
+  queue.enqueue(job('old', 1, events));
+  queue.cancel('old');
+
+  assert.equal(requested.length, 2);
+  requested[1].callback();
+  assert.deepEqual(events, ['read:new', 'write:new:value:new']);
+});
+
 test('defers jobs enqueued during a read to exactly one later frame', () => {
   const { generations, queue, requested, runFrame } = createHarness();
   const events = [];
