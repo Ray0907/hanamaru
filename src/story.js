@@ -11,6 +11,7 @@ import {
   HanamaruStateError,
   HanamaruTargetError,
 } from './errors.js';
+import { acquireDocumentResources } from './scheduler.js';
 import { resolveTarget } from './target.js';
 
 const STORY_KEYS = new Set(['trigger', 'gap', 'once', 'motion']);
@@ -19,6 +20,7 @@ const STEP_KEYS = new Set([
 ]);
 const STORY_TRIGGERS = new Set(['manual', 'load', 'viewport']);
 const STORY_MOTIONS = new Set(['system', 'never']);
+let nextStoryId = 0;
 
 function defaultStoryEnvironment(steps) {
   let doc;
@@ -30,6 +32,7 @@ function defaultStoryEnvironment(steps) {
   }
   const win = doc.defaultView;
   return {
+    acquireDocumentResources,
     clearTimeout(id) { win.clearTimeout(id); },
     createAnnotation(target, options) {
       return createAnnotation(target, options, createAnnotationEnvironment(target));
@@ -41,6 +44,12 @@ function defaultStoryEnvironment(steps) {
         composed: true,
       }));
     },
+    document: doc,
+    eventOwner(record) {
+      try { record.refresh(); } catch { /* Retain the last valid owner for error delivery. */ }
+      return record.ownerElement;
+    },
+    microtask(callback) { win.queueMicrotask(callback); },
     now() { return win.performance.now(); },
     pauseAnnotationRun,
     reducedMotion(options) {
@@ -50,6 +59,7 @@ function defaultStoryEnvironment(steps) {
     resolveTarget(target) { return resolveTarget(target, doc); },
     resumeAnnotationRun,
     setTimeout(callback, delay) { return win.setTimeout(callback, delay); },
+    triggerId: `hana-story-trigger-${++nextStoryId}`,
   };
 }
 
@@ -165,6 +175,18 @@ export function createStory(steps, rawOptions = {}, env) {
   let run = null;
   let operationEpoch = 0;
   let phase = null;
+  const automatic = {
+    active: false,
+    epoch: 0,
+    generation: null,
+    inside: false,
+    lease: null,
+    owner: prepared[0].record.ownerElement,
+    shared: null,
+    stopIntersection: null,
+    stopLayout: null,
+    stopLoad: null,
+  };
 
   const controller = {
     get state() { return state; },
@@ -182,7 +204,203 @@ export function createStory(steps, rawOptions = {}, env) {
   }
 
   function dispatch(type, detail) {
-    env.createEvent(type, detail, prepared[0].record.ownerElement);
+    const owner = typeof env.eventOwner === 'function'
+      ? env.eventOwner(prepared[0].record)
+      : prepared[0].record.ownerElement;
+    env.createEvent(type, detail, owner);
+  }
+
+  function automaticCanRun(epoch) {
+    return state !== 'destroyed' && automatic.active && automatic.epoch === epoch;
+  }
+
+  function cleanupOperation(operation, failures) {
+    if (operation === null) return;
+    try { operation(); } catch (error) { failures.push(error); }
+  }
+
+  function releaseViewportResources(failures = []) {
+    const stopIntersection = automatic.stopIntersection;
+    const stopLayout = automatic.stopLayout;
+    const shared = automatic.shared;
+    const lease = automatic.lease;
+    automatic.stopIntersection = null;
+    automatic.stopLayout = null;
+    automatic.shared = null;
+    automatic.lease = null;
+    automatic.generation = null;
+    cleanupOperation(stopIntersection, failures);
+    cleanupOperation(stopLayout, failures);
+    if (shared !== null) {
+      cleanupOperation(() => shared.releaseController(env.triggerId), failures);
+    }
+    cleanupOperation(lease === null ? null : () => lease.release(), failures);
+    return failures;
+  }
+
+  function stopAutomaticTrigger(suppressFailure = false) {
+    if (!automatic.active
+      && automatic.stopLoad === null
+      && automatic.lease === null) return;
+    automatic.active = false;
+    automatic.epoch += 1;
+    automatic.inside = false;
+    const failures = [];
+    const stopLoad = automatic.stopLoad;
+    automatic.stopLoad = null;
+    cleanupOperation(stopLoad, failures);
+    releaseViewportResources(failures);
+    if (!suppressFailure && failures.length > 0) throw failures[0];
+  }
+
+  function keepLoadCleanup(cleanup, epoch) {
+    if (automaticCanRun(epoch)) {
+      automatic.stopLoad = cleanup;
+      return;
+    }
+    const failures = [];
+    cleanupOperation(cleanup, failures);
+  }
+
+  function acceptLoadStart(epoch) {
+    if (!automaticCanRun(epoch)) return;
+    stopAutomaticTrigger(true);
+    if (state !== 'idle') return;
+    play();
+  }
+
+  function installLoadTrigger(epoch) {
+    if (!automaticCanRun(epoch)) return;
+    const doc = env.document;
+    const start = () => acceptLoadStart(epoch);
+    if (doc.readyState === 'loading') {
+      doc.addEventListener('DOMContentLoaded', start, { once: true });
+      keepLoadCleanup(() => doc.removeEventListener('DOMContentLoaded', start), epoch);
+      return;
+    }
+    env.microtask(start);
+  }
+
+  function acceptViewportEnter(epoch) {
+    if (!automaticCanRun(epoch)) return;
+    const wasInside = automatic.inside;
+    automatic.inside = true;
+    if (wasInside) return;
+    if (options.once) {
+      stopAutomaticTrigger(true);
+      if (state === 'idle') play();
+      return;
+    }
+    if (state === 'idle') play();
+    else if (state === 'cancelled' || state === 'complete') replay();
+  }
+
+  function acceptViewportExit(epoch, entry) {
+    if (!automaticCanRun(epoch)
+      || entry.isIntersecting
+      || entry.intersectionRatio > 0
+      || !automatic.inside) return;
+    automatic.inside = false;
+    if (state === 'playing' || state === 'paused') cancel();
+  }
+
+  function installIntersection(epoch) {
+    if (!automaticCanRun(epoch) || automatic.shared === null) return;
+    let unavailable = false;
+    const cleanup = automatic.shared.observeIntersection({
+      id: env.triggerId,
+      target: automatic.owner,
+      threshold: 0.25,
+      onEnter() { acceptViewportEnter(epoch); },
+      onExit(entry) { acceptViewportExit(epoch, entry); },
+      onUnavailable() { unavailable = true; },
+    });
+    if (!automaticCanRun(epoch)) {
+      const failures = [];
+      cleanupOperation(cleanup, failures);
+      return;
+    }
+    if (!unavailable) {
+      automatic.stopIntersection = cleanup;
+      return;
+    }
+    const failures = [];
+    cleanupOperation(cleanup, failures);
+    releaseViewportResources(failures);
+    if (automaticCanRun(epoch)) installLoadTrigger(epoch);
+  }
+
+  function viewportLayoutBinding() {
+    return {
+      id: env.triggerId,
+      generation: automatic.generation,
+      record: prepared[0].record,
+      read() {
+        prepared[0].record.refresh();
+        return prepared[0].record.ownerElement;
+      },
+      write(owner) {
+        if (!automatic.active || owner === automatic.owner) return;
+        rearmViewportOwner(owner);
+      },
+      onError(error) {
+        if (error instanceof HanamaruTargetError) return;
+        if (!automatic.active) return;
+        stopAutomaticTrigger(true);
+        const normalized = runtimeError(error);
+        state = 'cancelled';
+        dispatch('hana:error', { controller, error: normalized, index: 0 });
+      },
+    };
+  }
+
+  function rearmViewportOwner(owner) {
+    if (!automatic.active || state === 'destroyed' || automatic.shared === null) return;
+    automatic.epoch += 1;
+    const epoch = automatic.epoch;
+    automatic.inside = false;
+    const stopIntersection = automatic.stopIntersection;
+    automatic.stopIntersection = null;
+    const failures = [];
+    cleanupOperation(stopIntersection, failures);
+    if (!automaticCanRun(epoch) || automatic.shared === null) return;
+    const priorLayout = automatic.stopLayout;
+    try {
+      automatic.generation = automatic.shared.bumpGeneration(env.triggerId);
+      automatic.owner = owner;
+      automatic.stopLayout = automatic.shared.rebindLayout(
+        env.triggerId,
+        viewportLayoutBinding(),
+      );
+    } catch (error) {
+      stopAutomaticTrigger(true);
+      const normalized = runtimeError(error);
+      state = 'cancelled';
+      dispatch('hana:error', { controller, error: normalized, index: 0 });
+      return;
+    }
+    cleanupOperation(priorLayout, failures);
+    if (automaticCanRun(epoch)) installIntersection(epoch);
+  }
+
+  function installViewportTrigger(epoch) {
+    automatic.lease = env.acquireDocumentResources(env.document);
+    automatic.shared = automatic.lease.shared;
+    automatic.generation = automatic.shared.registerController(env.triggerId);
+    automatic.owner = prepared[0].record.ownerElement;
+    automatic.stopLayout = automatic.shared.observeLayout(viewportLayoutBinding());
+    installIntersection(epoch);
+  }
+
+  function installAutomaticTrigger() {
+    if (options.trigger === 'manual'
+      || typeof env.microtask !== 'function'
+      || env.document === undefined) return;
+    automatic.active = true;
+    automatic.epoch += 1;
+    const epoch = automatic.epoch;
+    if (options.trigger === 'load') installLoadTrigger(epoch);
+    else installViewportTrigger(epoch);
   }
 
   function finishRun(operation) {
@@ -339,6 +557,10 @@ export function createStory(steps, rawOptions = {}, env) {
 
   function play() {
     if (state !== 'idle') return controller;
+    if (automatic.active && (options.trigger !== 'viewport' || options.once)) {
+      stopAutomaticTrigger(true);
+      if (state !== 'idle') return controller;
+    }
     beginRun();
     return controller;
   }
@@ -424,6 +646,10 @@ export function createStory(steps, rawOptions = {}, env) {
 
   function replay() {
     if (state === 'destroyed') return controller;
+    if (automatic.active && (options.trigger !== 'viewport' || options.once)) {
+      stopAutomaticTrigger(true);
+      if (state === 'destroyed') return controller;
+    }
     operationEpoch += 1;
     const operation = operationEpoch;
     const notifyCancel = (state === 'playing' || state === 'paused')
@@ -474,6 +700,7 @@ export function createStory(steps, rawOptions = {}, env) {
     rejectPending(abortError('destroyed'));
     phase = null;
     state = 'destroyed';
+    stopAutomaticTrigger(true);
     let destroyFailure = null;
     let destroyFailureIndex = -1;
     for (let index = 0; index < annotations.length; index += 1) {
@@ -490,6 +717,15 @@ export function createStory(steps, rawOptions = {}, env) {
       dispatch('hana:error', { controller, error, index: destroyFailureIndex });
     }
     return controller;
+  }
+  try {
+    installAutomaticTrigger();
+  } catch (error) {
+    stopAutomaticTrigger(true);
+    for (const annotation of annotations) {
+      try { annotation.destroy(); } catch { /* Preserve trigger installation failure. */ }
+    }
+    throw runtimeError(error);
   }
   return controller;
 }
