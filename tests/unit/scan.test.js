@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseDeclarative } from '../../src/declarative.js';
+import * as declarativeModule from '../../src/declarative.js';
 import * as Hanamaru from '../../src/index.js';
+
+const { parseDeclarative } = declarativeModule;
 
 function element(dataset) {
   return { dataset };
@@ -120,4 +122,72 @@ test('scan propagates unexpected programmer errors unchanged', () => {
   const root = { querySelectorAll() { return [broken]; } };
 
   assert.throws(() => Hanamaru.scan(root), (error) => error === programmerError);
+});
+
+test('scanDeclarative rolls successful controllers back in reverse after a dataset getter error', () => {
+  assert.equal(typeof declarativeModule.scanDeclarative, 'function');
+  const programmerError = new TypeError('broken dataset getter');
+  const first = element({ hana: 'underline' });
+  const second = element({ hana: 'circle' });
+  const broken = {};
+  Object.defineProperty(broken, 'dataset', {
+    get() { throw programmerError; },
+  });
+  const calls = [];
+  const createAnnotation = (target, options) => {
+    calls.push(['create', target, options]);
+    return {
+      destroy() { calls.push(['destroy', target]); },
+    };
+  };
+
+  assert.throws(
+    () => declarativeModule.scanDeclarative({
+      querySelectorAll() { return [first, second, broken]; },
+    }, createAnnotation),
+    (error) => error === programmerError,
+  );
+  assert.deepEqual(calls, [
+    ['create', first, { mark: 'underline' }],
+    ['create', second, { mark: 'circle' }],
+    ['destroy', second],
+    ['destroy', first],
+  ]);
+});
+
+test('scanDeclarative rolls back after an iterator error and preserves it through teardown errors', () => {
+  const programmerError = new SyntaxError('iterator failed');
+  const destroyError = new Error('destroy failed');
+  const first = element({ hana: 'box' });
+  const second = element({ hana: 'strike' });
+  let index = 0;
+  const root = {
+    querySelectorAll() {
+      return {
+        [Symbol.iterator]() {
+          return {
+            next() {
+              index += 1;
+              if (index === 1) return { done: false, value: first };
+              if (index === 2) return { done: false, value: second };
+              throw programmerError;
+            },
+          };
+        },
+      };
+    },
+  };
+  const destroyed = [];
+  const createAnnotation = (target) => ({
+    destroy() {
+      destroyed.push(target);
+      if (target === second) throw destroyError;
+    },
+  });
+
+  assert.throws(
+    () => declarativeModule.scanDeclarative(root, createAnnotation),
+    (error) => error === programmerError,
+  );
+  assert.deepEqual(destroyed, [second, first]);
 });

@@ -158,3 +158,106 @@ test('public ESM annotations complete for Element and text locator targets', asy
     owned: 0,
   });
 });
+
+test('scan rolls real DOM resources back when later user code throws', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const api = await import('/dist/hanamaru.esm.js');
+    const activeListeners = [];
+    const add = EventTarget.prototype.addEventListener;
+    const remove = EventTarget.prototype.removeEventListener;
+    EventTarget.prototype.addEventListener = function patchedAdd(type, listener, options) {
+      if (type === 'resize' || type === 'scroll') {
+        activeListeners.push({ target: this, type, listener, removed: false });
+      }
+      return add.call(this, type, listener, options);
+    };
+    EventTarget.prototype.removeEventListener = function patchedRemove(type, listener, options) {
+      const record = activeListeners.find((item) => (
+        !item.removed && item.target === this && item.type === type && item.listener === listener
+      ));
+      if (record) record.removed = true;
+      return remove.call(this, type, listener, options);
+    };
+
+    const target = document.createElement('span');
+    target.id = 'rollback-target';
+    target.textContent = 'Rollback target';
+    target.setAttribute('aria-describedby', 'author-token');
+    target.setAttribute('data-hana', 'circle');
+    target.setAttribute('data-hana-note', 'Must be removed');
+    target.setAttribute('data-hana-accessible', '');
+    document.body.append(target);
+    const programmerError = new TypeError('later dataset failed');
+    const broken = {};
+    Object.defineProperty(broken, 'dataset', {
+      get() { throw programmerError; },
+    });
+    let sameError = false;
+    try {
+      api.scan({ querySelectorAll() { return [target, broken]; } });
+    } catch (error) {
+      sameError = error === programmerError;
+    }
+    const output = {
+      sameError,
+      overlayCount: document.querySelectorAll('[data-hana-overlay]').length,
+      ownedCount: document.querySelectorAll('[data-hana-id]').length,
+      describedBy: target.getAttribute('aria-describedby'),
+      liveListeners: activeListeners.filter((item) => !item.removed)
+        .map((item) => item.type),
+    };
+    EventTarget.prototype.addEventListener = add;
+    EventTarget.prototype.removeEventListener = remove;
+    target.remove();
+    return output;
+  });
+
+  expect(result).toEqual({
+    sameError: true,
+    overlayCount: 0,
+    ownedCount: 0,
+    describedBy: 'author-token',
+    liveListeners: [],
+  });
+});
+
+test('duration above the signed timeout limit stays pending and hide aborts cleanly', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/dist/hanamaru.esm.js');
+    const target = document.querySelector('#element-target');
+    const controller = annotate(target, {
+      mark: 'underline',
+      duration: 2_147_483_648,
+      motion: 'system',
+    });
+    controller.show();
+    const finished = controller.finished;
+    let settlement = 'pending';
+    finished.then(
+      () => { settlement = 'resolved'; },
+      (error) => { settlement = error.name; },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const beforeHide = { state: controller.state, settlement };
+    controller.hide();
+    try { await finished; } catch { /* The assertion reads the preserved AbortError name. */ }
+    const afterHide = { state: controller.state, settlement };
+    controller.destroy();
+    return {
+      beforeHide,
+      afterHide,
+      afterDestroy: {
+        state: controller.state,
+        overlays: document.querySelectorAll('[data-hana-overlay]').length,
+        owned: document.querySelectorAll('[data-hana-id]').length,
+      },
+    };
+  });
+
+  expect(result).toEqual({
+    beforeHide: { state: 'showing', settlement: 'pending' },
+    afterHide: { state: 'hidden', settlement: 'AbortError' },
+    afterDestroy: { state: 'destroyed', overlays: 0, owned: 0 },
+  });
+});

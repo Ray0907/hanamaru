@@ -12,6 +12,75 @@ export function removeDescriptionToken(current, id) {
 }
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+const MAX_TIMEOUT_DELAY = 2_147_483_647;
+
+export function createDurationClock({
+  duration,
+  now,
+  setTimeout,
+  clearTimeout,
+  complete,
+}) {
+  let active = false;
+  let elapsed = 0;
+  let settled = false;
+  let startedAt = 0;
+  let timeout = null;
+
+  function recordElapsed() {
+    const current = now();
+    elapsed = Math.min(duration, elapsed + Math.max(0, current - startedAt));
+    startedAt = current;
+  }
+
+  function finish() {
+    if (settled) return;
+    active = false;
+    settled = true;
+    complete();
+  }
+
+  function schedule() {
+    if (!active || settled || timeout !== null) return;
+    const remaining = Math.max(0, duration - elapsed);
+    startedAt = now();
+    timeout = setTimeout(onTimeout, Math.min(MAX_TIMEOUT_DELAY, remaining));
+  }
+
+  function onTimeout() {
+    timeout = null;
+    if (!active || settled) return;
+    recordElapsed();
+    if (elapsed >= duration) finish();
+    else schedule();
+  }
+
+  return {
+    pause() {
+      if (!active || settled) return;
+      recordElapsed();
+      active = false;
+      if (timeout !== null) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    },
+    resume() {
+      if (active || settled) return;
+      active = true;
+      schedule();
+    },
+    cancel() {
+      if (settled) return;
+      active = false;
+      settled = true;
+      if (timeout !== null) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    },
+  };
+}
 
 function copyRect(input) {
   return {
@@ -253,9 +322,7 @@ export function createRenderer({ id, record, options, lease }) {
       return;
     }
     run.settled = true;
-    if (run.timeout !== null) {
-      win.clearTimeout(run.timeout);
-    }
+    run.clock.cancel();
     activeAnimations = [];
     applyFinalStyles();
     if (motionRun === run) {
@@ -269,21 +336,13 @@ export function createRenderer({ id, record, options, lease }) {
       return;
     }
     run.settled = true;
-    if (run.timeout !== null) {
-      win.clearTimeout(run.timeout);
-    }
+    run.clock.cancel();
     if (motionRun === run) {
       motionRun = null;
     }
     setMotionClass('hana-is-animating', false);
     setMotionClass('hana-is-paused', false);
     run.reject(new win.DOMException('Animation cancelled', 'AbortError'));
-  }
-
-  function scheduleMotion(run) {
-    const remaining = Math.max(0, run.duration - run.elapsed);
-    run.startedAt = win.performance.now();
-    run.timeout = win.setTimeout(() => settleMotion(run), remaining);
   }
 
   function createMotionRun(duration) {
@@ -295,18 +354,22 @@ export function createRenderer({ id, record, options, lease }) {
     });
     finished.catch(() => {});
     const run = {
-      duration,
-      elapsed: 0,
+      clock: null,
       finished,
       paused: false,
       reject,
       resolve,
       settled: false,
-      startedAt: win.performance.now(),
-      timeout: null,
     };
+    run.clock = createDurationClock({
+      duration,
+      now: () => win.performance.now(),
+      setTimeout: (callback, delay) => win.setTimeout(callback, delay),
+      clearTimeout: (timeout) => win.clearTimeout(timeout),
+      complete: () => settleMotion(run),
+    });
     motionRun = run;
-    scheduleMotion(run);
+    run.clock.resume();
     return run;
   }
 
@@ -411,12 +474,7 @@ export function createRenderer({ id, record, options, lease }) {
     if (run === null || run.paused || run.settled) {
       return;
     }
-    run.elapsed = Math.min(
-      run.duration,
-      run.elapsed + (win.performance.now() - run.startedAt),
-    );
-    win.clearTimeout(run.timeout);
-    run.timeout = null;
+    run.clock.pause();
     run.paused = true;
     setMotionClass('hana-is-paused', true);
   }
@@ -431,7 +489,7 @@ export function createRenderer({ id, record, options, lease }) {
     }
     run.paused = false;
     setMotionClass('hana-is-paused', false);
-    scheduleMotion(run);
+    run.clock.resume();
   }
 
   function finish() {

@@ -40,16 +40,27 @@ export function parseDeclarative(element) {
   return options;
 }
 
-export function scan(root = document) {
+export function scanDeclarative(root, createAnnotation = annotate) {
   const annotations = [];
   const errors = [];
-  for (const element of root.querySelectorAll('[data-hana]')) {
-    try {
-      annotations.push(annotate(element, parseDeclarative(element)));
-    } catch (error) {
-      if (!(error instanceof HanamaruError)) throw error;
-      errors.push(error);
+  try {
+    for (const element of root.querySelectorAll('[data-hana]')) {
+      try {
+        annotations.push(createAnnotation(element, parseDeclarative(element)));
+      } catch (error) {
+        if (!(error instanceof HanamaruError)) throw error;
+        errors.push(error);
+      }
     }
+  } catch (error) {
+    for (let index = annotations.length - 1; index >= 0; index -= 1) {
+      try { annotations[index].destroy(); } catch { /* Preserve the programmer error. */ }
+    }
+    throw error;
   }
   return { annotations, errors };
+}
+
+export function scan(root = document) {
+  return scanDeclarative(root);
 }
