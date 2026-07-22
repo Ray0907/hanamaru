@@ -43,7 +43,7 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
           </div>
 
           <div class="demo-proof-fields">
-            <article class="demo-copy-field">
+            <article class="demo-copy-field" data-demo-proof-sheet>
               <p class="demo-proof-kicker">Correction sheet · 001</p>
               <h1 id="proof-title">Mark the words.<br>Keep the page alive.</h1>
               <p class="demo-proof-lede">
@@ -56,7 +56,7 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
                   Annotation proof specimen
                 </figcaption>
                 <span class="demo-specimen__folio" aria-hidden="true">原稿</span>
-                <p>
+                <p id="locator-proof">
                   A reliable annotation should follow the phrase it explains—not the box it
                   happened to meet on first render. Hanamaru resolves the target, measures each
                   line, and redraws the correction when the document changes.
@@ -73,27 +73,82 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
               </dl>
             </article>
 
-            <aside class="demo-code-tray" aria-label="Synchronized source proof">
+            <aside class="demo-code-tray" role="region" aria-labelledby="demo-source-proof-label"
+              data-demo-story-tray>
               <div class="demo-code-tray__heading">
                 <span id="demo-source-proof-label">Source proof</span>
-                <span>ESM / public build</span>
+                <span>public story() · manual</span>
               </div>
-              <pre data-demo-code-region tabindex="0" role="region" aria-labelledby="demo-source-proof-label"><code><span class="demo-code-dim">import</span> { annotate } <span class="demo-code-dim">from</span>
-<span class="demo-code-string">'./dist/hanamaru.esm.js'</span>
 
-<span class="demo-code-dim">const</span> note = annotate(
-  { within: <span class="demo-code-string">'#proof'</span>,
-    text: <span class="demo-code-string">'follow the phrase'</span> },
-  {
-    mark: <span class="demo-code-string">'underline'</span>,
-    note: <span class="demo-code-string">'Still attached.'</span>,
-    placement: <span class="demo-code-string">'auto'</span>
-  }
-)
+              <dl class="demo-story-docket" aria-label="Story playback docket">
+                <div><dt>State</dt><dd data-demo-story-state>idle</dd></div>
+                <div><dt>Step</dt><dd data-demo-story-step>— / 2</dd></div>
+                <div><dt>Run</dt><dd data-demo-story-run>0</dd></div>
+              </dl>
 
-note.show()</code></pre>
+              <ol class="demo-sequence" aria-label="Authored story sequence" data-demo-sequence>
+                <li data-demo-sequence-stage="code"><span aria-hidden="true">01</span>Code</li>
+                <li data-demo-sequence-stage="mark"><span aria-hidden="true">02</span>Mark</li>
+                <li data-demo-sequence-stage="connector"><span aria-hidden="true">03</span>Connector</li>
+                <li data-demo-sequence-stage="note"><span aria-hidden="true">04</span>Note</li>
+                <li data-demo-sequence-stage="advance"><span aria-hidden="true">05</span>Advance</li>
+              </ol>
+
+              <div class="demo-code-tabs" role="tablist" aria-label="Proof source format">
+                <button id="demo-tab-html" type="button" role="tab" aria-selected="false"
+                  aria-controls="demo-panel-html" tabindex="-1" data-demo-tab="html">HTML</button>
+                <button id="demo-tab-story" type="button" role="tab" aria-selected="true"
+                  aria-controls="demo-panel-story" tabindex="0" data-demo-tab="story">Story</button>
+                <button id="demo-tab-json" type="button" role="tab" aria-selected="false"
+                  aria-controls="demo-panel-json" tabindex="-1" data-demo-tab="json">JSON</button>
+              </div>
+
+              <section id="demo-panel-html" class="demo-code-panel" role="tabpanel"
+                aria-labelledby="demo-tab-html" tabindex="0" data-demo-panel="html" hidden>
+                <pre data-demo-code-region tabindex="0"><code><span class="demo-code-step" data-demo-code-step="0"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">01</span><span data-demo-code-fragment>&lt;p id="locator-proof"&gt;
+  …follow the phrase it explains…
+&lt;/p&gt;</span></span>
+<span class="demo-code-step" data-demo-code-step="1"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">02</span><span data-demo-code-fragment>&lt;p id="locator-proof"&gt;
+  …redraws the correction when the document changes…
+&lt;/p&gt;</span></span></code></pre>
+              </section>
+
+              <section id="demo-panel-story" class="demo-code-panel" role="tabpanel"
+                aria-labelledby="demo-tab-story" tabindex="0" data-demo-panel="story">
+                <pre data-demo-code-region tabindex="0"><code data-demo-story-config><span class="demo-code-step" data-demo-code-step="0"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">01</span><span data-demo-code-fragment>{ target: { within: '#locator-proof',
+  text: 'follow the phrase it explains' },
+  mark: 'underline', note: 'Still attached.' }</span></span>
+<span class="demo-code-step" data-demo-code-step="1"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">02</span><span data-demo-code-fragment>{ target: { within: '#locator-proof',
+  text: 'redraws the correction when the document changes' },
+  mark: 'circle', note: 'Measured again.' }</span></span></code></pre>
+              </section>
+
+              <section id="demo-panel-json" class="demo-code-panel" role="tabpanel"
+                aria-labelledby="demo-tab-json" tabindex="0" data-demo-panel="json" hidden>
+                <pre data-demo-code-region tabindex="0"><code><span class="demo-code-step" data-demo-code-step="0"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">01</span><span data-demo-code-fragment>{ "target": { "within": "#locator-proof",
+  "text": "follow the phrase it explains" },
+  "mark": "underline", "note": "Still attached." }</span></span>
+<span class="demo-code-step" data-demo-code-step="1"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">02</span><span data-demo-code-fragment>{ "target": { "within": "#locator-proof",
+  "text": "redraws the correction when the document changes" },
+  "mark": "circle", "note": "Measured again." }</span></span></code></pre>
+              </section>
+
+              <div class="demo-story-controls" data-demo-story-controls>
+                <button type="button" data-demo-story-action="play">Play story</button>
+                <button type="button" data-demo-story-action="pause" disabled>Pause story</button>
+                <button type="button" data-demo-story-action="resume" disabled>Resume story</button>
+                <button type="button" data-demo-story-action="replay" disabled>Replay story</button>
+                <button type="button" data-demo-copy-code>Copy active code</button>
+              </div>
+
+              <p class="demo-completion" data-demo-completion>0 of 2 accepted · idle</p>
+              <label class="demo-copy-fallback demo-code-copy-fallback" hidden
+                data-demo-code-fallback-wrap>
+                <span>Clipboard blocked. The active code is selected for manual copy:</span>
+                <textarea rows="4" readonly data-demo-code-fallback></textarea>
+              </label>
               <p class="demo-code-tray__caption">
-                No wrapper injection. The document remains yours.
+                No wrapper injection. Explicit Play owns the first run.
               </p>
             </aside>
           </div>
@@ -109,8 +164,8 @@ note.show()</code></pre>
               Copy local starter
             </button>
             <p>Registry publication is not part of this local build.</p>
-            <label class="demo-copy-fallback" hidden>
-              <span>Clipboard unavailable. Copy this selected local starter:</span>
+            <label class="demo-copy-fallback" hidden data-demo-starter-fallback-wrap>
+              <span>Clipboard blocked. The local starter is selected for manual copy:</span>
               <textarea rows="6" readonly data-demo-copy-fallback></textarea>
             </label>
           </div>
@@ -150,6 +205,20 @@ note.show()</code></pre>
             <h3>JavaScript API</h3>
             <p><code>annotate(target, options)</code> gives applications explicit lifecycle control.</p>
           </div>
+          <section class="demo-range-proof" aria-labelledby="range-proof-title" data-demo-range-proof>
+            <div>
+              <p class="demo-range-proof__kicker">Caller-owned boundary</p>
+              <h3 id="range-proof-title">Native Range, atomic replacement</h3>
+              <p id="range-proof-target">
+                <span data-demo-range-first>First phrase stays caller-selected.</span>
+                <span data-demo-range-second>Second phrase receives the same annotation.</span>
+              </p>
+            </div>
+            <button class="demo-stamp demo-stamp--secondary" type="button" data-demo-range-action>
+              Show native Range proof
+            </button>
+            <p data-demo-range-state>Ready · no Range drawn</p>
+          </section>
           <p class="demo-ledger-line">Six marks: underline · highlight · circle · box · strike · bracket</p>
         </div>
       </section>
