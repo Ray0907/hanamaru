@@ -81,7 +81,7 @@ test('@element reports invalid, missing, and ambiguous selectors with exact code
   ]);
 });
 
-test('@element rejects spoofed Element and Range objects without invoking their behavior', async ({ page }) => {
+test('@element @range rejects spoofed Element and Range objects without invoking their behavior', async ({ page }) => {
   const result = await resolve(page, `(() => {
     let calls = 0;
     const elementLike = {
@@ -104,6 +104,20 @@ test('@element rejects spoofed Element and Range objects without invoking their 
     ],
     calls: 0,
   });
+});
+
+test('@element rejects documents without a usable browsing realm with typed errors', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const other = document.implementation.createHTMLDocument('other');
+    return [other.body, 'body', other.createRange()].map((target) => {
+      try { resolveTarget(target, other); return 'ok'; } catch (error) { return [error.name, error.code]; }
+    });
+  })()`);
+  expect(result).toEqual([
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+  ]);
 });
 
 test('@range clones native Range with nested owner and preserves caller mutation isolation', async ({ page }) => {
@@ -142,6 +156,26 @@ test('@range accepts a collapsed Range and refreshes only its cloned connected b
     return { collapsed: firstRange.collapsed, sameRecord: same === record, sameRange: record.range === firstRange, offsetBeforeDisconnect, code };
   })()`);
   expect(result).toEqual({ collapsed: true, sameRecord: true, sameRange: true, offsetBeforeDisconnect: 2, code: 'HANA_TARGET_INVALID' });
+});
+
+test('@range gives document-root Ranges an HTML owner and rejects ShadowRoot ancestors', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const documentRange = document.createRange();
+    documentRange.setStart(document, 0);
+    documentRange.setEnd(document, document.childNodes.length);
+    const record = resolveTarget(documentRange);
+
+    const host = document.body.appendChild(document.createElement('div'));
+    const shadow = host.attachShadow({ mode: 'open' });
+    const text = shadow.appendChild(document.createTextNode('shadow'));
+    const shadowRange = document.createRange(); shadowRange.selectNode(text);
+    let shadowCode;
+    try { resolveTarget(shadowRange); } catch (error) { shadowCode = error.code; }
+    host.remove();
+
+    return { owner: record.ownerElement === document.documentElement, shadowCode };
+  })()`);
+  expect(result).toEqual({ owner: true, shadowCode: 'HANA_TARGET_INVALID' });
 });
 
 test('@range rejects disconnected and cross-document Range boundaries', async ({ page }) => {

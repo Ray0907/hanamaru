@@ -65,23 +65,31 @@ function targetError(code, message, details) {
   return new HanamaruTargetError(code, message, details);
 }
 
-function isElement(value, doc) {
-  return value instanceof doc.defaultView.Element;
+function targetRealm(doc) {
+  const realm = doc?.defaultView;
+  if (!realm || typeof realm.Element !== 'function' || typeof realm.Range !== 'function') {
+    throw targetError('HANA_TARGET_INVALID', 'Target document must have a usable browsing realm', { document: doc });
+  }
+  return realm;
 }
 
-function isRange(value, doc) {
-  return value instanceof doc.defaultView.Range;
+function isElement(value, realm) {
+  return value instanceof realm.Element;
 }
 
-function assertConnectedElement(element, doc) {
-  if (!isElement(element, doc) || element.ownerDocument !== doc || !element.isConnected) {
+function isRange(value, realm) {
+  return value instanceof realm.Range;
+}
+
+function assertConnectedElement(element, doc, realm) {
+  if (!isElement(element, realm) || element.ownerDocument !== doc || !element.isConnected) {
     throw targetError('HANA_TARGET_INVALID', 'Target Element must belong to and be connected to the document', {
       target: element,
     });
   }
 }
 
-function findSelectorTarget(selector, doc) {
+function findSelectorTarget(selector, doc, realm) {
   let matches;
   try {
     matches = doc.querySelectorAll(selector);
@@ -100,11 +108,11 @@ function findSelectorTarget(selector, doc) {
   }
 
   const element = matches[0];
-  assertConnectedElement(element, doc);
+  assertConnectedElement(element, doc, realm);
   return element;
 }
 
-function elementRecord(element, doc) {
+function elementRecord(element, doc, realm) {
   const record = {
     kind: 'element',
     source: element,
@@ -114,13 +122,13 @@ function elementRecord(element, doc) {
     refresh: null,
   };
   record.refresh = () => {
-    assertConnectedElement(element, doc);
+    assertConnectedElement(element, doc, realm);
     return record;
   };
   return record;
 }
 
-function selectorRecord(selector, doc) {
+function selectorRecord(selector, doc, realm) {
   const record = {
     kind: 'selector',
     source: selector,
@@ -130,7 +138,7 @@ function selectorRecord(selector, doc) {
     refresh: null,
   };
   record.refresh = () => {
-    const element = findSelectorTarget(selector, doc);
+    const element = findSelectorTarget(selector, doc, realm);
     record.element = element;
     record.ownerElement = element;
     return record;
@@ -142,8 +150,8 @@ function isConnectedBoundary(node, doc) {
   return node === doc || (node.ownerDocument === doc && node.isConnected);
 }
 
-function assertConnectedRange(range, doc) {
-  if (!isRange(range, doc)
+function assertConnectedRange(range, doc, realm) {
+  if (!isRange(range, realm)
     || !isConnectedBoundary(range.startContainer, doc)
     || !isConnectedBoundary(range.endContainer, doc)) {
     throw targetError('HANA_TARGET_INVALID', 'Target Range boundaries must belong to and be connected to the document', {
@@ -152,21 +160,33 @@ function assertConnectedRange(range, doc) {
   }
 }
 
-function rangeOwnerElement(range, doc) {
+function rangeOwnerElement(range, doc, realm) {
   const ancestor = range.commonAncestorContainer;
-  return isElement(ancestor, doc) ? ancestor : ancestor.parentElement;
+  if (isElement(ancestor, realm)) {
+    return ancestor;
+  }
+  if (ancestor === doc) {
+    return doc.documentElement;
+  }
+  return ancestor.parentElement ?? null;
 }
 
-function rangeRecord(source, doc) {
-  assertConnectedRange(source, doc);
+function rangeRecord(source, doc, realm) {
+  assertConnectedRange(source, doc, realm);
   const range = source.cloneRange();
   const boundaryNodes = [range.startContainer, range.endContainer];
+  const ownerElement = rangeOwnerElement(range, doc, realm);
+  if (ownerElement === null) {
+    throw targetError('HANA_TARGET_INVALID', 'Target Range must have an Element owner in the document tree', {
+      target: source,
+    });
+  }
   const record = {
     kind: 'range',
     source,
     element: null,
     range,
-    ownerElement: rangeOwnerElement(range, doc),
+    ownerElement,
     refresh: null,
   };
   record.refresh = () => {
@@ -181,15 +201,16 @@ function rangeRecord(source, doc) {
 }
 
 export function resolveTarget(target, doc = document) {
+  const realm = targetRealm(doc);
   if (typeof target === 'string') {
-    return selectorRecord(target, doc);
+    return selectorRecord(target, doc, realm);
   }
-  if (isElement(target, doc)) {
-    assertConnectedElement(target, doc);
-    return elementRecord(target, doc);
+  if (isElement(target, realm)) {
+    assertConnectedElement(target, doc, realm);
+    return elementRecord(target, doc, realm);
   }
-  if (isRange(target, doc)) {
-    return rangeRecord(target, doc);
+  if (isRange(target, realm)) {
+    return rangeRecord(target, doc, realm);
   }
   throw targetError('HANA_TARGET_INVALID', 'Target must be an Element, selector, or Range', { target });
 }
