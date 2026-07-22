@@ -36,6 +36,52 @@ function formatCoordinate(value) {
   return normalized.toFixed(2).replace(/\.0+$|(?<=\.[0-9])0$/, '');
 }
 
+export function buildConnector(targetRect, noteRect, side) {
+  const starts = {
+    top: [targetRect.left + (targetRect.width / 2), targetRect.top],
+    right: [targetRect.right, targetRect.top + (targetRect.height / 2)],
+    bottom: [targetRect.left + (targetRect.width / 2), targetRect.bottom],
+    left: [targetRect.left, targetRect.top + (targetRect.height / 2)],
+  };
+  const start = starts[side];
+  if (start === undefined) {
+    throw new RangeError(`Unknown connector side: ${side}`);
+  }
+
+  const [startX, startY] = start;
+  const ends = {
+    top: [Math.max(noteRect.left, Math.min(startX, noteRect.right)), noteRect.bottom],
+    right: [noteRect.left, Math.max(noteRect.top, Math.min(startY, noteRect.bottom))],
+    bottom: [Math.max(noteRect.left, Math.min(startX, noteRect.right)), noteRect.top],
+    left: [noteRect.right, Math.max(noteRect.top, Math.min(startY, noteRect.bottom))],
+  };
+  const [endX, endY] = ends[side];
+  const deltaX = endX - startX;
+  const deltaY = endY - startY;
+  const distance = Math.hypot(deltaX, deltaY);
+  if (distance === 0) {
+    return { shaft: '', head: '' };
+  }
+
+  const unitX = deltaX / distance;
+  const unitY = deltaY / distance;
+  const shaftLength = Math.max(0, distance - 8);
+  const shaftEndX = startX + (unitX * shaftLength);
+  const shaftEndY = startY + (unitY * shaftLength);
+  const backwardAngle = Math.atan2(unitY, unitX) + Math.PI;
+  const spread = (28 * Math.PI) / 180;
+  const headStartX = endX + (Math.cos(backwardAngle - spread) * 7);
+  const headStartY = endY + (Math.sin(backwardAngle - spread) * 7);
+  const headEndX = endX + (Math.cos(backwardAngle + spread) * 7);
+  const headEndY = endY + (Math.sin(backwardAngle + spread) * 7);
+  const point = (x, y) => `${formatCoordinate(x)} ${formatCoordinate(y)}`;
+
+  return {
+    shaft: `M ${point(startX, startY)} L ${point(shaftEndX, shaftEndY)}`,
+    head: `M ${point(headStartX, headStartY)} L ${point(endX, endY)} L ${point(headEndX, headEndY)}`,
+  };
+}
+
 export function buildMarkPaths(mark, rects, seed, padding = 5) {
   if (!['underline', 'highlight', 'strike', 'circle', 'box', 'bracket'].includes(mark)) {
     throw new RangeError(`Unsupported mark: ${mark}`);

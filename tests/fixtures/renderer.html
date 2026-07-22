@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Renderer fixture</title>
+    <link rel="stylesheet" href="/src/hanamaru.css">
+    <style>
+      body { margin: 0; min-height: 100vh; }
+      #target, #next-owner { position: absolute; left: 80px; top: 90px; }
+      #next-owner { top: 140px; }
+    </style>
+  </head>
+  <body>
+    <p id="target" aria-describedby="author-token">Annotated target</p>
+    <p id="next-owner" aria-describedby="next-author">Replacement owner</p>
+  </body>
+</html>

@@ -1,1 +1,92 @@
-.hana-overlay{position:fixed;inset:0;overflow:visible;pointer-events:none;z-index:var(--hana-z-index,2147483000)}
+.hana-overlay {
+  --hana-color: #c92f2a;
+  --hana-highlight-color: rgb(244 207 63 / 48%);
+  --hana-note-background: #fffef9;
+  --hana-note-color: #1f2733;
+  position: fixed;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+  z-index: var(--hana-z-index, 2147483000);
+}
+
+.hana-svg-layer,
+.hana-note-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.hana-path {
+  fill: none;
+  stroke: var(--hana-color);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: var(--hana-stroke-width, 2.5px);
+  vector-effect: non-scaling-stroke;
+}
+
+.hana-annotation[data-hana-mark="highlight"] .hana-mark-path {
+  fill: var(--hana-highlight-color);
+  stroke: none;
+}
+
+.hana-note {
+  position: absolute;
+  box-sizing: border-box;
+  max-width: min(18rem, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 0.55rem 0.7rem;
+  border: 1.5px solid var(--hana-color);
+  border-radius: 0.2rem;
+  background: var(--hana-note-background);
+  color: var(--hana-note-color);
+  font: 600 0.875rem/1.35 system-ui, sans-serif;
+  box-shadow: 2px 3px 0 rgb(31 39 51 / 12%);
+  pointer-events: none;
+}
+
+.hana-note[tabindex="0"] {
+  pointer-events: auto;
+}
+
+.hana-note.hana-is-hidden {
+  visibility: hidden;
+}
+
+.hana-is-animating .hana-mark-path {
+  animation: hana-mark-draw var(--hana-mark-duration) ease-out var(--hana-mark-delay) both;
+}
+
+.hana-is-animating .hana-connector-path {
+  animation: hana-connector-draw var(--hana-connector-duration) ease-out var(--hana-connector-delay) both;
+}
+
+.hana-note.hana-is-animating {
+  animation: hana-note-in var(--hana-note-duration) ease-out var(--hana-note-delay) both;
+}
+
+.hana-is-paused .hana-path,
+.hana-note.hana-is-paused {
+  animation-play-state: paused;
+}
+
+@keyframes hana-mark-draw {
+  from { stroke-dasharray: 1; stroke-dashoffset: 1; }
+  to { stroke-dasharray: 1; stroke-dashoffset: 0; }
+}
+
+@keyframes hana-connector-draw {
+  from { stroke-dasharray: 1; stroke-dashoffset: 1; }
+  to { stroke-dasharray: 1; stroke-dashoffset: 0; }
+}
+
+@keyframes hana-note-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}

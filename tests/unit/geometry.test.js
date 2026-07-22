@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildConnector,
   clampNoteRect,
   choosePlacement,
   connectorDistance,
@@ -12,6 +13,47 @@ import {
   scoreCandidate,
   unionRects,
 } from '../../src/geometry.js';
+
+test('connector runs from the facing target edge to a shortened right-side arrow', () => {
+  assert.deepEqual(
+    buildConnector(rect(10, 20, 30, 40), rect(100, 30, 50, 20), 'right'),
+    {
+      shaft: 'M 40 40 L 92 40',
+      head: 'M 93.82 43.29 L 100 40 L 93.82 36.71',
+    },
+  );
+});
+
+test('connector clamps its note endpoint along each facing edge', () => {
+  assert.deepEqual(
+    buildConnector(rect(40, 60, 20, 20), rect(10, 0, 20, 20), 'top'),
+    {
+      shaft: 'M 50 60 L 33.58 27.16',
+      head: 'M 35.7 24.06 L 30 20 L 29.82 27',
+    },
+  );
+  assert.deepEqual(
+    buildConnector(rect(40, 60, 20, 20), rect(80, 100, 20, 20), 'bottom'),
+    {
+      shaft: 'M 50 80 L 73.34 95.56',
+      head: 'M 73.03 99.31 L 80 100 L 76.68 93.84',
+    },
+  );
+  assert.deepEqual(
+    buildConnector(rect(40, 60, 20, 20), rect(0, 100, 20, 20), 'left'),
+    {
+      shaft: 'M 40 70 L 24.44 93.34',
+      head: 'M 20.69 93.03 L 20 100 L 26.16 96.68',
+    },
+  );
+});
+
+test('connector returns empty paths when its facing edge already touches the note', () => {
+  assert.deepEqual(
+    buildConnector(rect(10, 10, 20, 20), rect(30, 15, 20, 10), 'right'),
+    { shaft: '', head: '' },
+  );
+});
 
 test('rect returns an independent plain rectangle with stable fields', () => {
   const result = rect(1.5, -2.25, 30.75, 4.5);
