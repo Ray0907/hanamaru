@@ -18,12 +18,12 @@ test('Playwright projects route full and smoke suites to the intended browsers',
   assert.equal(matches(projects.webkit.testMatch, 'smoke.spec.js'), true);
 });
 
-test('Playwright starts the harness server before tests', () => {
+test('Playwright starts the scan-fixture server before tests', () => {
   assert.equal(config.testDir, './tests/e2e');
   assert.equal(config.timeout, 15_000);
   assert.equal(config.use.baseURL, 'http://127.0.0.1:4173');
   assert.equal(config.use.trace, 'retain-on-failure');
   assert.equal(config.webServer.command, 'npm run build && npm run dev');
-  assert.equal(config.webServer.url, 'http://127.0.0.1:4173/tests/fixtures/harness.html');
+  assert.equal(config.webServer.url, 'http://127.0.0.1:4173/tests/fixtures/scan.html');
   assert.equal(config.webServer.reuseExistingServer, true);
 });

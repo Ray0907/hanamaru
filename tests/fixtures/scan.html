@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Declarative scan fixture</title>
+    <link rel="stylesheet" href="/dist/hanamaru.css">
+    <style>
+      body { margin: 40px; min-height: 120vh; }
+      section { width: min(760px, 84vw); margin-block: 48px; }
+      [data-hana], .target { display: inline-block; margin: 32px; }
+    </style>
+  </head>
+  <body>
+    <section id="esm-scan">
+      <span id="esm-before" data-hana="highlight" data-hana-motion="never">Valid before</span>
+      <span id="esm-invalid-mark" data-hana="sparkle">Invalid mark</span>
+      <span id="esm-invalid-duration" data-hana="box" data-hana-duration="12ms">Invalid duration</span>
+      <span
+        id="esm-after"
+        data-hana="circle"
+        data-hana-note="Valid sibling still mounts"
+        data-hana-accessible="false"
+        data-hana-duration="0"
+      >Valid after</span>
+    </section>
+
+    <section id="iife-scan">
+      <span id="iife-valid" data-hana="underline" data-hana-motion="never">IIFE explicit scan</span>
+    </section>
+
+    <main id="smoke-arena">
+      <p id="element-target" class="target">Element smoke target</p>
+      <p id="locator-scope" class="target">Prefix exact locator phrase suffix</p>
+    </main>
+  </body>
+</html>
