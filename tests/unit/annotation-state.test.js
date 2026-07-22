@@ -43,6 +43,7 @@ function fakeEnvironment({
   let rendererFailure = null;
   let currentRendererDestroyFailure = rendererDestroyFailure;
   let currentRendererCreateFailure = null;
+  let eventHandler = null;
   const rendererMethodFailures = new Map();
   const failRenderer = (method) => {
     const error = rendererMethodFailures.get(method);
@@ -132,6 +133,7 @@ function fakeEnvironment({
     get layout() { return layout; },
     get registered() { return registered; },
     setResolveFailure(error) { currentResolveFailure = error; },
+    setEventHandler(handler) { eventHandler = handler; },
     setRendererFailure(error) { rendererFailure = error; },
     setRendererCreateFailure(error) { currentRendererCreateFailure = error; },
     setRendererDestroyFailure(error) { currentRendererDestroyFailure = error; },
@@ -142,7 +144,11 @@ function fakeEnvironment({
     setRebindFailure(error) { currentRebindFailure = error; },
     env: {
       id: 'unit-annotation',
-      createEvent(type, detail, eventOwner) { events.push({ type, detail, owner: eventOwner }); },
+      createEvent(type, detail, eventOwner) {
+        const event = { type, detail, owner: eventOwner };
+        events.push(event);
+        eventHandler?.(event);
+      },
       createRenderer(args) {
         calls.push(['createRenderer', args]);
         if (currentRendererCreateFailure !== null) throw currentRendererCreateFailure;
@@ -201,6 +207,63 @@ test('non-suspended transitions accept one show run and ignore duplicate show', 
   assert.equal(controller.finished, run);
 });
 
+test('a hana:start hide invalidates the outer show before it can enqueue or draw', async () => {
+  const { controller, environment } = create();
+  environment.setEventHandler((event) => {
+    if (event.type === 'hana:start') controller.hide();
+  });
+
+  controller.show();
+  const run = controller.finished;
+
+  await assert.rejects(run, (error) => error instanceof DOMException && error.name === 'AbortError');
+  assert.equal(controller.state, 'hidden');
+  assert.equal(environment.calls.filter((call) => Array.isArray(call) && call[0] === 'enqueue').length, 0);
+  assert.equal(environment.calls.filter((call) => Array.isArray(call) && call[0] === 'draw').length, 0);
+  assert.deepEqual(
+    environment.events.map((event) => event.type === 'hana:cancel'
+      ? `${event.type}:${event.detail.reason}`
+      : event.type),
+    ['hana:start', 'hana:cancel:hide'],
+  );
+  controller.destroy();
+});
+
+test('a no-op show does not invalidate the accepted showing operation', async () => {
+  const { controller, environment } = create();
+
+  controller.show();
+  const run = controller.finished;
+  controller.show();
+  environment.animation.resolve();
+
+  await run;
+  assert.equal(controller.state, 'visible');
+  assert.equal(environment.calls.filter((call) => Array.isArray(call) && call[0] === 'animate').length, 1);
+  controller.destroy();
+});
+
+test('a hana:start replay invalidates only the stale outer show continuation', async () => {
+  const { controller, environment } = create();
+  let replayed = false;
+  environment.setEventHandler((event) => {
+    if (event.type === 'hana:start' && !replayed) {
+      replayed = true;
+      controller.replay();
+    }
+  });
+
+  controller.show();
+  const replayRun = controller.finished;
+  environment.animation.resolve();
+
+  await replayRun;
+  assert.equal(controller.state, 'visible');
+  assert.equal(environment.calls.filter((call) => Array.isArray(call) && call[0] === 'animate').length, 1);
+  assert.equal(environment.calls.filter((call) => Array.isArray(call) && call[0] === 'draw').length, 1);
+  controller.destroy();
+});
+
 test('AbortError rejects a showing run when hidden', async () => {
   const { controller } = create();
   controller.show();
@@ -210,6 +273,57 @@ test('AbortError rejects a showing run when hidden', async () => {
 
   await assert.rejects(run, (error) => error instanceof DOMException && error.name === 'AbortError');
   assert.equal(controller.state, 'hidden');
+});
+
+test('a hana:cancel destroy prevents outer hide from touching released resources', async () => {
+  const { controller, environment } = create();
+  controller.show();
+  environment.animation.resolve();
+  const settledRun = controller.finished;
+  await settledRun;
+  environment.setEventHandler((event) => {
+    if (event.type === 'hana:cancel' && event.detail.reason === 'hide') controller.destroy();
+  });
+
+  controller.hide();
+
+  assert.equal(controller.state, 'destroyed');
+  assert.equal(controller.finished, settledRun);
+  assert.equal(environment.calls.filter((call) => call === 'renderer:hide').length, 0);
+  assert.equal(environment.calls.filter((call) => call === 'renderer:destroy').length, 1);
+  assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+  assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+  assert.deepEqual(
+    environment.events.filter((event) => event.type === 'hana:cancel')
+      .map((event) => event.detail.reason),
+    ['hide', 'destroy'],
+  );
+});
+
+test('a hana:cancel destroy prevents outer replay from creating a pending run', async () => {
+  const { controller, environment } = create();
+  controller.show();
+  environment.animation.resolve();
+  const settledRun = controller.finished;
+  await settledRun;
+  environment.setEventHandler((event) => {
+    if (event.type === 'hana:cancel' && event.detail.reason === 'replay') controller.destroy();
+  });
+
+  controller.replay();
+
+  assert.equal(controller.state, 'destroyed');
+  assert.equal(controller.finished, settledRun);
+  await assert.doesNotReject(settledRun);
+  assert.equal(environment.calls.filter((call) => call === 'renderer:hide').length, 0);
+  assert.equal(environment.calls.filter((call) => call === 'renderer:destroy').length, 1);
+  assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+  assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+  assert.deepEqual(
+    environment.events.filter((event) => event.type === 'hana:cancel')
+      .map((event) => event.detail.reason),
+    ['replay', 'destroy'],
+  );
 });
 
 test('non-suspended transitions replay every live state with a fresh run', async () => {

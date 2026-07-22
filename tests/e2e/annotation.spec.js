@@ -154,6 +154,99 @@ test('motion never reaches visible synchronously without waiting for a frame', a
   expect(result).toEqual({ state: 'visible', paths: 2, noteVisible: true });
 });
 
+test('hana:start reentrancy cannot revive a show hidden by its listener', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const target = document.querySelector('#direct-target');
+    const events = [];
+    let controller;
+    target.addEventListener('hana:start', () => {
+      events.push('start');
+      controller.hide();
+    });
+    target.addEventListener('hana:cancel', (event) => events.push(`cancel:${event.detail.reason}`));
+    target.addEventListener('hana:complete', () => events.push('complete'));
+    controller = annotate(target, {
+      mark: 'circle', note: 'Stay hidden', accessible: true, motion: 'never',
+    });
+
+    controller.show();
+    const rejection = await controller.finished.then(
+      () => null,
+      (error) => ({ name: error.name, message: error.message }),
+    );
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const group = document.querySelector('.hana-annotation');
+    const note = document.querySelector('.hana-note');
+    const output = {
+      state: controller.state,
+      rejection,
+      events,
+      groupHidden: group.hasAttribute('hidden'),
+      groupDisplay: getComputedStyle(group).display,
+      noteHidden: note.hidden || getComputedStyle(note).visibility === 'hidden',
+      paths: group.querySelectorAll('.hana-path').length,
+      description: target.getAttribute('aria-describedby'),
+    };
+    controller.destroy();
+    return output;
+  });
+
+  expect(result).toEqual({
+    state: 'hidden',
+    rejection: { name: 'AbortError', message: 'Annotation run cancelled' },
+    events: ['start', 'cancel:hide'],
+    groupHidden: true,
+    groupDisplay: 'none',
+    noteHidden: true,
+    paths: 0,
+    description: 'author-token',
+  });
+});
+
+test('hana:cancel destroy stops outer hide and replay continuations', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+
+    async function run(reason, target) {
+      const events = [];
+      const controller = annotate(target, {
+        mark: 'box', note: `${reason} teardown`, accessible: true, motion: 'never',
+      });
+      controller.show();
+      const settledRun = controller.finished;
+      await settledRun;
+      target.addEventListener('hana:cancel', (event) => {
+        events.push(event.detail.reason);
+        if (event.detail.reason === reason) controller.destroy();
+      });
+
+      controller[reason]();
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return {
+        state: controller.state,
+        sameRun: controller.finished === settledRun,
+        events,
+        owned: document.querySelectorAll('[data-hana-id]').length,
+        overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      };
+    }
+
+    const hidden = await run('hide', document.querySelector('#direct-target'));
+    const replayed = await run('replay', document.querySelector('#selector-target'));
+    return { hidden, replayed };
+  });
+
+  expect(result).toEqual({
+    hidden: {
+      state: 'destroyed', sameRun: true, events: ['hide', 'destroy'], owned: 0, overlays: 0,
+    },
+    replayed: {
+      state: 'destroyed', sameRun: true, events: ['replay', 'destroy'], owned: 0, overlays: 0,
+    },
+  });
+});
+
 test('selector replacement while visibility is not requested recovers hidden without drawing', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');

@@ -372,6 +372,7 @@ export function createAnnotation(target, rawOptions, env) {
   let run = null;
   let requestedVisible = false;
   let destroyed = false;
+  let operationEpoch = 0;
   let disconnectedEpisode = false;
   let renderabilityEpisode = false;
   const resolutionFailures = new WeakSet();
@@ -389,12 +390,22 @@ export function createAnnotation(target, rawOptions, env) {
   };
   setActiveRenderer();
 
+  function acceptOperation() {
+    operationEpoch += 1;
+    return operationEpoch;
+  }
+
+  function isCurrentOperation(candidate) {
+    return !destroyed && candidate === operationEpoch;
+  }
+
   function setActiveRenderer() {
     activeRenderers.set(controller, { renderer, onFailure: handleRuntimeFailure });
   }
 
-  function settleVisible(activeRun = run) {
-    if (destroyed || activeRun === null || activeRun !== run || activeRun.settled) return;
+  function settleVisible(activeRun = run, operation = operationEpoch) {
+    if (!isCurrentOperation(operation)
+      || activeRun === null || activeRun !== run || activeRun.settled) return;
     activeRun.settled = true;
     state = 'visible';
     activeRun.resolve();
@@ -482,9 +493,13 @@ export function createAnnotation(target, rawOptions, env) {
     }
   }
 
-  function schedule({ animate = false, finish = false, restore = false, validate = false } = {}) {
+  function schedule(
+    { animate = false, finish = false, restore = false, validate = false } = {},
+    operation = operationEpoch,
+  ) {
     const activeRun = run;
     const read = () => {
+      if (!isCurrentOperation(operation)) return null;
       resolveCurrentTarget();
       const owner = record.ownerElement;
       const layout = validate ? (env.targetRects(record), null) : layoutFor(record, renderer, options, env);
@@ -495,6 +510,7 @@ export function createAnnotation(target, rawOptions, env) {
       };
     };
     const write = (result, synchronous = false) => {
+      if (!isCurrentOperation(operation) || result === null) return;
       knownOwners.add(result.owner);
       renderer.updateOwner(result.owner);
       if (result.layout === null) {
@@ -505,23 +521,27 @@ export function createAnnotation(target, rawOptions, env) {
       if (finish) {
         renderer.finish();
         if (restore) state = 'visible';
-        else settleVisible(activeRun);
+        else settleVisible(activeRun, operation);
         return;
       }
       if (!animate) return;
       const reduced = env.reducedMotion(options);
       const motion = renderer.animate(reduced ? 0 : options.duration);
       if (reduced && synchronous) {
-        settleVisible(activeRun);
         motion.finished.catch((error) => {
-          if (error?.name !== 'AbortError') handleRuntimeFailure(error);
+          if (isCurrentOperation(operation) && error?.name !== 'AbortError') {
+            handleRuntimeFailure(error);
+          }
         });
+        settleVisible(activeRun, operation);
         return;
       }
       motion.finished.then(
-        () => settleVisible(activeRun),
+        () => settleVisible(activeRun, operation),
         (error) => {
-          if (error?.name !== 'AbortError') handleRuntimeFailure(error);
+          if (isCurrentOperation(operation) && error?.name !== 'AbortError') {
+            handleRuntimeFailure(error);
+          }
         },
       );
     };
@@ -529,7 +549,7 @@ export function createAnnotation(target, rawOptions, env) {
       try {
         write(read(), true);
       } catch (error) {
-        handleScheduledFailure(error);
+        if (isCurrentOperation(operation)) handleScheduledFailure(error);
       }
       return;
     }
@@ -539,10 +559,12 @@ export function createAnnotation(target, rawOptions, env) {
         generation,
         read,
         write,
-        onError: handleScheduledFailure,
+        onError(error) {
+          if (isCurrentOperation(operation)) handleScheduledFailure(error);
+        },
       });
     } catch (error) {
-      handleRuntimeFailure(error);
+      if (isCurrentOperation(operation)) handleRuntimeFailure(error);
     }
   }
 
@@ -586,14 +608,16 @@ export function createAnnotation(target, rawOptions, env) {
     }
   }
 
-  function startResolvedRun() {
+  function startResolvedRun(operation) {
     state = 'showing';
     dispatch(env, record.ownerElement, 'hana:start', { controller, state });
-    schedule({ animate: true });
+    if (!isCurrentOperation(operation)) return;
+    schedule({ animate: true }, operation);
   }
 
   function show() {
     if (destroyed || state === 'showing' || state === 'visible') return controller;
+    const operation = acceptOperation();
     startDeferredRun();
     try {
       resolveCurrentTarget();
@@ -601,7 +625,7 @@ export function createAnnotation(target, rawOptions, env) {
       reportTargetFailure(error);
       return controller;
     }
-    startResolvedRun();
+    startResolvedRun(operation);
     return controller;
   }
 
@@ -616,14 +640,17 @@ export function createAnnotation(target, rawOptions, env) {
 
   function hide() {
     if (destroyed) return controller;
+    const operation = acceptOperation();
     const wasActive = state === 'showing' || state === 'visible';
     requestedVisible = false;
     cancelPending('hide', wasActive);
+    if (!isCurrentOperation(operation)) return controller;
     state = 'hidden';
     try {
       renderer.hide();
     } catch (error) {
       handleRuntimeFailure(error);
+      if (!isCurrentOperation(operation)) return controller;
     }
     if (wasActive && !rebindOrSuspend()) return controller;
     return controller;
@@ -631,13 +658,16 @@ export function createAnnotation(target, rawOptions, env) {
 
   function replay() {
     if (destroyed) return controller;
+    const operation = acceptOperation();
     const wasActive = state === 'showing' || state === 'visible';
     cancelPending('replay', wasActive);
+    if (!isCurrentOperation(operation)) return controller;
     startDeferredRun();
     try {
       renderer.hide();
     } catch (error) {
       handleRuntimeFailure(error);
+      if (!isCurrentOperation(operation)) return controller;
       rebindOrSuspend();
       return controller;
     }
@@ -648,12 +678,13 @@ export function createAnnotation(target, rawOptions, env) {
       reportTargetFailure(error);
       return controller;
     }
-    startResolvedRun();
+    startResolvedRun(operation);
     return controller;
   }
 
   function refresh() {
     if (destroyed) return controller;
+    const operation = acceptOperation();
     const priorState = state;
     try {
       resolveCurrentTarget();
@@ -662,12 +693,12 @@ export function createAnnotation(target, rawOptions, env) {
       return controller;
     }
     if (!rebindOrSuspend()) return controller;
-    if (priorState === 'showing') schedule({ finish: true });
-    else if (priorState === 'visible') schedule({ finish: true, restore: true });
+    if (priorState === 'showing') schedule({ finish: true }, operation);
+    else if (priorState === 'visible') schedule({ finish: true, restore: true }, operation);
     else if (priorState === 'suspended') {
-      if (requestedVisible) schedule({ finish: true, restore: true });
-      else schedule({ validate: true });
-    } else schedule({ validate: true });
+      if (requestedVisible) schedule({ finish: true, restore: true }, operation);
+      else schedule({ validate: true }, operation);
+    } else schedule({ validate: true }, operation);
     return controller;
   }
 
@@ -679,6 +710,7 @@ export function createAnnotation(target, rawOptions, env) {
     delete optionPatch.target;
     const nextOptions = normalizeOptions({ ...options, ...optionPatch }, options.seed);
     const nextRecord = env.resolveTarget(nextTarget);
+    const operation = acceptOperation();
     let nextRenderer;
     try {
       nextRenderer = createOwnedRenderer(env, {
@@ -721,15 +753,17 @@ export function createAnnotation(target, rawOptions, env) {
       handleRuntimeFailure(cleanupFailure);
       return controller;
     }
-    if (priorState === 'showing') schedule({ finish: true });
-    else if (priorState === 'visible') schedule({ finish: true, restore: true });
-    else if (priorState === 'suspended' && requestedVisible) schedule({ finish: true, restore: true });
-    else if (priorState === 'suspended') schedule({ validate: true });
+    if (priorState === 'showing') schedule({ finish: true }, operation);
+    else if (priorState === 'visible') schedule({ finish: true, restore: true }, operation);
+    else if (priorState === 'suspended' && requestedVisible) {
+      schedule({ finish: true, restore: true }, operation);
+    } else if (priorState === 'suspended') schedule({ validate: true }, operation);
     return controller;
   }
 
   function destroy() {
     if (destroyed) return controller;
+    acceptOperation();
     const wasActive = state === 'showing' || state === 'visible';
     destroyed = true;
     let failure = null;
