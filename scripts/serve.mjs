@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +18,8 @@ function notFound(response) {
 export async function createStaticServer({ root = process.cwd(), port = 4173 } = {}) {
   const resolvedRoot = path.resolve(root);
   const rootPrefix = `${resolvedRoot}${path.sep}`;
+  const realRoot = await realpath(resolvedRoot);
+  const realRootPrefix = `${realRoot}${path.sep}`;
 
   const server = createServer(async (request, response) => {
     let pathname;
@@ -37,14 +39,19 @@ export async function createStaticServer({ root = process.cwd(), port = 4173 } =
     }
 
     try {
-      const fileStat = await stat(filePath);
+      const realFilePath = await realpath(filePath);
+      if (realFilePath !== realRoot && !realFilePath.startsWith(realRootPrefix)) {
+        notFound(response);
+        return;
+      }
+      const fileStat = await stat(realFilePath);
       if (!fileStat.isFile()) {
         notFound(response);
         return;
       }
-      const type = MIME_TYPES[path.extname(filePath)] ?? 'application/octet-stream';
+      const type = MIME_TYPES[path.extname(realFilePath)] ?? 'application/octet-stream';
       response.writeHead(200, { 'content-type': type });
-      response.end(await readFile(filePath));
+      response.end(await readFile(realFilePath));
     } catch {
       notFound(response);
     }
