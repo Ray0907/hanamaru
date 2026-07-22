@@ -207,13 +207,13 @@ Each story step uses the annotation option matrix except `trigger` and `motion`;
 | `trigger` | `manual \| load \| viewport` | `manual` | starts the story |
 | `gap` | non-negative integer milliseconds | `180` | delay between completed steps |
 | `once` | boolean | `true` for viewport; not applicable otherwise | viewport stories play only on first entry |
-| `motion` | `system \| always \| never` | `system` | story-wide motion policy inherited by steps unless a step is `never` |
+| `motion` | `system \| never` | `system` | story-wide motion policy |
 
 An explicitly supplied `once` is rejected unless `trigger` is `viewport`.
 
 ### 5.4 Lifecycle Events and State
 
-Annotations and stories expose `state` and a per-run `finished` Promise. Control methods return the controller for chaining. `finished` resolves on `visible` for an annotation or `complete` for a story; it rejects with `AbortError` after hide/cancel/destroy and with the typed runtime error after target loss.
+Annotations and stories expose `state` and a per-run `finished` Promise. Before the first accepted run, `finished` is `null`. Every accepted annotation `show()`/`replay()` and story `play()`/`replay()` creates a new Promise after rejecting any still-pending prior run with `AbortError`. Control methods return the controller for chaining. `finished` resolves on `visible` for an annotation or `complete` for a story; it rejects with `AbortError` after hide/cancel/destroy and with the typed runtime error after target or renderer failure.
 
 Every resolved target has an `ownerElement`: the target element for `Element`/selector targets, the nearest element containing a native Range's common ancestor, and the resolved `within` element for a text locator. Events dispatch from `ownerElement` as bubbling, composed `CustomEvent`s. Story-level events dispatch from the first step's owner element. Event payloads are:
 
@@ -226,17 +226,23 @@ Every resolved target has an `ownerElement`: the target element for `Element`/se
 | `hana:cancel` | annotation, story | `{ controller, reason }` |
 | `hana:error` | annotation, story | `{ controller, error, index? }` |
 
-Annotation states and valid transitions are:
+Annotation states and valid transitions are normative:
 
-```text
-idle --show/replay--> showing --finish--> visible
-visible --hide--> hidden
-showing --hide--> hidden
-idle/hidden/visible --refresh failure--> suspended
-suspended --successful refresh/update--> hidden or visible (preserve requested visibility)
-any non-destroyed state --destroy--> destroyed
-replay from any non-destroyed state cancels the current run, resets, then enters showing
-```
+| Current state | Method/signal | Result |
+|---|---|---|
+| `idle`, `hidden` | `show()` | create `finished`; resolve target; enter `showing`; finish at `visible` |
+| `showing`, `visible` | `show()` | no-op; retain the current `finished` |
+| any non-destroyed | `replay()` | abort pending run, reset visuals, create `finished`, enter `showing`, then `visible` |
+| `showing`, `visible` | `hide()` | abort pending run if any; hide visuals; enter `hidden` |
+| `idle`, `hidden` | `hide()` | enter/remain `hidden`; no Promise created |
+| `suspended` | `hide()` | clear requested visibility and enter `hidden` |
+| any non-destroyed | successful `refresh()` | remeasure; if a run was `showing`, finish immediately at `visible`; otherwise retain `idle`, `hidden`, or `visible` |
+| any non-destroyed | failed `refresh()` | remember whether visibility was requested; hide visuals; enter `suspended`; reject pending `finished` |
+| `suspended` | successful `refresh()` | restore `visible` without animation when visibility was requested, otherwise enter `hidden` |
+| any non-destroyed | successful `update(patch)` | atomically swap target/options; preserve `idle`/`hidden`; re-render final `visible` state when previously visible/showing/requested-visible; do not create a run Promise |
+| any non-destroyed | `destroy()` | abort pending run, release resources, enter `destroyed` |
+
+`show()` from `suspended` performs the same re-resolution as `refresh()`; success creates a run and enters `showing`, while failure remains `suspended` and returns a rejected `finished` Promise.
 
 Story states and valid transitions are:
 
@@ -254,20 +260,21 @@ Trigger semantics are fixed:
 
 - `manual`: never starts automatically.
 - `load`: if `DOMContentLoaded` has not fired, attach a one-shot listener; otherwise start in a microtask.
-- `viewport`: observe the first target at threshold `0.25`; `once: true` disconnects after the first start, while `once: false` cancels on full exit and replays on the next qualifying entry.
+- `viewport` story: observe the first target at threshold `0.25`; `once: true` disconnects after the first start, while `once: false` cancels on full exit and replays on the next qualifying entry.
+- `viewport` annotation: show on the first `0.25` threshold entry, remain visible on exit, and permanently disconnect its trigger observer. Repeating viewport behavior is story-only in V1.
 
 ### 5.5 Annotation Option Matrix
 
 | Option | Type | Default | Validation and behavior |
 |---|---|---:|---|
 | `mark` | six-mark enum | required | invalid/missing throws configuration error |
-| `note` | string or `null` | `null` | empty string normalizes to `null` |
+| `note` | string or `null` | `null` | empty string normalizes to `null`; maximum 280 Unicode code points |
 | `placement` | `auto \| top \| right \| bottom \| left` | `auto` | a preference; viewport visibility always wins |
 | `trigger` | `manual \| load \| viewport` | `manual` | controls annotation `show()` timing |
 | `accessible` | boolean | `false` | associates a meaningful note with `ownerElement` |
 | `seed` | string or finite number | generated instance ID | stable for that controller's lifetime and replays |
 | `duration` | non-negative integer milliseconds | `650` | total mark/connector/note animation duration |
-| `motion` | `system \| always \| never` | `system` | `system` follows the media query |
+| `motion` | `system \| never` | `system` | `system` always respects the media query; `never` disables interpolation |
 
 Connector maximum distance, multiline rendering policy, safe insets, and note width are internal constants in V1, not public options. `underline` and `highlight` render per line; the other four marks use the union rectangle.
 
@@ -282,7 +289,9 @@ Supported target forms:
 
 Text matching walks descendant text nodes in document order, excluding `script`, `style`, `noscript`, `template`, `[hidden]`, and `[inert]` subtrees. Both source text and locator text are trimmed and normalize consecutive Unicode whitespace to one ASCII space while preserving a mapping back to text-node offsets. Matching is case-sensitive and exact in V1. Matches are non-overlapping and ordered left to right. `occurrence` is zero-based.
 
-The `within` element or selector must resolve uniquely and be connected. If `within` is a selector, refresh re-queries it and can recover after the container is replaced with a new unique match. If `within` is an `Element`, identity is by object; disconnection suspends the target and a different replacement element is not adopted implicitly.
+The normalized locator `text` must contain at least one non-whitespace character. `occurrence`, when supplied, must be an integer greater than or equal to zero. Invalid values throw `HanamaruConfigError` before target matching.
+
+The `within` element or selector must resolve uniquely and be connected. If `within` is a selector, refresh re-queries it and can recover after the container is replaced with a new unique match; observation attaches to `document`, not the replaceable container. If `within` is an `Element`, identity is by object; disconnection suspends the target and a different replacement element is not adopted implicitly.
 
 - Zero matches: `HANA_TARGET_MISSING`.
 - Multiple matches without `occurrence`: `HANA_TARGET_AMBIGUOUS`.
@@ -305,13 +314,13 @@ Automatic placement evaluates top, right, bottom, and left candidates. Each cand
 - overlap with already placed visible notes;
 - connector distance beyond the internal 240px preference.
 
-The viewport safe inset is 12px. Notes use `max-width: min(18rem, calc(100vw - 24px))` and `overflow-wrap: anywhere`. The lowest-penalty candidate wins. Ties prefer right, top, bottom, then left in left-to-right documents; the order mirrors for RTL documents. An explicit placement is tried first, then its opposite, then automatic candidates. The final note rectangle is clamped fully inside the safe inset even when every candidate overflows; the connector redraws to the clamped edge. No placement may intentionally hide part of a note.
+The viewport safe inset is 12px. Note input is limited to 280 Unicode code points. Notes use `max-width: min(18rem, calc(100vw - 24px))`, `max-height: calc(100vh - 24px)`, `overflow: auto`, and `overflow-wrap: anywhere`. Overflowing accessible notes receive `tabindex="0"`; other notes do not intercept pointer events. The lowest-penalty candidate wins. Ties prefer right, top, bottom, then left in left-to-right documents; the order mirrors for RTL documents. An explicit placement is tried first, then its opposite, then automatic candidates. The final note rectangle is clamped fully inside the safe inset even when every candidate overflows; the connector redraws to the clamped edge. The box is always fully visible, with internal scrolling for exceptional height.
 
 Placement is deterministic for identical rectangles and viewport size, enabling pure unit tests.
 
 ## 8. Observation and Scheduling
 
-`ResizeObserver` watches target elements, text-locator containers, and rendered notes. Scroll listeners are registered passively on every scrollable ancestor plus `window`. A shared `MutationObserver` watches the smallest stable scope that can change identity or position: the target parent for direct Elements, `document` for selector targets, and the resolved `within` container for text locators. It observes `childList`, `subtree`, `characterData`, and the `class`, `style`, and `hidden` attributes. Window resize and every observer/listener enqueue refresh through one `requestAnimationFrame` scheduler. Pure CSS animation or transform movement that produces none of these signals requires the documented `refresh()` call in V1.
+`ResizeObserver` watches target elements, text-locator containers, and rendered notes. Scroll listeners are registered passively on every scrollable ancestor plus `window`. A shared `MutationObserver` watches the smallest stable scope that can change identity or position: the target parent for direct Elements, `document` for selector targets and selector-based text locators, and the fixed resolved `within` element for element-based text locators. It observes `childList`, `subtree`, `characterData`, and the `class`, `style`, and `hidden` attributes. Mutation records whose target is inside the runtime-owned `[data-hana-overlay]` root are discarded so Hanamaru never refreshes itself recursively. Window resize and every remaining observer/listener enqueue refresh through one `requestAnimationFrame` scheduler. Pure CSS animation or transform movement that produces none of these signals requires the documented `refresh()` call in V1.
 
 The scheduler deduplicates annotation IDs and performs all reads before writes to avoid layout thrashing. Shared overlay, scheduler, scroll listeners, and observers are owned by a per-document resource manager with reference counts. Destroying one annotation removes only its subscriptions. The overlay and global listeners are removed when the final controller is destroyed. Every queued job captures a controller generation token and exits before render if the controller was destroyed or superseded.
 
@@ -345,7 +354,7 @@ The authored sequence is: activate corresponding code step, draw mark, draw conn
 
 Replay removes active classes, forces no synchronous layout read beyond the scheduler boundary, restores the initial state, and restarts on the next animation frame. Pause and resume use the Web Animations API when available and a time-accounting fallback when unavailable.
 
-The canonical `motion` option controls animation. `system` follows `prefers-reduced-motion`, `never` always skips interpolation, and `always` animates even when the system requests reduction; documentation warns against overriding user preference without a specific user-controlled setting. When motion is reduced, durations become zero, all content appears in its complete state, and lifecycle events fire in the same logical order.
+The canonical `motion` option controls animation. `system` follows `prefers-reduced-motion`; `never` always skips interpolation. V1 provides no option that overrides a system reduction request. When motion is reduced, annotation durations and story gaps become zero, all content appears in its complete state in the same task turn, and lifecycle events fire in the same logical order.
 
 ## 11. Accessibility Contract
 
@@ -365,7 +374,7 @@ Public typed errors extend `Error` and contain `code`, `message`, and optional `
 - `HanamaruConfigError`: unsupported mark, placement, trigger, timing, or malformed story.
 - `HanamaruStateError`: unexpected asynchronous renderer or scheduler failure; invalid public lifecycle transitions remain no-ops.
 
-Imperative construction throws before DOM mutation. Declarative scanning collects errors. Runtime disconnection suspends an annotation rather than throwing repeatedly. Unexpected refresh failures dispatch one `hana:error`, hide only the affected annotation, and leave other annotations running.
+Imperative construction throws before DOM mutation. Declarative scanning collects errors. Runtime disconnection suspends an annotation rather than throwing repeatedly. An unexpected renderer or scheduler failure in a standalone annotation dispatches one `hana:error`, rejects pending `finished`, hides the annotation, and enters `suspended`. The same failure in a story dispatches story-level `hana:error` with the step index, hides the failed step, retains completed marks for diagnosis, transitions the story to `cancelled`, and rejects story `finished` with `HanamaruStateError`.
 
 Copy-to-clipboard failure in the demo reveals a selectable fallback code field. Unsupported optional browser APIs degrade as follows:
 
@@ -406,17 +415,18 @@ The user selects existing specimen text, mark, note, placement, and trigger, the
 1. `node --test tests/unit/**/*.test.js` for target validation, geometry, candidate scoring, state transitions, and configuration validation.
 2. Production build for `hanamaru.esm.js`, `hanamaru.iife.js`, and `hanamaru.css`, targeting ES2020 evergreen browsers.
 3. Distribution check that asserts `package.json` has no `dependencies`, `npm ls --omit=dev --json` reports no production packages, and both `gzip(ESM, level 9) + gzip(CSS, level 9)` and `gzip(IIFE, level 9) + gzip(CSS, level 9)` are at most 8192 bytes. It reports, but does not fail, the 5120-byte JavaScript stretch target for each format.
-4. Playwright E2E tests against the built demo.
+4. Playwright E2E tests against the built demo. Chromium runs the full suite; Firefox and WebKit run a core smoke suite for bootstrap, one Element annotation, one text locator, lifecycle completion, and teardown. Public browser-support copy names only engines covered by these projects.
 
 E2E coverage must include:
 
 - one-line declarative scan;
-- exact-text Range without wrapper injection;
+- exact-text locator-generated Range without wrapper injection, plus a separate caller-supplied native `Range` case;
 - missing and ambiguous target behavior;
 - story play, pause, resume, cancel, replay, and completion;
 - code-step synchronization;
 - real API tabs and copy fallback;
 - keyboard operation and visible focus;
+- axe-core WCAG 2 A/AA scans of the default, playing, complete, playground, and mobile states with zero serious or critical violations, plus explicit contrast assertions for text and controls;
 - reduced-motion final state;
 - 390px layout without page overflow or hidden callouts;
 - 200% browser zoom with usable controls and visible callouts;
@@ -431,7 +441,7 @@ A zero-test run is a failure.
 After `npm run verify` passes, Computer Use is authoritative for rendered appearance.
 
 - **Target:** local built Hanamaru demo in Google Chrome.
-- **Desktop:** 1440x900, light theme, default motion. Inspect first viewport, story playback states, synchronized code, primary CTA, reflow at wide and narrow ruler positions, and all six marks.
+- **Desktop:** 1440x900, light theme, default motion. Inspect first viewport, story playback states, synchronized code, primary CTA, reflow at wide and narrow ruler positions, all six marks, and visibly legible text/control contrast. Automated axe/contrast assertions remain authoritative for numeric WCAG AA compliance.
 - **Mobile:** 390x844, light theme. Inspect stacked proof/code, no page overflow, readable controls, fully visible/re-placed note, code-region scrolling, and keyboard/focus where the environment permits.
 - **Zoom:** desktop viewport at 200% browser zoom. Inspect control access, note wrapping/clamping, and absence of lost essential content.
 - **Reduced motion:** operating-system or browser-emulated reduced motion. Confirm immediate final marks, no drawing interpolation, and usable lifecycle controls.
@@ -445,7 +455,7 @@ Capture a screenshot and relevant accessibility/UI-state excerpt for each accept
 | No adoption action | Live Playground primary CTA, Copy local starter secondary action, Quick Start/API/Limitations anchors. | E2E opens playground, copies runnable local ESM starter, and resolves each docs anchor. |
 | Interactive theater | Real playback controls, synchronized code, native API tabs, visible states. | E2E exercises every lifecycle control and keyboard tab behavior; desktop Computer Use captures playing and complete states. |
 | Responsive contradiction | Reflow challenge, scroll-ancestor tracking, clamped note placement, mobile notes never hidden. | Geometry unit fixtures plus E2E at 390px, nested scroll, wide/narrow ruler; Computer Use captures mobile and reflow states. |
-| Accessibility baseline | Semantic controls, keyboard behavior, reduced motion, token-safe ARIA notes, contrast rules. | E2E keyboard/reduced-motion/concurrent-note tests plus Computer Use AX excerpts and 200% zoom inspection. |
+| Accessibility baseline | Semantic controls, keyboard behavior, reduced motion, token-safe ARIA notes, contrast rules. | E2E keyboard/reduced-motion/concurrent-note tests, axe/contrast assertions, plus Computer Use AX excerpts and 200% zoom inspection. |
 | V1 under-proved | Six-mark ledger, locator and native Range proofs, measured size/dependency docket, CSS-variable theming, triggers, outputs, fallbacks, and limitations. | Unit/E2E fixtures, generated size report, zero-dependency assertion, and Computer Use specimen inspection. |
 
 ## 16. Implementation Boundaries
