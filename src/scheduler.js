@@ -465,12 +465,17 @@ class SharedDocumentResources {
       return;
     }
 
-    this.#removeLayout(id);
+    let failure = null;
+    const cleanup = (operation) => {
+      try { operation(); } catch (error) { failure ??= error; }
+    };
+    cleanup(() => this.#removeLayout(id));
     for (const registration of [...this.#intersections.get(id) ?? []]) {
-      this.#removeIntersection(registration);
+      cleanup(() => this.#removeIntersection(registration));
     }
-    this.#cancelControllerJobs(controller);
+    cleanup(() => this.#cancelControllerJobs(controller));
     this.#controllers.delete(id);
+    if (failure !== null) throw failure;
   }
 
   #removeIntersection(registration) {
@@ -478,13 +483,23 @@ class SharedDocumentResources {
       return;
     }
     registration.active = false;
-    registration.observer.unobserve(registration.target);
-    registration.observer.disconnect();
+    let failure = null;
+    try {
+      registration.observer.unobserve(registration.target);
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      registration.observer.disconnect();
+    } catch (error) {
+      failure ??= error;
+    }
     const registrations = this.#intersections.get(registration.id);
     registrations?.delete(registration);
     if (registrations?.size === 0) {
       this.#intersections.delete(registration.id);
     }
+    if (failure !== null) throw failure;
   }
 
   #bindLayout(id, options, renewToken) {
@@ -738,23 +753,29 @@ class SharedDocumentResources {
     }
 
     this.#alive = false;
+    let failure = null;
+    const cleanup = (operation) => {
+      try { operation(); } catch (error) { failure ??= error; }
+    };
     for (const id of [...this.#layouts.keys()]) {
-      this.#removeLayout(id);
+      cleanup(() => this.#removeLayout(id));
     }
     for (const registrations of [...this.#intersections.values()]) {
       for (const registration of [...registrations]) {
-        this.#removeIntersection(registration);
+        cleanup(() => this.#removeIntersection(registration));
       }
     }
+    this.#layouts.clear();
     this.#controllers.clear();
     this.#intersections.clear();
     this.#resizeTargets.clear();
     this.#scrollTargets.clear();
-    this.#resizeObserver?.disconnect();
-    this.#mutationObserver?.disconnect();
-    this.#window.removeEventListener('resize', this.#windowResize);
-    this.#frameQueue.destroy();
-    this.overlay.remove();
+    cleanup(() => this.#resizeObserver?.disconnect());
+    cleanup(() => this.#mutationObserver?.disconnect());
+    cleanup(() => this.#window.removeEventListener('resize', this.#windowResize));
+    cleanup(() => this.#frameQueue.destroy());
+    cleanup(() => this.overlay.remove());
+    if (failure !== null) throw failure;
   }
 }
 
@@ -785,8 +806,11 @@ export function acquireDocumentResources(doc) {
       if (entry.refs !== 0) {
         return;
       }
-      SharedDocumentResources.destroy(entry.shared);
-      resourcesByDocument.delete(doc);
+      try {
+        SharedDocumentResources.destroy(entry.shared);
+      } finally {
+        resourcesByDocument.delete(doc);
+      }
     },
   };
 }

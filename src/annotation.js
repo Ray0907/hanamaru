@@ -428,6 +428,7 @@ export function createAnnotation(target, rawOptions, env) {
       || !isCurrentOperation(operation)
       || triggerGeneration !== generation) return;
     stopAutomaticTrigger(true);
+    if (!isCurrentOperation(operation) || triggerGeneration !== generation) return;
     show();
   }
 
@@ -556,9 +557,34 @@ export function createAnnotation(target, rawOptions, env) {
   }
 
   function rebindLayout() {
-    generation = shared.bumpGeneration(id);
-    stopLayout?.();
-    stopLayout = shared.rebindLayout(id, layoutBinding());
+    const triggerWasPending = triggerActive;
+    const triggerOperation = operationEpoch;
+    let triggerCleanup = null;
+    if (triggerWasPending) {
+      triggerActive = false;
+      triggerCleanup = stopTrigger;
+      stopTrigger = null;
+    }
+    let reboundGeneration;
+    try {
+      generation = shared.bumpGeneration(id);
+      stopLayout?.();
+      stopLayout = shared.rebindLayout(id, layoutBinding());
+      reboundGeneration = generation;
+    } catch (error) {
+      if (triggerCleanup !== null) {
+        try { triggerCleanup(); } catch { /* Preserve the rebind failure. */ }
+      }
+      throw error;
+    }
+    if (triggerCleanup !== null) {
+      try { triggerCleanup(); } catch { /* The rebound controller remains authoritative. */ }
+    }
+    if (triggerWasPending
+      && isCurrentOperation(triggerOperation)
+      && generation === reboundGeneration) {
+      installAutomaticTrigger();
+    }
   }
 
   function rebindOrSuspend() {

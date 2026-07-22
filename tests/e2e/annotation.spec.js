@@ -337,6 +337,199 @@ test('viewport trigger cleanup survives release failure and hana:start destroy r
   });
 });
 
+test('viewport trigger cleanup reentrancy cannot override an accepted hide', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    class ReentrantIntersectionObserver {
+      static instance;
+
+      constructor(callback) {
+        this.callback = callback;
+        this.target = null;
+        this.disconnects = 0;
+        ReentrantIntersectionObserver.instance = this;
+      }
+
+      observe(target) { this.target = target; }
+
+      unobserve() { controller.hide(); }
+
+      disconnect() { this.disconnects += 1; }
+
+      enter() {
+        this.callback([{
+          target: this.target, intersectionRatio: 1, isIntersecting: true,
+        }], this);
+      }
+    }
+    window.IntersectionObserver = ReentrantIntersectionObserver;
+    const { annotate } = await import('/src/index.js');
+    const target = document.querySelector('#direct-target');
+    const events = [];
+    let controller;
+    target.addEventListener('hana:start', () => events.push('start'));
+    target.addEventListener('hana:complete', () => events.push('complete'));
+    controller = annotate(target, {
+      mark: 'circle', trigger: 'viewport', motion: 'never',
+    });
+    ReentrantIntersectionObserver.instance.enter();
+    await Promise.resolve();
+    const output = {
+      state: controller.state,
+      events,
+      finished: controller.finished,
+      disconnects: ReentrantIntersectionObserver.instance.disconnects,
+    };
+    controller.destroy();
+    return output;
+  });
+
+  expect(result).toEqual({ state: 'hidden', events: [], finished: null, disconnects: 1 });
+});
+
+test('pending viewport trigger follows a selector replacement before entry', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    class FakeIntersectionObserver {
+      static instances = [];
+
+      constructor(callback, options) {
+        Object.assign(this, {
+          callback, options, target: null, unobserved: [], disconnects: 0,
+        });
+        FakeIntersectionObserver.instances.push(this);
+      }
+
+      observe(target) { this.target = target; }
+
+      unobserve(target) { this.unobserved.push(target); }
+
+      disconnect() { this.disconnects += 1; }
+
+      enter() {
+        this.callback([{
+          target: this.target, intersectionRatio: 1, isIntersecting: true,
+        }], this);
+      }
+    }
+    window.IntersectionObserver = FakeIntersectionObserver;
+    const { annotate } = await import('/src/index.js');
+    const oldTarget = document.querySelector('#selector-target');
+    const events = [];
+    document.body.addEventListener('hana:start', (event) => events.push(`start:${event.target.textContent}`));
+    document.body.addEventListener('hana:complete', (event) => events.push(`complete:${event.target.textContent}`));
+    const controller = annotate('#selector-target', {
+      mark: 'underline', trigger: 'viewport', motion: 'never',
+    });
+    const oldObserver = FakeIntersectionObserver.instances[0];
+    const replacement = document.createElement('p');
+    replacement.id = 'selector-target';
+    replacement.className = 'target';
+    replacement.textContent = 'Replacement before entry';
+    oldTarget.replaceWith(replacement);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const newObserver = FakeIntersectionObserver.instances[1];
+    if (newObserver === undefined) {
+      controller.destroy();
+      return { observerCount: FakeIntersectionObserver.instances.length };
+    }
+    oldObserver.enter();
+    const afterOldEntry = { state: controller.state, events: [...events] };
+    newObserver.enter();
+    const afterNewEntry = { state: controller.state, events: [...events] };
+    const output = {
+      observerCount: FakeIntersectionObserver.instances.length,
+      oldTarget: oldObserver.target.textContent,
+      oldCleanup: [oldObserver.unobserved.map((target) => target.textContent), oldObserver.disconnects],
+      newTarget: newObserver.target.textContent,
+      newCleanup: [newObserver.unobserved.map((target) => target.textContent), newObserver.disconnects],
+      afterOldEntry,
+      afterNewEntry,
+    };
+    controller.destroy();
+    return output;
+  });
+
+  expect(result).toEqual({
+    observerCount: 2,
+    oldTarget: 'Replaceable selector target',
+    oldCleanup: [['Replaceable selector target'], 1],
+    newTarget: 'Replacement before entry',
+    newCleanup: [['Replacement before entry'], 1],
+    afterOldEntry: { state: 'idle', events: [] },
+    afterNewEntry: {
+      state: 'visible',
+      events: ['start:Replacement before entry', 'complete:Replacement before entry'],
+    },
+  });
+});
+
+test('pending load trigger replaces its loading listener when selector ownership changes', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const win = frame.contentWindow;
+    const doc = frame.contentDocument;
+    doc.open();
+    doc.write('<!doctype html><html><body><p id="target" style="display:inline-block">Original loading owner</p></body></html>');
+    const api = await win.eval("import('/src/index.js')");
+    const nativeAdd = doc.addEventListener.bind(doc);
+    const nativeRemove = doc.removeEventListener.bind(doc);
+    let loadAdds = 0;
+    let loadRemoves = 0;
+    doc.addEventListener = (type, listener, options) => {
+      if (type === 'DOMContentLoaded') loadAdds += 1;
+      return nativeAdd(type, listener, options);
+    };
+    doc.removeEventListener = (type, listener, options) => {
+      if (type === 'DOMContentLoaded') loadRemoves += 1;
+      return nativeRemove(type, listener, options);
+    };
+    const events = [];
+    doc.body.addEventListener('hana:start', (event) => events.push(`start:${event.target.textContent}`));
+    doc.body.addEventListener('hana:complete', (event) => events.push(`complete:${event.target.textContent}`));
+    const controller = api.annotate('#target', {
+      mark: 'box', trigger: 'load', motion: 'never',
+    });
+    const original = doc.querySelector('#target');
+    const replacement = doc.createElement('p');
+    replacement.id = 'target';
+    replacement.style.display = 'inline-block';
+    replacement.textContent = 'Replacement loading owner';
+    original.replaceWith(replacement);
+    await new Promise((resolve) => win.requestAnimationFrame(() => win.requestAnimationFrame(resolve)));
+    const beforeLoad = {
+      state: controller.state,
+      readyState: doc.readyState,
+      loadAdds,
+      loadRemoves,
+      events: [...events],
+    };
+    const loaded = new Promise((resolve) => {
+      nativeAdd('DOMContentLoaded', () => win.queueMicrotask(resolve), { once: true });
+    });
+    doc.close();
+    await loaded;
+    const afterLoad = {
+      state: controller.state,
+      loadAdds,
+      loadRemoves,
+      events: [...events],
+    };
+    controller.destroy();
+    frame.remove();
+    return { beforeLoad, afterLoad };
+  });
+
+  expect(result).toEqual({
+    beforeLoad: {
+      state: 'idle', readyState: 'loading', loadAdds: 2, loadRemoves: 1, events: [],
+    },
+    afterLoad: {
+      state: 'visible', loadAdds: 2, loadRemoves: 2,
+      events: ['start:Replacement loading owner', 'complete:Replacement loading owner'],
+    },
+  });
+});
+
 test('IntersectionObserver fallback uses load semantics before and after DOMContentLoaded', async ({ page }) => {
   const result = await page.evaluate(async () => {
     window.IntersectionObserver = undefined;

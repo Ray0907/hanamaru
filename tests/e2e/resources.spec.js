@@ -925,6 +925,168 @@ test('owns intersection observers with exact thresholds and deterministic contro
   });
 });
 
+test('intersection cleanup failure still releases its controller jobs and preserves a peer lease', async ({ page }) => {
+  await installInstrumentation(page);
+
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const lease = acquireDocumentResources(document);
+    const peerLease = acquireDocumentResources(document);
+    const { shared } = lease;
+    const state = window.__resources;
+    const target = document.querySelector('#direct-target');
+    const events = [];
+    shared.registerController('failing');
+    shared.registerController('peer');
+    shared.observeIntersection({
+      id: 'failing',
+      target,
+      threshold: 0.25,
+      onEnter() { events.push('stale-enter'); },
+      onExit() {},
+      onUnavailable() {},
+    });
+    shared.enqueue({
+      id: 'failing',
+      generation: 0,
+      read() { events.push('stale-read'); },
+      write() { events.push('stale-write'); },
+    });
+    const observer = state.intersectionObservers[0];
+    let unobserved = 0;
+    let disconnected = 0;
+    observer.unobserve = () => {
+      unobserved += 1;
+      throw new Error('unobserve failed first');
+    };
+    observer.disconnect = () => {
+      disconnected += 1;
+      observer.observed.clear();
+    };
+
+    let releaseError = null;
+    try { shared.releaseController('failing'); } catch (error) { releaseError = error.message; }
+    let controllerMissing = false;
+    try { shared.generationFor('failing'); } catch { controllerMissing = true; }
+    const afterFailure = {
+      canceledFrames: state.canceledFrames.length,
+      controllerMissing,
+      disconnected,
+      frames: state.frames.size,
+      overlayCount: document.querySelectorAll('[data-hana-overlay]').length,
+      peerGeneration: shared.generationFor('peer'),
+      releaseError,
+      unobserved,
+    };
+    observer.deliver([{ target, isIntersecting: true, intersectionRatio: 1 }]);
+
+    if (!controllerMissing) {
+      observer.unobserve = () => {};
+      shared.releaseController('failing');
+    }
+    const reusedGeneration = shared.registerController('failing');
+    shared.releaseController('failing');
+    shared.releaseController('peer');
+    lease.release();
+    const whilePeerHeld = document.querySelectorAll('[data-hana-overlay]').length;
+    peerLease.release();
+    return {
+      afterFailure,
+      events,
+      reusedGeneration,
+      whilePeerHeld,
+      afterPeerRelease: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    afterFailure: {
+      canceledFrames: 1,
+      controllerMissing: true,
+      disconnected: 1,
+      frames: 0,
+      overlayCount: 1,
+      peerGeneration: 0,
+      releaseError: 'unobserve failed first',
+      unobserved: 1,
+    },
+    events: [],
+    reusedGeneration: 0,
+    whilePeerHeld: 1,
+    afterPeerRelease: 0,
+  });
+});
+
+test('final resource teardown completes after intersection cleanup throws and permits a fresh lease', async ({ page }) => {
+  await installInstrumentation(page);
+
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const lease = acquireDocumentResources(document);
+    const failedShared = lease.shared;
+    const state = window.__resources;
+    const firstTarget = document.querySelector('#direct-target');
+    const secondTarget = document.querySelector('#selector-target');
+    failedShared.registerController('first');
+    failedShared.registerController('second');
+    for (const [id, target] of [['first', firstTarget], ['second', secondTarget]]) {
+      failedShared.observeIntersection({
+        id, target, threshold: 0.25, onEnter() {}, onExit() {}, onUnavailable() {},
+      });
+      failedShared.enqueue({ id, generation: 0, read() {}, write() {} });
+    }
+    const [firstObserver, secondObserver] = state.intersectionObservers;
+    let firstDisconnects = 0;
+    firstObserver.unobserve = () => { throw new Error('final unobserve failed'); };
+    firstObserver.disconnect = () => { firstDisconnects += 1; };
+
+    let releaseError = null;
+    try { lease.release(); } catch (error) { releaseError = error.message; }
+    const afterFailedRelease = {
+      canceledFrames: state.canceledFrames.length,
+      firstDisconnects,
+      frames: state.frames.size,
+      mutationDisconnected: state.mutationObservers[0].disconnected,
+      overlayCount: document.querySelectorAll('[data-hana-overlay]').length,
+      releaseError,
+      resizeDisconnected: state.resizeObservers[0].disconnected,
+      secondDisconnected: secondObserver.disconnected,
+    };
+
+    const fresh = acquireDocumentResources(document);
+    let freshUsable = false;
+    try {
+      fresh.shared.registerController('fresh');
+      freshUsable = true;
+      fresh.shared.releaseController('fresh');
+    } catch {}
+    const freshShared = fresh.shared !== failedShared;
+    fresh.release();
+    return {
+      afterFailedRelease,
+      freshShared,
+      freshUsable,
+      finalOverlayCount: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    afterFailedRelease: {
+      canceledFrames: 1,
+      firstDisconnects: 1,
+      frames: 0,
+      mutationDisconnected: true,
+      overlayCount: 0,
+      releaseError: 'final unobserve failed',
+      resizeDisconnected: true,
+      secondDisconnected: true,
+    },
+    freshShared: true,
+    freshUsable: true,
+    finalOverlayCount: 0,
+  });
+});
+
 test('stops an intersection delivery when its callback releases the final lease', async ({ page }) => {
   await installInstrumentation(page);
 
