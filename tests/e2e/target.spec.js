@@ -250,6 +250,26 @@ test('@locator-map excludes forbidden subtrees and selects visible duplicate occ
   ]);
 });
 
+test('@locator-map excludes text when direct and selector within containers have hidden or inert ancestors', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const cases = [
+      [document.querySelector('#hidden-ancestor-locator'), 'Hidden ancestor unique phrase'],
+      ['#hidden-ancestor-locator', 'Hidden ancestor unique phrase'],
+      [document.querySelector('#inert-ancestor-locator'), 'Inert ancestor unique phrase'],
+      ['#inert-ancestor-locator', 'Inert ancestor unique phrase'],
+    ];
+    return cases.map(([within, text]) => {
+      try { resolveTarget({ within, text }); return 'ok'; } catch (error) { return [error.name, error.code]; }
+    });
+  })()`);
+  expect(result).toEqual([
+    ['HanamaruTargetError', 'HANA_TARGET_MISSING'],
+    ['HanamaruTargetError', 'HANA_TARGET_MISSING'],
+    ['HanamaruTargetError', 'HANA_TARGET_MISSING'],
+    ['HanamaruTargetError', 'HANA_TARGET_MISSING'],
+  ]);
+});
+
 test('@locator reports missing, ambiguous, and out-of-range text matches with exact codes', async ({ page }) => {
   const result = await resolve(page, `(() => {
     const within = '#locator-root';

@@ -164,14 +164,11 @@ function resolveLocatorWithin(within, doc, realm) {
   throw targetError('HANA_TARGET_INVALID', 'Text locator within must be an Element or selector', { within });
 }
 
-function isExcludedTextNode(node, within) {
+function isExcludedTextNode(node) {
   let ancestor = node.parentElement;
   while (ancestor !== null) {
     if (ancestor.matches(EXCLUDED_TEXT_ANCESTORS)) {
       return true;
-    }
-    if (ancestor === within) {
-      break;
     }
     ancestor = ancestor.parentElement;
   }
@@ -196,7 +193,7 @@ function collectLocatorText(within, doc) {
 
   let node = walker.nextNode();
   while (node !== null) {
-    if (!isExcludedTextNode(node, within)) {
+    if (!isExcludedTextNode(node)) {
       let offset = 0;
       for (const character of node.data) {
         const nextOffset = offset + character.length;
