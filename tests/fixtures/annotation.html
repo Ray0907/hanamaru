@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Annotation fixture</title>
+    <link rel="stylesheet" href="/src/hanamaru.css">
+    <style>
+      body { margin: 40px; min-height: 120vh; }
+      #arena { position: relative; width: 720px; min-height: 360px; }
+      .target { display: inline-block; margin: 48px; }
+      #selector-target { --hana-note-gap: 40px; }
+    </style>
+  </head>
+  <body>
+    <main id="arena">
+      <p id="direct-target" class="target" aria-describedby="author-token">Direct annotation target</p>
+      <p id="selector-target" class="target">Replaceable selector target</p>
+      <p id="range-target" class="target">Native range target text</p>
+      <p id="next-range-target" class="target">Replacement range text</p>
+    </main>
+  </body>
+</html>
