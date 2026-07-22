@@ -36,9 +36,88 @@ function formatCoordinate(value) {
   return normalized.toFixed(2).replace(/\.0+$|(?<=\.[0-9])0$/, '');
 }
 
-export function buildMarkPaths(mark, rects, seed) {
-  if (!['underline', 'highlight', 'strike'].includes(mark)) {
+export function buildMarkPaths(mark, rects, seed, padding = 5) {
+  if (!['underline', 'highlight', 'strike', 'circle', 'box', 'bracket'].includes(mark)) {
     throw new RangeError(`Unsupported mark: ${mark}`);
+  }
+
+  if (rects.length === 0) {
+    return [];
+  }
+
+  if (mark === 'bracket') {
+    const bounds = unionRects(rects);
+
+    return [0, 1].map((pass) => {
+      const x = bounds.right + padding + pass;
+      const top = bounds.top - padding;
+      const bottom = bounds.bottom + padding;
+      const coordinate = (baseValue, segment, axis) => formatCoordinate(
+        baseValue + jitter(seed, `bracket:${pass}:${segment}:${axis}`),
+      );
+      const point = (segment, pointX, pointY) => (
+        `${coordinate(pointX, segment, 'x')} ${coordinate(pointY, segment, 'y')}`
+      );
+
+      return `M ${point('hookTop', x - 10, top)}`
+        + ` L ${point('top', x, top)}`
+        + ` L ${point('bottom', x, bottom)}`
+        + ` L ${point('hookBottom', x - 10, bottom)}`;
+    });
+  }
+
+  if (mark === 'box') {
+    const bounds = unionRects(rects);
+
+    return [0, 1].map((pass) => {
+      const left = bounds.left - padding - pass;
+      const top = bounds.top - padding - pass;
+      const right = bounds.right + padding + pass;
+      const bottom = bounds.bottom + padding + pass;
+      const coordinate = (baseValue, corner, axis) => formatCoordinate(
+        baseValue + jitter(seed, `box:${pass}:${corner}:${axis}`),
+      );
+      const point = (corner, x, y) => (
+        `${coordinate(x, corner, 'x')} ${coordinate(y, corner, 'y')}`
+      );
+
+      return `M ${point('tl', left, top)}`
+        + ` L ${point('tr', right, top)}`
+        + ` L ${point('br', right, bottom)}`
+        + ` L ${point('bl', left, bottom)} Z`;
+    });
+  }
+
+  if (mark === 'circle') {
+    const bounds = unionRects(rects);
+    const centerX = (bounds.left + bounds.right) / 2;
+    const centerY = (bounds.top + bounds.bottom) / 2;
+    const kappa = 0.5522848;
+
+    return [0, 1].map((pass) => {
+      const radiusX = (bounds.width / 2) + padding + pass;
+      const radiusY = (bounds.height / 2) + padding - (pass * 0.5);
+      const coordinate = (baseValue, segment, axis) => formatCoordinate(
+        baseValue + jitter(seed, `circle:${pass}:${segment}:${axis}`),
+      );
+      const point = (segment, x, y) => (
+        `${coordinate(x, segment, 'x')} ${coordinate(y, segment, 'y')}`
+      );
+
+      return `M ${point('start', centerX + radiusX, centerY)}`
+        + ` C ${point('rb-c1', centerX + radiusX, centerY + (kappa * radiusY))}`
+        + ` ${point('rb-c2', centerX + (kappa * radiusX), centerY + radiusY)}`
+        + ` ${point('rb-end', centerX, centerY + radiusY)}`
+        + ` C ${point('bl-c1', centerX - (kappa * radiusX), centerY + radiusY)}`
+        + ` ${point('bl-c2', centerX - radiusX, centerY + (kappa * radiusY))}`
+        + ` ${point('bl-end', centerX - radiusX, centerY)}`
+        + ` C ${point('lt-c1', centerX - radiusX, centerY - (kappa * radiusY))}`
+        + ` ${point('lt-c2', centerX - (kappa * radiusX), centerY - radiusY)}`
+        + ` ${point('lt-end', centerX, centerY - radiusY)}`
+        + ` C ${point('tr-c1', centerX + (kappa * radiusX), centerY - radiusY)}`
+        + ` ${point('tr-c2', centerX + radiusX, centerY - (kappa * radiusY))}`
+        + ` ${point('tr-end', centerX + radiusX, centerY)} Z`;
+    });
   }
 
   if (mark === 'strike') {
