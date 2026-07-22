@@ -20,6 +20,7 @@ function fakeEnvironment({
   observeFailure = null,
   registerFailure = null,
   rebindFailure = null,
+  rendererDestroyFailure = null,
   resolveFailure = null,
   reducedMotion = false,
 } = {}) {
@@ -40,32 +41,52 @@ function fakeEnvironment({
   };
   let animation = null;
   let rendererFailure = null;
+  let currentRendererDestroyFailure = rendererDestroyFailure;
+  let currentRendererCreateFailure = null;
+  const rendererMethodFailures = new Map();
+  const failRenderer = (method) => {
+    const error = rendererMethodFailures.get(method);
+    if (error !== undefined) throw error;
+  };
   const renderer = {
     group: {},
     noteElement: null,
     animate(duration) {
       calls.push(['animate', duration]);
+      failRenderer('animate');
       animation = deferred();
       if (duration === 0) animation.resolve();
       return { animations: [], finished: animation.promise };
     },
-    destroy() { calls.push('renderer:destroy'); },
+    destroy() {
+      calls.push('renderer:destroy');
+      if (currentRendererDestroyFailure !== null) throw currentRendererDestroyFailure;
+      failRenderer('destroy');
+    },
     draw(layout) {
       calls.push(['draw', layout]);
       if (rendererFailure !== null) throw rendererFailure;
     },
-    finish() { calls.push('renderer:finish'); animation?.resolve(); },
-    hide() { calls.push('renderer:hide'); animation?.reject(new DOMException('Animation cancelled', 'AbortError')); },
+    finish() { calls.push('renderer:finish'); failRenderer('finish'); animation?.resolve(); },
+    hide() {
+      calls.push('renderer:hide');
+      failRenderer('hide');
+      animation?.reject(new DOMException('Animation cancelled', 'AbortError'));
+    },
     measure() {
+      failRenderer('measure');
       return {
         noteRect: null,
         peerNoteRects: [],
         viewport: { width: 800, height: 600 },
       };
     },
-    pause() { calls.push('renderer:pause'); },
-    resume() { calls.push('renderer:resume'); },
-    updateOwner(nextOwner) { calls.push(['renderer:updateOwner', nextOwner]); },
+    pause() { calls.push('renderer:pause'); failRenderer('pause'); },
+    resume() { calls.push('renderer:resume'); failRenderer('resume'); },
+    updateOwner(nextOwner) {
+      calls.push(['renderer:updateOwner', nextOwner]);
+      failRenderer('updateOwner');
+    },
   };
   let generation = 0;
   let registered = false;
@@ -112,11 +133,21 @@ function fakeEnvironment({
     get registered() { return registered; },
     setResolveFailure(error) { currentResolveFailure = error; },
     setRendererFailure(error) { rendererFailure = error; },
+    setRendererCreateFailure(error) { currentRendererCreateFailure = error; },
+    setRendererDestroyFailure(error) { currentRendererDestroyFailure = error; },
+    setRendererMethodFailure(method, error) {
+      if (error === null) rendererMethodFailures.delete(method);
+      else rendererMethodFailures.set(method, error);
+    },
     setRebindFailure(error) { currentRebindFailure = error; },
     env: {
       id: 'unit-annotation',
       createEvent(type, detail, eventOwner) { events.push({ type, detail, owner: eventOwner }); },
-      createRenderer(args) { calls.push(['createRenderer', args]); return renderer; },
+      createRenderer(args) {
+        calls.push(['createRenderer', args]);
+        if (currentRendererCreateFailure !== null) throw currentRendererCreateFailure;
+        return renderer;
+      },
       lease,
       microtask(callback) { queueMicrotask(callback); },
       readThemeMetrics() { return { duration: 650, noteGap: 16 }; },
@@ -487,7 +518,9 @@ test('construction releases registered resources and mounted renderer if layout 
   const failure = new Error('observer failed');
   const environment = fakeEnvironment({ observeFailure: failure });
 
-  assert.throws(() => create({}, {}, environment), (error) => error === failure);
+  assert.throws(() => create({}, {}, environment), (error) => (
+    error instanceof HanamaruStateError && error.details.cause === failure
+  ));
 
   assert.equal(environment.calls.filter((call) => call === 'renderer:destroy').length, 1);
   assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
@@ -528,7 +561,9 @@ test('controller registration failure releases the lazily acquired document leas
   const failure = new Error('registration failed');
   const environment = fakeEnvironment({ registerFailure: failure });
 
-  assert.throws(() => create({}, {}, environment), (error) => error === failure);
+  assert.throws(() => create({}, {}, environment), (error) => (
+    error instanceof HanamaruStateError && error.details.cause === failure
+  ));
 
   assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
   assert.equal(environment.calls.filter((call) => Array.isArray(call) && call[0] === 'createRenderer').length, 0);
@@ -592,4 +627,214 @@ test('unexpected replay rebind failure creates and rejects the new run without t
   assert.equal(controller.state, 'suspended');
   environment.setRebindFailure(null);
   controller.destroy();
+});
+
+test('scheduler read phases for two controllers finish before owner and draw writes begin', () => {
+  const log = [];
+  const jobs = [];
+  const generations = new Map();
+  const shared = {
+    registerController(id) { generations.set(id, 0); return 0; },
+    generationFor(id) { return generations.get(id); },
+    bumpGeneration(id) { const value = generations.get(id) + 1; generations.set(id, value); return value; },
+    observeLayout() { return () => {}; },
+    rebindLayout() { return () => {}; },
+    enqueue(job) { jobs.push(job); },
+    releaseController(id) { generations.delete(id); },
+  };
+  const lease = { shared, release() {} };
+  const make = (id) => {
+    const owner = { id };
+    const record = { kind: 'element', element: owner, ownerElement: owner, refresh() {
+      log.push(`read:${id}:resolve`);
+      return this;
+    } };
+    const renderer = {
+      group: {}, noteElement: null,
+      measure() {
+        log.push(`read:${id}:measure`);
+        return { noteRect: null, peerNoteRects: [], viewport: { width: 800, height: 600 } };
+      },
+      updateOwner() { log.push(`write:${id}:owner`); },
+      draw() { log.push(`write:${id}:draw`); },
+      animate() { return { animations: [], finished: new Promise(() => {}) }; },
+      hide() {}, destroy() {}, finish() {}, pause() {}, resume() {},
+    };
+    return annotationModule.createAnnotation(owner, { mark: 'underline' }, {
+      id, lease,
+      createEvent() {}, createRenderer() { return renderer; },
+      readThemeMetrics() { log.push(`read:${id}:theme`); return { duration: 650, noteGap: 16 }; },
+      reducedMotion() { return false; }, resolveTarget() { return record; },
+      targetRects() {
+        log.push(`read:${id}:rects`);
+        return [{ x: 1, y: 1, width: 20, height: 10, top: 1, right: 21, bottom: 11, left: 1 }];
+      },
+    });
+  };
+  const first = make('phase-a');
+  const second = make('phase-b');
+  first.show();
+  second.show();
+  const reads = jobs.map((job) => ({ job, value: job.read() }));
+  for (const entry of reads) entry.job.write(entry.value);
+
+  const lastRead = Math.max(...log.map((value, index) => value.startsWith('read:') ? index : -1));
+  const firstWrite = log.findIndex((value) => value.startsWith('write:'));
+  assert.ok(firstWrite > lastRead, log.join('\n'));
+  first.destroy();
+  second.destroy();
+});
+
+test('replacement renderer construction failure is contained and leaves the old annotation suspended', async () => {
+  const { controller, environment } = create();
+  controller.show();
+  environment.animation.resolve();
+  await controller.finished;
+  const failure = new Error('replacement renderer failed');
+  environment.setRendererCreateFailure(failure);
+
+  assert.doesNotThrow(() => controller.update({ note: 'replacement' }));
+
+  assert.equal(controller.state, 'suspended');
+  const error = environment.events.at(-1).detail.error;
+  assert.ok(error instanceof HanamaruStateError);
+  assert.equal(error.details.cause, failure);
+  environment.setRendererCreateFailure(null);
+  controller.destroy();
+});
+
+test('updateOwner and finish failures are contained as typed runtime failures', async () => {
+  for (const method of ['updateOwner', 'finish']) {
+    const { controller, environment } = create();
+    controller.show();
+    environment.setRendererMethodFailure(method, new Error(`${method} failed`));
+    assert.doesNotThrow(() => controller.refresh());
+    await assert.rejects(controller.finished, HanamaruStateError);
+    assert.equal(controller.state, 'suspended', method);
+    environment.setRendererMethodFailure(method, null);
+    controller.destroy();
+  }
+});
+
+test('destroy still releases resources and reaches destroyed when renderer teardown throws', () => {
+  const failure = new Error('renderer destroy failed');
+  const { controller, environment } = create();
+  controller.show();
+  const pending = controller.finished;
+  environment.setRendererDestroyFailure(failure);
+
+  assert.doesNotThrow(() => controller.destroy());
+
+  assert.equal(controller.state, 'destroyed');
+  assert.equal(environment.registered, false);
+  assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+  assert.equal(environment.events.at(-1).type, 'hana:error');
+  assert.ok(environment.events.at(-1).detail.error instanceof HanamaruStateError);
+  pending.catch(() => {});
+});
+
+test('construction cleanup releases resources even when renderer cleanup also throws', () => {
+  const observeFailure = new Error('layout binding failed');
+  const destroyFailure = new Error('renderer cleanup failed');
+  const environment = fakeEnvironment({ observeFailure, rendererDestroyFailure: destroyFailure });
+
+  assert.throws(() => create({}, {}, environment), (error) => (
+    error instanceof HanamaruStateError && error.details.cause === observeFailure
+  ));
+
+  assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+  assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+});
+
+test('hide clears requested visibility even when scheduler rebind fails', async () => {
+  const { controller, environment } = create();
+  controller.show();
+  environment.animation.resolve();
+  await controller.finished;
+  const draws = environment.calls.filter((call) => Array.isArray(call) && call[0] === 'draw').length;
+  environment.setRebindFailure(new Error('hide rebind failed'));
+
+  controller.hide();
+
+  assert.equal(controller.state, 'suspended');
+  environment.setRebindFailure(null);
+  controller.refresh();
+  assert.equal(controller.state, 'hidden');
+  assert.equal(
+    environment.calls.filter((call) => Array.isArray(call) && call[0] === 'draw').length,
+    draws,
+  );
+  controller.destroy();
+});
+
+test('renderer hide failure is contained while preserving cleared visibility intent', async () => {
+  const { controller, environment } = create();
+  controller.show();
+  environment.animation.resolve();
+  await controller.finished;
+  environment.setRendererMethodFailure('hide', new Error('hide failed'));
+
+  assert.doesNotThrow(() => controller.hide());
+
+  assert.equal(controller.state, 'suspended');
+  environment.setRendererMethodFailure('hide', null);
+  controller.refresh();
+  assert.equal(controller.state, 'hidden');
+  controller.destroy();
+});
+
+test('initial renderer construction failure is typed and releases controller resources', () => {
+  const failure = new Error('initial renderer failed');
+  const environment = fakeEnvironment();
+  environment.setRendererCreateFailure(failure);
+
+  assert.throws(() => create({}, {}, environment), (error) => (
+    error instanceof HanamaruStateError && error.details.cause === failure
+  ));
+
+  assert.equal(environment.registered, false);
+  assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+  assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+});
+
+test('partial renderer construction removes only newly mounted overlay nodes', () => {
+  const environment = fakeEnvironment();
+  const authorSvg = { name: 'author-svg' };
+  const authorNote = { name: 'author-note' };
+  const svgChildren = [authorSvg];
+  const noteChildren = [authorNote];
+  environment.lease.shared.svgLayer = { children: svgChildren };
+  environment.lease.shared.noteLayer = { children: noteChildren };
+  const leakedSvg = { remove() { svgChildren.splice(svgChildren.indexOf(this), 1); } };
+  const leakedNote = { remove() { noteChildren.splice(noteChildren.indexOf(this), 1); } };
+  const failure = new Error('mount interrupted');
+  environment.env.createRenderer = () => {
+    svgChildren.push(leakedSvg);
+    noteChildren.push(leakedNote);
+    throw failure;
+  };
+
+  assert.throws(() => create({}, {}, environment), HanamaruStateError);
+
+  assert.deepEqual(svgChildren, [authorSvg]);
+  assert.deepEqual(noteChildren, [authorNote]);
+});
+
+test('failed post-mount binding removes new nodes even when renderer destroy throws', () => {
+  const observeFailure = new Error('binding failed after mount');
+  const destroyFailure = new Error('mounted renderer destroy failed');
+  const environment = fakeEnvironment({ observeFailure, rendererDestroyFailure: destroyFailure });
+  const author = { name: 'author' };
+  const children = [author];
+  environment.lease.shared.svgLayer = { children };
+  environment.lease.shared.noteLayer = { children: [] };
+  const mounted = { remove() { children.splice(children.indexOf(this), 1); } };
+  environment.env.createRenderer = () => {
+    children.push(mounted);
+    return environment.renderer;
+  };
+
+  assert.throws(() => create({}, {}, environment), HanamaruStateError);
+
+  assert.deepEqual(children, [author]);
 });

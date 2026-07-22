@@ -14,7 +14,17 @@ const TRIGGERS = new Set(['manual', 'load', 'viewport']);
 const MOTIONS = new Set(['system', 'never']);
 const KEYS = new Set(['mark', 'note', 'placement', 'trigger', 'accessible', 'seed', 'duration', 'motion']);
 const activeRenderers = new WeakMap();
+const pendingRendererMounts = new WeakMap();
 let nextAnnotationId = 0;
+
+function stateError(cause) {
+  if (cause instanceof HanamaruStateError) return cause;
+  return new HanamaruStateError(
+    'HANA_STATE_RUNTIME',
+    'Annotation rendering or scheduling failed',
+    { cause },
+  );
+}
 
 function invalid(field, value) {
   throw new HanamaruConfigError(
@@ -140,6 +150,39 @@ function dispatch(env, owner, type, detail) {
   env.createEvent(type, detail, owner);
 }
 
+function createOwnedRenderer(env, args) {
+  const layers = [args.lease.shared.svgLayer, args.lease.shared.noteLayer]
+    .filter((layer) => layer?.children !== undefined)
+    .map((layer) => ({ layer, previous: new Set(layer.children) }));
+  try {
+    const renderer = env.createRenderer(args);
+    pendingRendererMounts.set(renderer, layers);
+    return renderer;
+  } catch (error) {
+    for (const { layer, previous } of layers) {
+      for (const child of [...layer.children]) {
+        if (!previous.has(child)) child.remove();
+      }
+    }
+    throw error;
+  }
+}
+
+function commitRenderer(renderer) {
+  pendingRendererMounts.delete(renderer);
+}
+
+function cleanupUncommittedRenderer(renderer) {
+  const layers = pendingRendererMounts.get(renderer) ?? [];
+  pendingRendererMounts.delete(renderer);
+  try { renderer.destroy(); } catch { /* The overlay snapshot remains authoritative. */ }
+  for (const { layer, previous } of layers) {
+    for (const child of [...layer.children]) {
+      if (!previous.has(child)) child.remove();
+    }
+  }
+}
+
 function copyClientRect(input) {
   return {
     x: input.x,
@@ -151,6 +194,14 @@ function copyClientRect(input) {
     bottom: input.bottom,
     left: input.left,
   };
+}
+
+function hiddenTargetError(record) {
+  return new HanamaruTargetError(
+    'HANA_TARGET_INVALID',
+    'Target is hidden or has no renderable client rectangles',
+    { target: record.source },
+  );
 }
 
 function documentForTarget(target) {
@@ -194,10 +245,22 @@ function defaultEnvironment(target) {
     },
     resolveTarget(candidate) { return resolveTarget(candidate, doc); },
     targetRects(record) {
-      const rects = record.range === null
+      let ancestor = record.ownerElement;
+      while (ancestor !== null) {
+        const style = win.getComputedStyle(ancestor);
+        if (ancestor.hidden || style.display === 'none'
+          || style.visibility === 'hidden' || style.visibility === 'collapse') {
+          throw hiddenTargetError(record);
+        }
+        ancestor = ancestor.parentElement;
+      }
+      const rects = (record.range === null
         ? [record.element.getBoundingClientRect()]
-        : [...record.range.getClientRects()];
-      return rects.map(copyClientRect);
+        : [...record.range.getClientRects()])
+        .map(copyClientRect)
+        .filter((item) => item.width > 0 && item.height > 0);
+      if (rects.length === 0) throw hiddenTargetError(record);
+      return rects;
     },
   };
 }
@@ -207,11 +270,15 @@ export function annotate(target, options) {
 }
 
 export function pauseAnnotationRun(controller) {
-  activeRenderers.get(controller)?.pause();
+  const active = activeRenderers.get(controller);
+  if (active === undefined) return;
+  try { active.renderer.pause(); } catch (error) { active.onFailure(error); }
 }
 
 export function resumeAnnotationRun(controller) {
-  activeRenderers.get(controller)?.resume();
+  const active = activeRenderers.get(controller);
+  if (active === undefined) return;
+  try { active.renderer.resume(); } catch (error) { active.onFailure(error); }
 }
 
 export function createAnnotation(target, rawOptions, env) {
@@ -232,15 +299,15 @@ export function createAnnotation(target, rawOptions, env) {
   try {
     generation = shared.registerController(id);
   } catch (error) {
-    lease.release();
-    throw error;
+    try { lease.release(); } catch { /* Preserve registration failure. */ }
+    throw stateError(error);
   }
   try {
-    renderer = env.createRenderer({ id, record, options, lease });
+    renderer = createOwnedRenderer(env, { id, record, options, lease });
   } catch (error) {
-    shared.releaseController(id);
-    lease.release();
-    throw error;
+    try { shared.releaseController(id); } catch { /* Preserve renderer failure. */ }
+    try { lease.release(); } catch { /* Preserve renderer failure. */ }
+    throw stateError(error);
   }
 
   let state = 'idle';
@@ -259,7 +326,11 @@ export function createAnnotation(target, rawOptions, env) {
     update,
     destroy,
   };
-  activeRenderers.set(controller, renderer);
+  setActiveRenderer();
+
+  function setActiveRenderer() {
+    activeRenderers.set(controller, { renderer, onFailure: handleRuntimeFailure });
+  }
 
   function settleVisible(activeRun = run) {
     if (destroyed || activeRun === null || activeRun !== run || activeRun.settled) return;
@@ -275,17 +346,9 @@ export function createAnnotation(target, rawOptions, env) {
     activeRun.reject(error);
   }
 
-  function runtimeError(cause) {
-    if (cause instanceof HanamaruStateError) return cause;
-    return new HanamaruStateError(
-      'HANA_STATE_RUNTIME',
-      'Annotation rendering or scheduling failed',
-      { cause },
-    );
-  }
-
   function handleRuntimeFailure(cause) {
-    const error = runtimeError(cause);
+    const error = stateError(cause);
+    if (destroyed) return error;
     requestedVisible ||= state === 'showing' || state === 'visible';
     try { renderer.hide(); } catch { /* Preserve the originating runtime failure. */ }
     rejectRun(error);
@@ -294,6 +357,7 @@ export function createAnnotation(target, rawOptions, env) {
       disconnectedEpisode = true;
       dispatch(env, record.ownerElement, 'hana:error', { controller, error });
     }
+    return error;
   }
 
   function handleScheduledFailure(error) {
@@ -310,21 +374,27 @@ export function createAnnotation(target, rawOptions, env) {
       read: () => {
         const previousOwner = record.ownerElement;
         resolveCurrentTarget();
-        renderer.updateOwner(record.ownerElement);
+        const owner = record.ownerElement;
+        const layout = requestedVisible
+          ? layoutFor(record, renderer, options, env)
+          : (env.targetRects(record), null);
+        disconnectedEpisode = false;
         return {
-          layout: !requestedVisible && (state === 'idle' || state === 'hidden')
-            ? null
-            : layoutFor(record, renderer, options, env),
-          ownerChanged: previousOwner !== record.ownerElement,
+          layout,
+          owner,
+          ownerChanged: previousOwner !== owner,
         };
       },
       write: (result) => {
+        renderer.updateOwner(result.owner);
         if (result.layout !== null) {
           renderer.draw(result.layout);
           if (state === 'suspended' && requestedVisible) {
             renderer.finish();
             state = 'visible';
           }
+        } else if (state === 'suspended' && !requestedVisible) {
+          state = 'hidden';
         }
         if (result.ownerChanged) rebindOrSuspend();
       },
@@ -352,38 +422,62 @@ export function createAnnotation(target, rawOptions, env) {
     }
   }
 
-  function schedule({ animate = false, finish = false, restore = false } = {}) {
+  function schedule({ animate = false, finish = false, restore = false, validate = false } = {}) {
     const activeRun = run;
+    const read = () => {
+      resolveCurrentTarget();
+      const owner = record.ownerElement;
+      const layout = validate ? (env.targetRects(record), null) : layoutFor(record, renderer, options, env);
+      disconnectedEpisode = false;
+      return {
+        layout,
+        owner,
+      };
+    };
+    const write = (result, synchronous = false) => {
+      renderer.updateOwner(result.owner);
+      if (result.layout === null) {
+        if (state === 'suspended' && !requestedVisible) state = 'hidden';
+        return;
+      }
+      renderer.draw(result.layout);
+      if (finish) {
+        renderer.finish();
+        if (restore) state = 'visible';
+        else settleVisible(activeRun);
+        return;
+      }
+      if (!animate) return;
+      const reduced = env.reducedMotion(options);
+      const motion = renderer.animate(reduced ? 0 : options.duration);
+      if (reduced && synchronous) {
+        settleVisible(activeRun);
+        motion.finished.catch((error) => {
+          if (error?.name !== 'AbortError') handleRuntimeFailure(error);
+        });
+        return;
+      }
+      motion.finished.then(
+        () => settleVisible(activeRun),
+        (error) => {
+          if (error?.name !== 'AbortError') handleRuntimeFailure(error);
+        },
+      );
+    };
+    if (animate && env.reducedMotion(options)) {
+      try {
+        write(read(), true);
+      } catch (error) {
+        handleScheduledFailure(error);
+      }
+      return;
+    }
     try {
       shared.enqueue({
         id,
         generation,
-        read: () => {
-          resolveCurrentTarget();
-          renderer.updateOwner(record.ownerElement);
-          return layoutFor(record, renderer, options, env);
-        },
-        write(layout) {
-          renderer.draw(layout);
-          if (finish) {
-            renderer.finish();
-            if (restore) {
-              state = 'visible';
-            } else {
-              settleVisible(activeRun);
-            }
-            return;
-          }
-          if (!animate) return;
-          const duration = env.reducedMotion(options) ? 0 : options.duration;
-          const motion = renderer.animate(duration);
-          motion.finished.then(
-            () => settleVisible(activeRun),
-            (error) => {
-              if (error?.name !== 'AbortError') handleRuntimeFailure(error);
-            },
-          );
-        },
+        read,
+        write,
         onError: handleScheduledFailure,
       });
     } catch (error) {
@@ -398,9 +492,14 @@ export function createAnnotation(target, rawOptions, env) {
 
   function reportTargetFailure(error) {
     requestedVisible ||= state === 'showing' || state === 'visible';
-    renderer.hide();
-    rejectRun(error);
     state = 'suspended';
+    try {
+      renderer.hide();
+    } catch (rendererError) {
+      handleRuntimeFailure(rendererError);
+      return;
+    }
+    rejectRun(error);
     if (!disconnectedEpisode) {
       disconnectedEpisode = true;
       dispatch(env, record.ownerElement, 'hana:error', { controller, error });
@@ -408,9 +507,7 @@ export function createAnnotation(target, rawOptions, env) {
   }
 
   function resolveCurrentTarget() {
-    const resolved = record.refresh();
-    disconnectedEpisode = false;
-    return resolved;
+    return record.refresh();
   }
 
   function startResolvedRun() {
@@ -446,9 +543,13 @@ export function createAnnotation(target, rawOptions, env) {
     const wasActive = state === 'showing' || state === 'visible';
     requestedVisible = false;
     cancelPending('hide', wasActive);
-    if (wasActive || state === 'idle' || state === 'hidden' || state === 'suspended') renderer.hide();
-    if (wasActive && !rebindOrSuspend()) return controller;
     state = 'hidden';
+    try {
+      renderer.hide();
+    } catch (error) {
+      handleRuntimeFailure(error);
+    }
+    if (wasActive && !rebindOrSuspend()) return controller;
     return controller;
   }
 
@@ -456,8 +557,14 @@ export function createAnnotation(target, rawOptions, env) {
     if (destroyed) return controller;
     const wasActive = state === 'showing' || state === 'visible';
     cancelPending('replay', wasActive);
-    renderer.hide();
     startDeferredRun();
+    try {
+      renderer.hide();
+    } catch (error) {
+      handleRuntimeFailure(error);
+      rebindOrSuspend();
+      return controller;
+    }
     if (!rebindOrSuspend()) return controller;
     try {
       resolveCurrentTarget();
@@ -478,14 +585,13 @@ export function createAnnotation(target, rawOptions, env) {
       reportTargetFailure(error);
       return controller;
     }
-    renderer.updateOwner(record.ownerElement);
     if (!rebindOrSuspend()) return controller;
     if (priorState === 'showing') schedule({ finish: true });
     else if (priorState === 'visible') schedule({ finish: true, restore: true });
     else if (priorState === 'suspended') {
       if (requestedVisible) schedule({ finish: true, restore: true });
-      else state = 'hidden';
-    }
+      else schedule({ validate: true });
+    } else schedule({ validate: true });
     return controller;
   }
 
@@ -497,7 +603,15 @@ export function createAnnotation(target, rawOptions, env) {
     delete optionPatch.target;
     const nextOptions = normalizeOptions({ ...options, ...optionPatch }, options.seed);
     const nextRecord = env.resolveTarget(nextTarget);
-    const nextRenderer = env.createRenderer({ id, record: nextRecord, options: nextOptions, lease });
+    let nextRenderer;
+    try {
+      nextRenderer = createOwnedRenderer(env, {
+        id, record: nextRecord, options: nextOptions, lease,
+      });
+    } catch (error) {
+      handleRuntimeFailure(error);
+      return controller;
+    }
     const oldRenderer = renderer;
     const oldTarget = currentTarget;
     const oldOptions = options;
@@ -507,49 +621,66 @@ export function createAnnotation(target, rawOptions, env) {
     options = nextOptions;
     record = nextRecord;
     renderer = nextRenderer;
-    activeRenderers.set(controller, renderer);
+    setActiveRenderer();
     try {
       rebindLayout();
     } catch (error) {
-      renderer.destroy();
+      cleanupUncommittedRenderer(renderer);
       renderer = oldRenderer;
       currentTarget = oldTarget;
       options = oldOptions;
       record = oldRecord;
-      activeRenderers.set(controller, renderer);
+      setActiveRenderer();
       handleRuntimeFailure(error);
       return controller;
     }
-    oldRenderer.destroy();
+    commitRenderer(renderer);
+    try {
+      oldRenderer.destroy();
+    } catch (error) {
+      handleRuntimeFailure(error);
+      return controller;
+    }
     if (priorState === 'showing') schedule({ finish: true });
     else if (priorState === 'visible') schedule({ finish: true, restore: true });
     else if (priorState === 'suspended' && requestedVisible) schedule({ finish: true, restore: true });
-    else if (priorState === 'suspended') state = 'hidden';
+    else if (priorState === 'suspended') schedule({ validate: true });
     return controller;
   }
 
   function destroy() {
     if (destroyed) return controller;
     const wasActive = state === 'showing' || state === 'visible';
-    cancelPending('destroy', wasActive);
     destroyed = true;
-    stopLayout?.();
-    renderer.destroy();
+    let failure = null;
+    const cleanup = (operation) => {
+      try { operation(); } catch (error) { failure ??= error; }
+    };
+    cleanup(() => stopLayout?.());
+    cleanup(() => renderer.destroy());
     activeRenderers.delete(controller);
-    shared.releaseController(id);
-    lease.release();
+    cleanup(() => shared.releaseController(id));
+    cleanup(() => lease.release());
     state = 'destroyed';
+    if (failure === null) {
+      cancelPending('destroy', wasActive);
+    } else {
+      const error = stateError(failure);
+      rejectRun(error);
+      try { dispatch(env, record.ownerElement, 'hana:error', { controller, error }); } catch {}
+    }
     return controller;
   }
 
   try {
     bindLayout();
+    commitRenderer(renderer);
   } catch (error) {
     activeRenderers.delete(controller);
-    renderer.destroy();
-    shared.releaseController(id);
-    lease.release();
-    throw error;
+    cleanupUncommittedRenderer(renderer);
+    try { shared.releaseController(id); } catch { /* Preserve binding failure. */ }
+    try { lease.release(); } catch { /* Preserve binding failure. */ }
+    throw stateError(error);
   }
   return controller;
 }

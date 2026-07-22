@@ -104,7 +104,16 @@ test('reduced motion reaches final styles and no-note layout stays connector-fre
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');
     const controller = annotate('#direct-target', { mark: 'highlight', duration: 500 });
+    const events = [];
+    document.querySelector('#direct-target').addEventListener('hana:complete', () => events.push('complete'));
     controller.show();
+    const immediate = {
+      state: controller.state,
+      markPaths: document.querySelectorAll('.hana-mark-path').length,
+      events: [...events],
+    };
+    await Promise.resolve();
+    const microtask = { state: controller.state, events: [...events] };
     await controller.finished;
     const group = document.querySelector('.hana-annotation');
     const output = {
@@ -113,12 +122,127 @@ test('reduced motion reaches final styles and no-note layout stays connector-fre
       connectors: group.querySelectorAll('.hana-connector-path').length,
       markPaths: group.querySelectorAll('.hana-mark-path').length,
       animating: group.classList.contains('hana-is-animating'),
+      immediate,
+      microtask,
     };
     controller.destroy();
     return output;
   });
 
-  expect(result).toEqual({ state: 'visible', note: null, connectors: 0, markPaths: 1, animating: false });
+  expect(result).toEqual({
+    state: 'visible', note: null, connectors: 0, markPaths: 1, animating: false,
+    immediate: { state: 'visible', markPaths: 1, events: ['complete'] },
+    microtask: { state: 'visible', events: ['complete'] },
+  });
+});
+
+test('motion never reaches visible synchronously without waiting for a frame', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const controller = annotate('#direct-target', {
+      mark: 'box', note: 'Immediate', motion: 'never', duration: 900,
+    });
+    controller.show();
+    const immediate = {
+      state: controller.state,
+      paths: document.querySelectorAll('.hana-mark-path').length,
+      noteVisible: !document.querySelector('.hana-note').classList.contains('hana-is-hidden'),
+    };
+    controller.destroy();
+    return immediate;
+  });
+  expect(result).toEqual({ state: 'visible', paths: 2, noteVisible: true });
+});
+
+test('selector replacement while visibility is not requested recovers hidden without drawing', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const arena = document.querySelector('#arena');
+    const original = document.querySelector('#selector-target');
+    const controller = annotate('#selector-target', { mark: 'circle', duration: 0 });
+    original.remove();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const suspended = controller.state;
+    const replacement = document.createElement('p');
+    replacement.id = 'selector-target';
+    replacement.textContent = 'Hidden-intent replacement';
+    arena.append(replacement);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const group = document.querySelector('.hana-annotation');
+    const output = {
+      suspended,
+      recovered: controller.state,
+      hidden: group.hasAttribute('hidden'),
+      paths: group.querySelectorAll('.hana-mark-path').length,
+    };
+    controller.destroy();
+    return output;
+  });
+  expect(result).toEqual({ suspended: 'suspended', recovered: 'hidden', hidden: true, paths: 0 });
+});
+
+test('hidden and non-renderable targets suspend on show and refresh, then recover', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const target = document.querySelector('#direct-target');
+    target.hidden = true;
+    const controller = annotate(target, { mark: 'underline', duration: 0 });
+    const errors = [];
+    target.addEventListener('hana:error', (event) => errors.push(event.detail.error.code));
+    controller.show();
+    const showError = await controller.finished.then(() => null, (error) => error.code);
+    const afterShow = {
+      state: controller.state,
+      hidden: document.querySelector('.hana-annotation').hasAttribute('hidden'),
+      paths: document.querySelectorAll('.hana-mark-path').length,
+    };
+    controller.refresh();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controller.refresh();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    target.hidden = false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const recovered = controller.state;
+    target.style.visibility = 'hidden';
+    controller.refresh();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const afterRefresh = controller.state;
+    target.style.visibility = 'visible';
+    controller.refresh();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const final = controller.state;
+    controller.destroy();
+    return { showError, afterShow, recovered, afterRefresh, final, errors };
+  });
+  expect(result).toEqual({
+    showError: 'HANA_TARGET_INVALID',
+    afterShow: { state: 'suspended', hidden: true, paths: 0 },
+    recovered: 'visible',
+    afterRefresh: 'suspended',
+    final: 'visible',
+    errors: ['HANA_TARGET_INVALID', 'HANA_TARGET_INVALID'],
+  });
+});
+
+test('invalid construction leaves no overlay or owned DOM behind', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const errors = [];
+    for (const [target, options] of [
+      ['#missing-target', { mark: 'circle' }],
+      ['#direct-target', { mark: 'invalid' }],
+    ]) {
+      try { annotate(target, options); } catch (error) { errors.push(error.code); }
+    }
+    return {
+      errors,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      owned: document.querySelectorAll('[data-hana-id]').length,
+    };
+  });
+  expect(result).toEqual({
+    errors: ['HANA_TARGET_MISSING', 'HANA_CONFIG_INVALID'], overlays: 0, owned: 0,
+  });
 });
 
 test('direct target suspends once and recovers only when the same node reconnects', async ({ page }) => {
