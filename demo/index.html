@@ -1,0 +1,199 @@
+<!--
+THESIS: Hanamaru makes reliable DOM annotation visible as a living proof sheet.
+OWN-WORLD: Living Redline — mineral paper, vermilion correction ink, indigo code tray.
+STORY: See the mechanism → stress reflow → inspect every mark → operate the playground.
+FIRST VIEWPORT: A real annotated proof and synchronized source, followed by one primary stamp.
+FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, or a SaaS grid.
+-->
+<!doctype html>
+<html lang="en" class="demo-root">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Hanamaru is a reliable, human annotation runtime for the DOM.">
+    <title>Hanamaru — Living annotations for the DOM</title>
+    <link rel="stylesheet" href="/dist/hanamaru.css">
+    <link rel="stylesheet" href="/demo/demo.css">
+  </head>
+  <body class="demo-page">
+    <a class="demo-skip-link" href="#main-content">Skip to proof</a>
+
+    <header class="demo-masthead">
+      <a class="demo-wordmark" href="#proof" aria-label="Hanamaru proof overview">
+        <span class="demo-wordmark__flower" aria-hidden="true">＊</span>
+        <span>Hanamaru</span>
+      </a>
+      <nav class="demo-nav" aria-label="Demo sections">
+        <a href="#quick-start">Quick start</a>
+        <a href="#api">API</a>
+        <a href="#limitations">Limitations</a>
+      </nav>
+      <p class="demo-build-mark">Local proof <span data-demo-version>v0.1.0</span></p>
+    </header>
+
+    <main id="main-content" class="demo-main">
+      <section id="proof" class="demo-proof" aria-labelledby="proof-title">
+        <div class="demo-proof-frame">
+          <div class="demo-ruler" aria-hidden="true">
+            <span>0</span><i></i><i></i><i></i><i></i>
+            <span>20</span><i></i><i></i><i></i><i></i>
+            <span>40</span><i></i><i></i><i></i><i></i>
+            <span>60</span><i></i><i></i><i></i><i></i>
+            <span>80</span>
+          </div>
+
+          <div class="demo-proof-fields">
+            <article class="demo-copy-field">
+              <p class="demo-proof-kicker">Correction sheet · 001</p>
+              <h1 id="proof-title">Mark the words.<br>Keep the page alive.</h1>
+              <p class="demo-proof-lede">
+                Hanamaru draws human annotations over real DOM geometry. Targets can reflow,
+                notes can move, and the source stays untouched.
+              </p>
+
+              <div class="demo-specimen" aria-label="Annotation proof specimen">
+                <span class="demo-specimen__folio" aria-hidden="true">原稿</span>
+                <p>
+                  A reliable annotation should follow the phrase it explains—not the box it
+                  happened to meet on first render. Hanamaru resolves the target, measures each
+                  line, and redraws the correction when the document changes.
+                </p>
+                <p class="demo-redline-note">
+                  <span aria-hidden="true">↳</span> geometry is evidence, not decoration
+                </p>
+              </div>
+
+              <dl class="demo-registration-data" aria-label="Runtime registration data">
+                <div><dt>Targets</dt><dd>Element · Range · exact text</dd></div>
+                <div><dt>Motion</dt><dd>manual · load · viewport</dd></div>
+                <div><dt>Output</dt><dd>ES2020 · ESM · IIFE</dd></div>
+              </dl>
+            </article>
+
+            <aside class="demo-code-tray" aria-label="Synchronized source proof">
+              <div class="demo-code-tray__heading">
+                <span>Source proof</span>
+                <span>ESM / public build</span>
+              </div>
+              <pre data-demo-code-region tabindex="0" aria-label="Hanamaru source example"><code><span class="demo-code-dim">import</span> { annotate } <span class="demo-code-dim">from</span>
+<span class="demo-code-string">'./dist/hanamaru.esm.js'</span>
+
+<span class="demo-code-dim">const</span> note = annotate(
+  { within: <span class="demo-code-string">'#proof'</span>,
+    text: <span class="demo-code-string">'follow the phrase'</span> },
+  {
+    mark: <span class="demo-code-string">'underline'</span>,
+    note: <span class="demo-code-string">'Still attached.'</span>,
+    placement: <span class="demo-code-string">'auto'</span>
+  }
+)
+
+note.show()</code></pre>
+              <p class="demo-code-tray__caption">
+                No wrapper injection. The document remains yours.
+              </p>
+            </aside>
+          </div>
+
+          <span class="demo-registration-cross demo-registration-cross--north" aria-hidden="true"></span>
+          <span class="demo-registration-cross demo-registration-cross--south" aria-hidden="true"></span>
+        </div>
+
+        <div class="demo-actions" aria-label="Try Hanamaru locally">
+          <a class="demo-stamp demo-stamp--primary" href="#playground">Open Live Playground</a>
+          <div class="demo-starter-action">
+            <button class="demo-stamp demo-stamp--secondary" type="button" data-demo-copy>
+              Copy local starter
+            </button>
+            <p>Registry publication is not part of this local build.</p>
+            <label class="demo-copy-fallback" hidden>
+              <span>Clipboard unavailable. Copy this selected local starter:</span>
+              <textarea rows="6" readonly data-demo-copy-fallback></textarea>
+            </label>
+          </div>
+          <p class="demo-status" role="status" aria-live="polite">Local proof ready.</p>
+        </div>
+      </section>
+
+      <section id="quick-start" class="demo-doc-section" aria-labelledby="quick-start-title">
+        <div class="demo-doc-heading">
+          <p>One explicit scan</p>
+          <h2 id="quick-start-title">Quick start</h2>
+        </div>
+        <div class="demo-doc-body">
+          <p>
+            Load the public stylesheet and module, then choose when Hanamaru scans. Nothing runs
+            merely because the script arrived.
+          </p>
+          <pre class="demo-inline-code" tabindex="0"><code>&lt;link rel="stylesheet" href="./dist/hanamaru.css"&gt;
+&lt;script type="module"&gt;
+  import { scan } from './dist/hanamaru.esm.js'
+  scan()
+&lt;/script&gt;</code></pre>
+        </div>
+      </section>
+
+      <section id="api" class="demo-doc-section" aria-labelledby="api-title">
+        <div class="demo-doc-heading">
+          <p>Two entry points</p>
+          <h2 id="api-title">Declare or direct</h2>
+        </div>
+        <div class="demo-doc-body demo-api-ledger">
+          <div>
+            <h3>HTML attributes</h3>
+            <p><code>data-hana="highlight"</code> gives authored markup a zero-setup path.</p>
+          </div>
+          <div>
+            <h3>JavaScript API</h3>
+            <p><code>annotate(target, options)</code> gives applications explicit lifecycle control.</p>
+          </div>
+          <p class="demo-ledger-line">Six marks: underline · highlight · circle · box · strike · bracket</p>
+        </div>
+      </section>
+
+      <section id="playground" class="demo-playground" aria-labelledby="playground-title" tabindex="-1">
+        <div class="demo-playground__title">
+          <span aria-hidden="true">校</span>
+          <div>
+            <p>Control bench</p>
+            <h2 id="playground-title">Live playground</h2>
+          </div>
+        </div>
+        <p class="demo-playground__copy">
+          This proof target is reserved for the public-API workbench: existing specimen text,
+          mark, note, placement, and trigger—without arbitrary page editing or drag positioning.
+        </p>
+        <dl class="demo-playground__docket">
+          <div><dt>Input</dt><dd>Existing specimen text</dd></div>
+          <div><dt>Placement</dt><dd>Automatic or named</dd></div>
+          <div><dt>Lifecycle</dt><dd>Show · hide · update · destroy</dd></div>
+        </dl>
+      </section>
+
+      <section id="limitations" class="demo-doc-section" aria-labelledby="limitations-title">
+        <div class="demo-doc-heading">
+          <p>V1 boundary</p>
+          <h2 id="limitations-title">Reliable by being specific</h2>
+        </div>
+        <div class="demo-doc-body">
+          <p>
+            V1 excludes cross-document and cross-shadow-root ranges, editable-document authoring,
+            persistence, collaboration, image annotation, and arbitrary drag positioning.
+          </p>
+          <p class="demo-ledger-line">Optional browser APIs degrade; target correctness does not.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="demo-footer">
+      <p><strong>Hanamaru</strong> · a local open-source proof</p>
+      <nav aria-label="Documentation links">
+        <a href="#quick-start">Quick start</a>
+        <a href="#api">API</a>
+        <a href="#limitations">Limitations</a>
+      </nav>
+    </footer>
+
+    <script type="module" src="/demo/demo.js"></script>
+  </body>
+</html>

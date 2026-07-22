@@ -30,7 +30,9 @@ export async function createStaticServer({ root = process.cwd(), port = 4173 } =
       return;
     }
 
-    const relativePath = pathname === '/' ? 'demo/index.html' : pathname.replace(/^\/+/, '');
+    const relativePath = pathname === '/' || pathname === '/demo/'
+      ? 'demo/index.html'
+      : pathname.replace(/^\/+/, '');
     const filePath = path.resolve(resolvedRoot, relativePath);
 
     if (filePath !== resolvedRoot && !filePath.startsWith(rootPrefix)) {

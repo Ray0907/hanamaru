@@ -41,6 +41,7 @@ test('createStaticServer serves approved files, blocks traversal, and releases i
 
   for (const [urlPath, expectedBody, contentType] of [
     ['/', '<h1>demo fixture</h1>', /^text\/html; charset=utf-8/],
+    ['/demo/', '<h1>demo fixture</h1>', /^text\/html; charset=utf-8/],
     ['/index.html', '<h1>root fixture</h1>', /^text\/html; charset=utf-8/],
     ['/app.js', 'console.log("fixture");', /^text\/javascript; charset=utf-8/],
     ['/style.css', 'body{color:green}', /^text\/css; charset=utf-8/],

@@ -1,0 +1,115 @@
+import { expect, test } from '@playwright/test';
+
+const directionContract = `<!--
+THESIS: Hanamaru makes reliable DOM annotation visible as a living proof sheet.
+OWN-WORLD: Living Redline — mineral paper, vermilion correction ink, indigo code tray.
+STORY: See the mechanism → stress reflow → inspect every mark → operate the playground.
+FIRST VIEWPORT: A real annotated proof and synchronized source, followed by one primary stamp.
+FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, or a SaaS grid.
+-->`;
+
+const localStarter = `<link rel="stylesheet" href="./dist/hanamaru.css">
+<script type="module">
+  import { scan } from './dist/hanamaru.esm.js'
+  scan()
+</script>`;
+
+test('serves one contracted demo document at the root and demo routes', async ({ request }) => {
+  for (const route of ['/', '/demo/', '/demo/index.html']) {
+    const response = await request.get(route);
+    expect(response.status(), `${route} should serve the Living Redline demo`).toBe(200);
+    expect(await response.text()).toContain('<title>Hanamaru');
+  }
+
+  const source = await (await request.get('/demo/index.html')).text();
+  expect(source.startsWith(`${directionContract}\n<!doctype html>`)).toBe(true);
+});
+
+test('exposes the proof as an ordered, linked semantic document', async ({ page }) => {
+  await page.goto('/');
+
+  await expect(page.locator('h1')).toHaveCount(1);
+  await expect(page.locator('body > header, body > main, body > footer')).toHaveCount(3);
+  expect(await page.locator('body > header, body > main, body > footer')
+    .evaluateAll((nodes) => nodes.map(({ tagName }) => tagName))).toEqual(['HEADER', 'MAIN', 'FOOTER']);
+
+  const skipLink = page.getByRole('link', { name: 'Skip to proof' });
+  await expect(skipLink).toHaveAttribute('href', '#main-content');
+  await expect(page.locator('main#main-content')).toHaveCount(1);
+
+  for (const id of ['quick-start', 'api', 'playground', 'limitations']) {
+    await expect(page.locator(`#${id}`)).toHaveCount(1);
+    await expect(page.locator(`a[href="#${id}"]`).first()).toBeVisible();
+  }
+
+  const ids = await page.locator('[id]').evaluateAll((nodes) => nodes.map(({ id }) => id));
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+test('uses honest working actions and reports copy state', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText(value) {
+          window.__hanamaruCopied = value;
+          return Promise.resolve();
+        },
+      },
+    });
+  });
+  await page.goto('/');
+
+  const primary = page.getByRole('link', { name: 'Open Live Playground' });
+  await expect(primary).toHaveAttribute('href', '#playground');
+  await primary.click();
+  await expect(page).toHaveURL(/#playground$/);
+
+  const copy = page.getByRole('button', { name: 'Copy local starter' });
+  await expect(copy).toHaveAttribute('type', 'button');
+  const disclaimer = copy.locator('+ p');
+  await expect(disclaimer).toContainText('Registry publication is not part of this local build');
+
+  await copy.click();
+  expect(await page.evaluate(() => window.__hanamaruCopied)).toBe(localStarter);
+  await expect(page.getByRole('status')).toHaveText('Local starter copied.');
+  await expect(page.getByRole('status')).toHaveAttribute('aria-live', 'polite');
+
+  const controls = page.locator('a, button');
+  await expect(controls).not.toHaveCount(0);
+  for (const control of await controls.all()) {
+    const tag = await control.evaluate((node) => node.tagName);
+    if (tag === 'A') await expect(control).not.toHaveAttribute('href', /^#?$/);
+    if (tag === 'BUTTON') await expect(control).toHaveAttribute('type', 'button');
+    await expect(control).toHaveAccessibleName(/\S/);
+  }
+});
+
+test('loads the runtime only from public distribution files', async ({ page, request }) => {
+  await page.goto('/');
+
+  await expect(page.locator('link[rel="stylesheet"][href="/dist/hanamaru.css"]')).toHaveCount(1);
+  await expect(page.locator('link[rel="stylesheet"][href="/demo/demo.css"]')).toHaveCount(1);
+  await expect(page.locator('script[type="module"][src="/demo/demo.js"]')).toHaveCount(1);
+  await expect(page.locator('[src*="/src/"], [href*="/src/"], [src*="internal"], [href*="internal"]')).toHaveCount(0);
+
+  const source = await (await request.get('/demo/demo.js')).text();
+  const imports = [...source.matchAll(/^import\s+.+?from\s+['"]([^'"]+)['"];?$/gm)]
+    .map((match) => match[1]);
+  expect(imports).toEqual(['/dist/hanamaru.esm.js']);
+  expect(source).not.toMatch(/(?:^|\/)src\//);
+  expect(source).not.toContain('internal');
+});
+
+test('keeps the narrow page contained while code remains locally scrollable', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+
+  const containment = await page.evaluate(() => ({
+    pageWidth: document.documentElement.scrollWidth,
+    viewportWidth: document.documentElement.clientWidth,
+    codeOverflow: getComputedStyle(document.querySelector('[data-demo-code-region]')).overflowX,
+  }));
+  expect(containment.pageWidth).toBeLessThanOrEqual(containment.viewportWidth);
+  expect(containment.codeOverflow).toBe('auto');
+});

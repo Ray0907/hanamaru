@@ -9,7 +9,7 @@ export default defineConfig({
   },
   webServer: {
     command: 'npm run build && npm run dev',
-    url: 'http://127.0.0.1:4173/tests/fixtures/scan.html',
+    url: 'http://127.0.0.1:4173/demo/index.html',
     reuseExistingServer: true,
   },
   projects: [
