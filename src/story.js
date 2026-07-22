@@ -1,9 +1,17 @@
-import { normalizeOptions } from './annotation.js';
+import {
+  createAnnotation,
+  createAnnotationEnvironment,
+  documentForTarget,
+  normalizeOptions,
+  pauseAnnotationRun,
+  resumeAnnotationRun,
+} from './annotation.js';
 import {
   HanamaruConfigError,
   HanamaruStateError,
   HanamaruTargetError,
 } from './errors.js';
+import { resolveTarget } from './target.js';
 
 const STORY_KEYS = new Set(['trigger', 'gap', 'once', 'motion']);
 const STEP_KEYS = new Set([
@@ -11,6 +19,43 @@ const STEP_KEYS = new Set([
 ]);
 const STORY_TRIGGERS = new Set(['manual', 'load', 'viewport']);
 const STORY_MOTIONS = new Set(['system', 'never']);
+
+function defaultStoryEnvironment(steps) {
+  let doc;
+  try {
+    doc = documentForTarget(steps?.[0]?.target);
+  } catch {
+    if (typeof document !== 'undefined') doc = document;
+    else throw new TypeError('story() requires a target Document');
+  }
+  const win = doc.defaultView;
+  return {
+    clearTimeout(id) { win.clearTimeout(id); },
+    createAnnotation(target, options) {
+      return createAnnotation(target, options, createAnnotationEnvironment(target));
+    },
+    createEvent(type, detail, owner) {
+      owner.dispatchEvent(new win.CustomEvent(type, {
+        detail,
+        bubbles: true,
+        composed: true,
+      }));
+    },
+    now() { return win.performance.now(); },
+    pauseAnnotationRun,
+    reducedMotion(options) {
+      return options.motion === 'never'
+        || win.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    },
+    resolveTarget(target) { return resolveTarget(target, doc); },
+    resumeAnnotationRun,
+    setTimeout(callback, delay) { return win.setTimeout(callback, delay); },
+  };
+}
+
+export function story(steps, options = {}) {
+  return createStory(steps, options, defaultStoryEnvironment(steps));
+}
 
 function has(input, key) {
   return Object.prototype.hasOwnProperty.call(input, key);

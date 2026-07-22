@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Story fixture</title>
+    <link rel="stylesheet" href="/src/hanamaru.css">
+    <style>
+      body { margin: 40px; min-height: 140vh; }
+      main { width: min(720px, 80vw); }
+      .target { display: inline-block; margin: 48px; }
+      .controls { display: flex; gap: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="controls">
+      <button id="play" type="button">Play</button>
+      <button id="pause" type="button">Pause</button>
+      <button id="resume" type="button">Resume</button>
+      <button id="cancel" type="button">Cancel</button>
+      <button id="replay" type="button">Replay</button>
+      <button id="destroy" type="button">Destroy</button>
+    </div>
+    <main id="story-arena">
+      <p id="story-first" class="target">First story target</p>
+      <p id="story-second" class="target">Second story target</p>
+    </main>
+  </body>
+</html>

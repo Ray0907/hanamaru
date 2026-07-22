@@ -263,7 +263,7 @@ function hiddenTargetError(record) {
   );
 }
 
-function documentForTarget(target) {
+export function documentForTarget(target) {
   if (target?.nodeType === 1) return target.ownerDocument;
   if (target?.startContainer) {
     return target.startContainer.nodeType === 9
@@ -275,7 +275,7 @@ function documentForTarget(target) {
   throw new TypeError('annotate() requires a target Document');
 }
 
-function defaultEnvironment(target) {
+export function createAnnotationEnvironment(target) {
   const doc = documentForTarget(target);
   const win = doc.defaultView;
   const id = `hana-${++nextAnnotationId}`;
@@ -325,7 +325,7 @@ function defaultEnvironment(target) {
 }
 
 export function annotate(target, options) {
-  return createAnnotation(target, options, defaultEnvironment(target));
+  return createAnnotation(target, options, createAnnotationEnvironment(target));
 }
 
 export function pauseAnnotationRun(controller) {
