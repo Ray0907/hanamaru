@@ -50,7 +50,7 @@ export function normalizeOptions(input, fallbackSeed, { allowUnknown = false } =
   if (typeof accessible !== 'boolean') invalid('accessible', accessible);
 
   const seed = optional(input, 'seed', fallbackSeed);
-  if (has(input, 'seed') && typeof seed !== 'string' && !(typeof seed === 'number' && Number.isFinite(seed))) {
+  if (typeof seed !== 'string' && !(typeof seed === 'number' && Number.isFinite(seed))) {
     invalid('seed', seed);
   }
 

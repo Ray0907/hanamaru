@@ -66,6 +66,27 @@ test('normalizes note values and counts Unicode code points', () => {
 test('accepts valid seed types', () => {
   assert.equal(normalizeOptions({ mark: 'circle', seed: 'seed' }, 'id-1').seed, 'seed');
   assert.equal(normalizeOptions({ mark: 'circle', seed: 12.5 }, 'id-1').seed, 12.5);
+  assert.equal(normalizeOptions({ mark: 'circle' }, 'fallback').seed, 'fallback');
+  assert.equal(normalizeOptions({ mark: 'circle' }, 12.5).seed, 12.5);
+});
+
+test('validates the fallback seed when input omits seed', () => {
+  for (const fallbackSeed of [Infinity, {}, undefined]) {
+    assert.throws(
+      () => normalizeOptions({ mark: 'circle' }, fallbackSeed),
+      (error) => {
+        assert.ok(error instanceof HanamaruConfigError);
+        assert.equal(error.code, 'HANA_CONFIG_INVALID');
+        assert.equal(error.details.field, 'seed');
+        assert.equal(error.details.value, fallbackSeed);
+        return true;
+      },
+    );
+  }
+});
+
+test('uses an explicit valid seed without validating an unused fallback', () => {
+  assert.equal(normalizeOptions({ mark: 'circle', seed: 'explicit' }, Infinity).seed, 'explicit');
 });
 
 test('accepts valid enum and scalar boundaries', () => {
