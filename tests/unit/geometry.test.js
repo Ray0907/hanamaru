@@ -3,9 +3,13 @@ import test from 'node:test';
 
 import {
   clampNoteRect,
+  choosePlacement,
+  connectorDistance,
   intersectionArea,
   noteCandidates,
+  overflowPixels,
   rect,
+  scoreCandidate,
   unionRects,
 } from '../../src/geometry.js';
 
@@ -45,6 +49,56 @@ test('intersectionArea returns positive overlap and zero for touching edges', ()
   assert.equal(intersectionArea(rect(0, 0, 20, 20), rect(10, 5, 20, 10)), 100);
   assert.equal(intersectionArea(rect(0, 0, 10, 10), rect(10, 0, 10, 10)), 0);
   assert.equal(intersectionArea(rect(0, 0, 10, 10), rect(30, 0, 10, 10)), 0);
+});
+
+test('overflowPixels sums every edge excess outside the inset viewport', () => {
+  const viewport = { width: 100, height: 80 };
+
+  assert.equal(overflowPixels(rect(-5, -8, 120, 100), viewport), 88);
+  assert.equal(overflowPixels(rect(20, 20, 20, 20), viewport), 0);
+  assert.equal(overflowPixels(rect(12, 12, 76, 56), viewport, 0), 0);
+});
+
+test('overflowPixels treats notes touching inset edges as contained', () => {
+  assert.equal(
+    overflowPixels(rect(12, 12, 76, 56), { width: 100, height: 80 }),
+    0,
+  );
+});
+
+test('connectorDistance measures the target center to the nearest note point', () => {
+  const target = rect(40, 40, 20, 20);
+
+  assert.equal(connectorDistance(target, rect(70, 45, 20, 10)), 20);
+  assert.equal(connectorDistance(target, rect(45, 70, 10, 20)), 20);
+  assert.equal(connectorDistance(target, rect(70, 70, 10, 10)), Math.sqrt(800));
+  assert.equal(connectorDistance(target, rect(45, 45, 10, 10)), 0);
+});
+
+test('scoreCandidate combines overflow, target, note, connector, and preference costs', () => {
+  const candidate = rect(-10, -10, 320, 320);
+  const target = rect(300, 300, 1000, 1000);
+  const score = scoreCandidate(candidate, {
+    target,
+    viewport: { width: 800, height: 800 },
+    otherNotes: [rect(0, 0, 10, 10)],
+    preferencePenalty: 7,
+  });
+
+  assert.equal(score, (44 * 1000) + (100 * 100) + (100 * 10)
+    + (Math.hypot(490, 490) - 240) + 7);
+  assert.deepEqual(candidate, rect(-10, -10, 320, 320));
+  assert.equal(Number.isFinite(score), true);
+});
+
+test('scoreCandidate defaults its inset, preference penalty, and other notes', () => {
+  assert.equal(
+    scoreCandidate(rect(0, 0, 10, 10), {
+      target: rect(500, 500, 10, 10),
+      viewport: { width: 100, height: 100 },
+    }),
+    24_000 + (Math.hypot(495, 495) - 240),
+  );
 });
 
 test('clampNoteRect caps size then positions a note inside the inset viewport', () => {
@@ -94,5 +148,109 @@ test('noteCandidates accepts a custom gap and preserves decimals', () => {
       bottom: rect(15.5, 63.5, 20.5, 10.25),
       left: rect(-12.5, 35.5, 20.5, 10.25),
     },
+  );
+});
+
+test('choosePlacement preserves named auto order for equal LTR and RTL scores', () => {
+  const common = {
+    target: rect(400, 400, 100, 100),
+    noteSize: { width: 100, height: 100 },
+    viewport: { width: 1000, height: 1000 },
+  };
+
+  assert.equal(choosePlacement(common).side, 'right');
+  assert.equal(choosePlacement({ ...common, dir: 'rtl' }).side, 'left');
+});
+
+test('choosePlacement lets overflow dominate an earlier auto candidate', () => {
+  const result = choosePlacement({
+    target: rect(950, 400, 20, 20),
+    noteSize: { width: 100, height: 100 },
+    viewport: { width: 1000, height: 1000 },
+  });
+
+  assert.equal(result.side, 'left');
+});
+
+test('choosePlacement gives an explicit side its first tie-breaking preference', () => {
+  const result = choosePlacement({
+    target: rect(400, 400, 100, 100),
+    noteSize: { width: 100, height: 100 },
+    viewport: { width: 1000, height: 1000 },
+    placement: 'left',
+  });
+
+  assert.equal(result.side, 'left');
+});
+
+test('choosePlacement allows an explicit opposite side to beat serious preferred overflow', () => {
+  const result = choosePlacement({
+    target: rect(950, 400, 20, 20),
+    noteSize: { width: 100, height: 100 },
+    viewport: { width: 1000, height: 1000 },
+    placement: 'right',
+  });
+
+  assert.equal(result.side, 'left');
+});
+
+test('choosePlacement avoids overlap with existing notes', () => {
+  const target = rect(400, 400, 100, 100);
+  const noteSize = { width: 100, height: 100 };
+  const candidates = noteCandidates(target, noteSize);
+  const result = choosePlacement({
+    target,
+    noteSize,
+    viewport: { width: 1000, height: 1000 },
+    otherNotes: [candidates.right],
+  });
+
+  assert.equal(result.side, 'top');
+});
+
+test('choosePlacement passes custom gap and inset through placement and final clamping', () => {
+  const result = choosePlacement({
+    target: rect(100, 100, 20, 20),
+    noteSize: { width: 30, height: 10 },
+    viewport: { width: 300, height: 300 },
+    placement: 'top',
+    gap: 7,
+    inset: 20,
+  });
+
+  assert.deepEqual(result.rect, rect(95, 83, 30, 10));
+});
+
+test('choosePlacement scores un-clamped candidates before clamping its winner', () => {
+  const target = rect(400, 120, 100, 100);
+  const noteSize = { width: 100, height: 100 };
+  const viewport = { width: 1000, height: 1000 };
+  const candidates = noteCandidates(target, noteSize);
+  const result = choosePlacement({
+    target,
+    noteSize,
+    viewport,
+    placement: 'top',
+    otherNotes: [candidates.right, candidates.bottom, candidates.left],
+  });
+
+  assert.equal(result.side, 'top');
+  assert.equal(result.score, scoreCandidate(candidates.top, {
+    target,
+    viewport,
+    otherNotes: [candidates.right, candidates.bottom, candidates.left],
+  }));
+  assert.deepEqual(result.rect, rect(400, 12, 100, 100));
+});
+
+test('choosePlacement rejects unknown placement values clearly', () => {
+  assert.throws(
+    () => choosePlacement({
+      target: rect(0, 0, 10, 10),
+      noteSize: { width: 10, height: 10 },
+      viewport: { width: 100, height: 100 },
+      placement: 'diagonal',
+    }),
+    RangeError,
   );
 });
