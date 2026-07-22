@@ -289,7 +289,7 @@ test('a hana:cancel destroy prevents outer hide from touching released resources
 
   assert.equal(controller.state, 'destroyed');
   assert.equal(controller.finished, settledRun);
-  assert.equal(environment.calls.filter((call) => call === 'renderer:hide').length, 0);
+  assert.equal(environment.calls.filter((call) => call === 'renderer:hide').length, 1);
   assert.equal(environment.calls.filter((call) => call === 'renderer:destroy').length, 1);
   assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
   assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
@@ -315,7 +315,7 @@ test('a hana:cancel destroy prevents outer replay from creating a pending run', 
   assert.equal(controller.state, 'destroyed');
   assert.equal(controller.finished, settledRun);
   await assert.doesNotReject(settledRun);
-  assert.equal(environment.calls.filter((call) => call === 'renderer:hide').length, 0);
+  assert.equal(environment.calls.filter((call) => call === 'renderer:hide').length, 1);
   assert.equal(environment.calls.filter((call) => call === 'renderer:destroy').length, 1);
   assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
   assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
@@ -334,10 +334,12 @@ test('hana:cancel refresh and update inherit a coherent hidden state from hide a
       const cancelledRun = controller.finished;
       let listenerState = null;
       let listenerRun = null;
+      let listenerSawRendererHide = false;
       environment.setEventHandler((event) => {
         if (event.type !== 'hana:cancel' || event.detail.reason !== action) return;
         listenerState = controller.state;
         listenerRun = controller.finished;
+        listenerSawRendererHide = environment.calls.includes('renderer:hide');
         if (listenerAction === 'refresh') controller.refresh();
         else controller.update({ note: 'listener update' });
       });
@@ -351,6 +353,7 @@ test('hana:cancel refresh and update inherit a coherent hidden state from hide a
       );
       assert.equal(listenerState, 'hidden', `${action} -> ${listenerAction}`);
       assert.equal(listenerRun, cancelledRun, `${action} -> ${listenerAction}`);
+      assert.equal(listenerSawRendererHide, true, `${action} -> ${listenerAction}`);
       assert.equal(controller.finished, cancelledRun, `${action} -> ${listenerAction}`);
       assert.equal(controller.state, 'hidden', `${action} -> ${listenerAction}`);
       assert.equal(

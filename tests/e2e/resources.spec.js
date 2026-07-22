@@ -286,6 +286,40 @@ test('public queue keeps shared read/write ordering and rejects stale controller
   });
 });
 
+test('public queue keeps lifecycle and default channels independent for one controller', async ({ page }) => {
+  await installInstrumentation(page);
+
+  const events = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const lease = acquireDocumentResources(document);
+    const { shared } = lease;
+    const state = window.__resources;
+    const output = [];
+    shared.registerController('channel-owner');
+    shared.enqueue({
+      id: 'channel-owner', generation: 0,
+      read() { output.push('read:default'); return 'default'; },
+      write(value) { output.push(`write:${value}`); },
+    });
+    shared.enqueue({
+      id: 'channel-owner', generation: 0, channel: 'lifecycle',
+      read() { output.push('read:lifecycle'); return 'lifecycle'; },
+      write(value) { output.push(`write:${value}`); },
+    });
+    state.runFrame();
+    shared.releaseController('channel-owner');
+    lease.release();
+    return output;
+  });
+
+  expect(events).toEqual([
+    'read:default',
+    'read:lifecycle',
+    'write:default',
+    'write:lifecycle',
+  ]);
+});
+
 test('registers controller generations and rejects invalid or duplicate IDs', async ({ page }) => {
   await installInstrumentation(page);
 

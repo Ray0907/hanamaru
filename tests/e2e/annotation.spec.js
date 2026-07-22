@@ -321,6 +321,74 @@ test('hana:cancel refresh and update take over from a coherent hidden state', as
   })));
 });
 
+test('hana:cancel show restores real renderer visibility and its stable ARIA note', async ({ page }) => {
+  const results = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const output = [];
+
+    for (const action of ['hide', 'replay']) {
+      const target = document.createElement('span');
+      target.textContent = `${action} replacement show`;
+      target.style.display = 'inline-block';
+      document.querySelector('#arena').append(target);
+      const controller = annotate(target, {
+        mark: 'box', note: 'Stable accessible note', accessible: true, duration: 0,
+      });
+      let completes = 0;
+      target.addEventListener('hana:complete', () => { completes += 1; });
+      controller.show();
+      const initialRun = controller.finished;
+      await initialRun;
+      const noteId = document.querySelector('.hana-note').id;
+      let replacementRun = null;
+      target.addEventListener('hana:cancel', (event) => {
+        if (event.detail.reason !== action) return;
+        controller.show();
+        replacementRun = controller.finished;
+      });
+
+      controller[action]();
+      const outcome = await Promise.race([
+        replacementRun.then(() => 'resolved', () => 'rejected'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 1000)),
+      ]);
+      const group = document.querySelector('.hana-annotation');
+      const note = document.querySelector('.hana-note');
+      output.push({
+        action,
+        outcome,
+        freshRun: replacementRun !== initialRun,
+        sameFinished: controller.finished === replacementRun,
+        state: controller.state,
+        completes,
+        groupHidden: group.hasAttribute('hidden'),
+        groupDisplay: getComputedStyle(group).display,
+        noteIdStable: note.id === noteId,
+        noteHidden: note.hidden || getComputedStyle(note).visibility === 'hidden',
+        descriptionHasStableNote: (target.getAttribute('aria-describedby') ?? '')
+          .split(/\s+/u).includes(noteId),
+      });
+      controller.destroy();
+      target.remove();
+    }
+    return output;
+  });
+
+  expect(results).toEqual(['hide', 'replay'].map((action) => ({
+    action,
+    outcome: 'resolved',
+    freshRun: true,
+    sameFinished: true,
+    state: 'visible',
+    completes: 2,
+    groupHidden: false,
+    groupDisplay: 'inline',
+    noteIdStable: true,
+    noteHidden: false,
+    descriptionHasStableNote: true,
+  })));
+});
+
 test('selector replacement while visibility is not requested recovers hidden without drawing', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');

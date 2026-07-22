@@ -558,6 +558,7 @@ export function createAnnotation(target, rawOptions, env) {
       shared.enqueue({
         id,
         generation,
+        channel: 'lifecycle',
         read,
         write,
         onError(error) {
@@ -650,13 +651,17 @@ export function createAnnotation(target, rawOptions, env) {
     const wasActive = state === 'showing' || state === 'visible';
     requestedVisible = false;
     state = 'hidden';
-    forceHideRenderer(renderer, knownOwners);
-    cancelPending('hide', wasActive);
-    if (!isCurrentOperation(operation)) return controller;
+    let hideFailure = null;
     try {
       renderer.hide();
     } catch (error) {
-      handleRuntimeFailure(error);
+      hideFailure = error;
+      forceHideRenderer(renderer, knownOwners);
+    }
+    cancelPending('hide', wasActive);
+    if (!isCurrentOperation(operation)) return controller;
+    if (hideFailure !== null) {
+      handleRuntimeFailure(hideFailure);
       if (!isCurrentOperation(operation)) return controller;
     }
     if (wasActive && !rebindOrSuspend()) return controller;
@@ -669,14 +674,18 @@ export function createAnnotation(target, rawOptions, env) {
     const wasActive = state === 'showing' || state === 'visible';
     requestedVisible = false;
     state = 'hidden';
-    forceHideRenderer(renderer, knownOwners);
-    cancelPending('replay', wasActive);
-    if (!isCurrentOperation(operation)) return controller;
-    startDeferredRun();
+    let hideFailure = null;
     try {
       renderer.hide();
     } catch (error) {
-      handleRuntimeFailure(error);
+      hideFailure = error;
+      forceHideRenderer(renderer, knownOwners);
+    }
+    cancelPending('replay', wasActive);
+    if (!isCurrentOperation(operation)) return controller;
+    startDeferredRun();
+    if (hideFailure !== null) {
+      handleRuntimeFailure(hideFailure);
       if (!isCurrentOperation(operation)) return controller;
       rebindOrSuspend();
       return controller;

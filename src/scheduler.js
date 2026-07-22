@@ -257,7 +257,7 @@ class SharedDocumentResources {
     this.#frameQueue = new FrameQueue({
       requestFrame,
       cancelFrame,
-      generationFor: (id) => this.#controllers.get(id)?.token,
+      generationFor: (key) => this.#controllers.get(key.id)?.token,
     });
 
     const ResizeObserverConstructor = this.#window.ResizeObserver;
@@ -324,7 +324,7 @@ class SharedDocumentResources {
       throw new Error(`controller already registered: ${id}`);
     }
 
-    this.#controllers.set(id, { generation: 0, token: {} });
+    this.#controllers.set(id, { generation: 0, queueKeys: new Map(), token: {} });
     return 0;
   }
 
@@ -332,7 +332,7 @@ class SharedDocumentResources {
     const controller = this.#requireController(id);
     controller.generation += 1;
     controller.token = {};
-    this.#frameQueue.cancel(id);
+    this.#cancelControllerJobs(controller);
     return controller.generation;
   }
 
@@ -348,6 +348,7 @@ class SharedDocumentResources {
     const {
       id,
       generation,
+      channel = 'default',
       read,
       write,
       onError,
@@ -356,13 +357,16 @@ class SharedDocumentResources {
     if (generation !== controller.generation) {
       throw new Error(`stale controller generation: ${id}`);
     }
+    if (typeof channel !== 'string' || channel.length === 0) {
+      throw new TypeError('queue channel must be a non-empty string');
+    }
     requireFunction('read', read);
     requireFunction('write', write);
     if (onError !== undefined) {
       requireFunction('onError', onError);
     }
     this.#frameQueue.enqueue({
-      key: id,
+      key: this.#queueKey(controller, id, `public:${channel}`),
       generation: controller.token,
       read,
       write,
@@ -456,7 +460,8 @@ class SharedDocumentResources {
   }
 
   releaseController(id) {
-    if (!this.#controllers.has(id)) {
+    const controller = this.#controllers.get(id);
+    if (controller === undefined) {
       return;
     }
 
@@ -464,7 +469,7 @@ class SharedDocumentResources {
     for (const registration of [...this.#intersections.get(id) ?? []]) {
       this.#removeIntersection(registration);
     }
-    this.#frameQueue.cancel(id);
+    this.#cancelControllerJobs(controller);
     this.#controllers.delete(id);
   }
 
@@ -524,7 +529,7 @@ class SharedDocumentResources {
     };
     if (renewToken) {
       controller.token = token;
-      this.#frameQueue.cancel(id);
+      this.#cancelControllerJobs(controller);
     }
     this.#layouts.set(id, binding);
     this.#diffScrollTargets(id, prior?.scrollTargets ?? new Set(), binding.scrollTargets);
@@ -661,7 +666,8 @@ class SharedDocumentResources {
     this.#layouts.delete(id);
     this.#diffScrollTargets(id, binding.scrollTargets, new Set());
     this.#diffResizeTargets(id, binding.resizeTargets, new Set());
-    this.#frameQueue.cancel(id);
+    const layoutKey = this.#controllers.get(id)?.queueKeys.get('internal:layout');
+    if (layoutKey !== undefined) this.#frameQueue.cancel(layoutKey);
   }
 
   #signal(id) {
@@ -677,12 +683,27 @@ class SharedDocumentResources {
       return;
     }
     this.#frameQueue.enqueue({
-      key: id,
+      key: this.#queueKey(controller, id, 'internal:layout'),
       generation: binding.token,
       read: binding.read,
       write: binding.write,
       onError: binding.onError,
     });
+  }
+
+  #queueKey(controller, id, channel) {
+    let key = controller.queueKeys.get(channel);
+    if (key === undefined) {
+      key = { channel, id };
+      controller.queueKeys.set(channel, key);
+    }
+    return key;
+  }
+
+  #cancelControllerJobs(controller) {
+    for (const key of controller.queueKeys.values()) {
+      this.#frameQueue.cancel(key);
+    }
   }
 
   #isElement(value) {
