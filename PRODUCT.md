@@ -26,7 +26,7 @@ Unlike a visual CSS snippet collection, Hanamaru owns target resolution, measure
 
 ## Operating Context
 
-Developers evaluate Hanamaru in a repository README and proof-led demo, then install it from npm or load browser-ready assets from a CDN. They use it on ordinary framework-free HTML as well as framework-rendered DOM, but the V1 runtime itself has no framework dependency.
+Developers evaluate Hanamaru in a repository README and proof-led demo, then consume the locally built ESM or browser-ready assets. A later publication may add npm/CDN distribution, but V1 makes no registry-availability claim. Developers use it on ordinary framework-free HTML as well as framework-rendered DOM, while the runtime itself has no framework dependency.
 
 Annotations appear on responsive prose, headings, controls, and inline content. Authors may trigger them manually, on load, or when content enters the viewport.
 
@@ -39,6 +39,7 @@ Annotations appear on responsive prose, headings, controls, and inline content. 
 - Public entry points are data attributes, JavaScript functions, and JSON-compatible story definitions.
 - The runtime redraws after relevant resize, scroll, and scoped content changes.
 - The runtime ships with zero production dependencies as ESM plus browser-ready JavaScript and CSS.
+- The local package name is `hanamaru-annotations`; package publication is outside V1.
 - The stretch target is 5 KB gzipped JavaScript; 8 KB gzipped for JavaScript plus base CSS is the hard ceiling.
 - V1 excludes browser extensions, arbitrary-site persistence, accounts, cloud sync, collaboration, framework wrappers, image/canvas annotation, and AI or QA rule engines.
 - `Hanamaru` is the working brand. Package publication and registry naming are outside the local implementation scope.
@@ -67,4 +68,3 @@ The approved primary call to action is **Open Live Playground**.
 ## Accessibility & Inclusion
 
 All controls must use native semantics, visible focus, and keyboard operation. Motion must respect `prefers-reduced-motion` while retaining a clear final state. Notes cannot be the sole source of essential information; authors can connect meaningful notes through `aria-describedby`. The demo must remain usable at 200% zoom and a 390-pixel viewport without hiding the product's core proof.
-
