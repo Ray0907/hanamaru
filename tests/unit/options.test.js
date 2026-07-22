@@ -107,6 +107,13 @@ test('accepts valid enum and scalar boundaries', () => {
 
 test('rejects missing and invalid known values with preserved details', () => {
   assertInvalid({}, 'mark', undefined);
+  assertInvalid(Object.create({ mark: 'circle' }), 'mark', undefined);
+  assertInvalid({ __proto__: { mark: 'circle' } }, 'mark', undefined);
+  assertInvalid(Object.create({
+    get mark() {
+      throw new Error('inherited mark must not be read');
+    },
+  }), 'mark', undefined);
   assertInvalid({ mark: 'scribble' }, 'mark', 'scribble');
   assertInvalid({ mark: 'circle', placement: 'near' }, 'placement', 'near');
   assertInvalid({ mark: 'circle', trigger: 'hover' }, 'trigger', 'hover');

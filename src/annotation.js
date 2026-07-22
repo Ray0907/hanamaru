@@ -33,7 +33,7 @@ export function normalizeOptions(input, fallbackSeed, { allowUnknown = false } =
     }
   }
 
-  const mark = input.mark;
+  const mark = optional(input, 'mark', undefined);
   if (!MARKS.has(mark)) invalid('mark', mark);
 
   const note = optional(input, 'note', null);
