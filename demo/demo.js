@@ -1,4 +1,4 @@
-import { VERSION, annotate, story } from '/dist/hanamaru.esm.js';
+import { VERSION, annotate, scan, story } from '/dist/hanamaru.esm.js';
 
 const localStarter = `<link rel="stylesheet" href="./dist/hanamaru.css">
 <script type="module">
@@ -41,6 +41,7 @@ const storyButtons = Object.fromEntries(
     .map((button) => [button.dataset.demoStoryAction, button]),
 );
 const copyCodeButton = document.querySelector('[data-demo-copy-code]');
+const modeApplyButton = document.querySelector('[data-demo-mode-apply]');
 const codeFallbackWrap = document.querySelector('[data-demo-code-fallback-wrap]');
 const codeFallback = document.querySelector('[data-demo-code-fallback]');
 const starterButton = document.querySelector('[data-demo-copy]');
@@ -48,6 +49,23 @@ const starterFallbackWrap = document.querySelector('[data-demo-starter-fallback-
 const starterFallback = document.querySelector('[data-demo-copy-fallback]');
 const playgroundLink = document.querySelector('a[href="#playground"].demo-stamp--primary');
 const playground = document.querySelector('#playground');
+const reflowControl = document.querySelector('[data-demo-reflow-control]');
+const reflowValue = document.querySelector('[data-demo-reflow-value]');
+const reflowSpecimen = document.querySelector('[data-demo-reflow-specimen]');
+const reflowRegister = reflowSpecimen.querySelector('.demo-reflow-specimen__register');
+const ledgerButtons = [...document.querySelectorAll('[data-demo-mark]')];
+const ledgerTarget = document.querySelector('[data-demo-ledger-target]');
+const ledgerState = document.querySelector('[data-demo-mark-state]');
+const ledgerReplay = document.querySelector('[data-demo-mark-replay]');
+const modeProof = document.querySelector('[data-demo-mode-proof]');
+const modeTarget = document.querySelector('[data-demo-mode-target]');
+const modeState = document.querySelector('[data-demo-mode-state]');
+const sizeState = document.querySelector('[data-demo-size-state]');
+const sizeFields = {
+  esm: document.querySelector('[data-testid="size-esm"]'),
+  iife: document.querySelector('[data-testid="size-iife"]'),
+  css: document.querySelector('[data-testid="size-css"]'),
+};
 
 version.textContent = `v${VERSION}`;
 starterFallback.value = localStarter;
@@ -58,6 +76,10 @@ let activeAnnotation = null;
 let acceptedSteps = 0;
 let runCount = 0;
 let phaseEpoch = 0;
+let reflowController = null;
+let ledgerController = null;
+let ledgerMark = 'underline';
+let modeController = null;
 
 const proofStory = story(storySteps, {
   trigger: 'manual',
@@ -122,6 +144,7 @@ function renderStoryState() {
   storyButtons.pause.disabled = state !== 'playing';
   storyButtons.resume.disabled = state !== 'paused';
   storyButtons.replay.disabled = state === 'idle' || state === 'destroyed';
+  modeApplyButton.disabled = state === 'playing' || state === 'paused';
 }
 
 function selectTab(nextTab, { focus = false } = {}) {
@@ -135,6 +158,8 @@ function selectTab(nextTab, { focus = false } = {}) {
     panel.hidden = panel.dataset.demoPanel !== activeFormat;
   }
   synchronizeCodeStep();
+  const label = nextTab.textContent.trim();
+  modeState.textContent = `${label} selected · Apply active mode to run this definition.`;
   if (focus) nextTab.focus();
 }
 
@@ -177,6 +202,8 @@ for (const tab of tabs) {
 }
 
 storyButtons.play.addEventListener('click', () => {
+  suspendSectionProofs();
+  destroyModeProof();
   proofStory.play();
   renderStoryState();
 });
@@ -194,6 +221,8 @@ storyButtons.resume.addEventListener('click', () => {
   status.textContent = `Story resumed at step ${activeIndex + 1}.`;
 });
 storyButtons.replay.addEventListener('click', () => {
+  suspendSectionProofs();
+  destroyModeProof();
   proofStory.replay();
   renderStoryState();
 });
@@ -280,6 +309,163 @@ playgroundLink.addEventListener('click', () => {
   requestAnimationFrame(() => playground.focus({ preventScroll: true }));
 });
 
+function createReflowProof() {
+  reflowController?.destroy();
+  reflowController = annotate({
+    within: '#reflow-copy',
+    text: 'this note stays attached',
+  }, {
+    mark: 'underline',
+    note: 'Placed again after reflow.',
+    placement: 'auto',
+    motion: 'never',
+    duration: 0,
+    seed: 'demo-reflow-proof',
+  });
+  reflowController.show();
+  return reflowController;
+}
+
+function createLedgerProof(mark = ledgerMark) {
+  ledgerController?.destroy();
+  ledgerMark = mark;
+  ledgerController = annotate(ledgerTarget, {
+    mark,
+    motion: 'never',
+    duration: 0,
+    seed: `demo-ledger-${mark}`,
+  });
+  ledgerController.show();
+  for (const button of ledgerButtons) {
+    button.setAttribute('aria-pressed', String(button.dataset.demoMark === mark));
+  }
+  ledgerState.textContent = `Selected · ${mark}`;
+  return ledgerController;
+}
+
+function suspendSectionProofs() {
+  reflowController?.destroy();
+  ledgerController?.destroy();
+  reflowController = null;
+  ledgerController = null;
+}
+
+reflowControl.addEventListener('input', () => {
+  const width = Number(reflowControl.value);
+  reflowSpecimen.style.width = `${width}px`;
+  reflowValue.textContent = `${width}px`;
+  reflowRegister.textContent = `${width} / responsive copy measure`;
+  if (reflowController === null) createReflowProof();
+  reflowController.refresh();
+  status.textContent = `Proof remeasured at ${width}px.`;
+});
+
+for (const button of ledgerButtons) {
+  button.addEventListener('click', () => {
+    createLedgerProof(button.dataset.demoMark);
+    status.textContent = `${button.dataset.demoMark} specimen drawn.`;
+  });
+}
+
+ledgerReplay.addEventListener('click', () => {
+  if (ledgerController === null) createLedgerProof();
+  else ledgerController.replay();
+  status.textContent = `${ledgerMark} specimen replayed.`;
+});
+
+function destroyModeProof() {
+  modeController?.destroy();
+  modeController = null;
+  delete modeTarget.dataset.hana;
+  delete modeTarget.dataset.hanaNote;
+  delete modeTarget.dataset.hanaDuration;
+  delete modeTarget.dataset.hanaMotion;
+}
+
+function runHtmlMode() {
+  modeTarget.dataset.hana = 'highlight';
+  modeTarget.dataset.hanaNote = 'Scanned from authored HTML.';
+  modeTarget.dataset.hanaDuration = '0';
+  modeTarget.dataset.hanaMotion = 'never';
+  const result = scan(modeProof);
+  if (result.errors.length > 0 || result.annotations.length !== 1) {
+    throw result.errors[0] ?? new Error('HTML mode did not produce one annotation');
+  }
+  [modeController] = result.annotations;
+  modeController.show();
+  return { mark: 'highlight', method: 'scan()' };
+}
+
+function runStoryMode() {
+  modeController = story([{
+    target: modeTarget,
+    mark: 'circle',
+    note: 'Played through the Story API.',
+    duration: 0,
+  }], {
+    trigger: 'manual',
+    gap: 0,
+    motion: 'never',
+  });
+  modeController.play();
+  return { mark: 'circle', method: 'story()' };
+}
+
+function runJsonMode() {
+  const definition = JSON.parse(`{
+    "target": "#api-mode-target",
+    "mark": "box",
+    "note": "Parsed locally, rendered through annotate()."
+  }`);
+  const { target, ...options } = definition;
+  modeController = annotate(target, {
+    ...options,
+    motion: 'never',
+    duration: 0,
+  });
+  modeController.show();
+  return { mark: definition.mark, method: 'JSON → annotate()' };
+}
+
+modeApplyButton.addEventListener('click', () => {
+  destroyModeProof();
+  let result;
+  if (activeFormat === 'html') result = runHtmlMode();
+  else if (activeFormat === 'story') result = runStoryMode();
+  else result = runJsonMode();
+  modeTarget.dataset.demoModeApplied = activeFormat;
+  const label = tabs.find((tab) => tab.dataset.demoTab === activeFormat).textContent.trim();
+  modeState.textContent = `${label} · ${result.method} · ${result.mark} applied.`;
+  status.textContent = `${label} mode rendered the ${result.mark} proof.`;
+  modeTarget.scrollIntoView({ block: 'center', behavior: 'auto' });
+});
+
+function showUnavailableSize() {
+  const message = 'size unavailable in this local build';
+  sizeState.textContent = message;
+  for (const field of Object.values(sizeFields)) field.textContent = message;
+}
+
+async function loadSizeReport() {
+  try {
+    const response = await fetch('/dist/size-report.json');
+    if (!response.ok) throw new Error('Size report unavailable');
+    const report = await response.json();
+    const esm = report.formats.find(({ file }) => file === 'hanamaru.esm.js');
+    const iife = report.formats.find(({ file }) => file === 'hanamaru.iife.js');
+    if (!esm || !iife || !Number.isInteger(report.css?.gzip)) {
+      throw new Error('Size report invalid');
+    }
+    const format = (value) => value.toLocaleString('en-US');
+    sizeFields.esm.textContent = `${format(esm.combined)} B gzip incl. CSS`;
+    sizeFields.iife.textContent = `${format(iife.combined)} B gzip incl. CSS`;
+    sizeFields.css.textContent = `${format(report.css.gzip)} B gzip`;
+    sizeState.textContent = 'Measured from dist/size-report.json.';
+  } catch {
+    showUnavailableSize();
+  }
+}
+
 const firstRange = document.createRange();
 firstRange.selectNodeContents(document.querySelector('[data-demo-range-first]'));
 const nextRange = document.createRange();
@@ -322,7 +508,10 @@ window.addEventListener('pagehide', (event) => {
   if (event.persisted) return;
   proofStory.destroy();
   rangeProof.destroy();
+  suspendSectionProofs();
+  destroyModeProof();
 });
 
 selectTab(document.querySelector('[data-demo-tab="story"]'));
 renderStoryState();
+loadSizeReport();

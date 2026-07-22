@@ -2,6 +2,7 @@ import { build } from 'esbuild';
 import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { measureDistribution, writeSizeReport } from './check-size.mjs';
 
 export async function buildDistribution(root = process.cwd()) {
   const projectRoot = path.resolve(root);
@@ -37,11 +38,14 @@ export async function buildDistribution(root = process.cwd()) {
       minify: true,
     }),
   ]);
+
+  const metrics = await measureDistribution(projectRoot);
+  await writeSizeReport(projectRoot, metrics);
 }
 
 const invokedPath = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (invokedPath === import.meta.url) {
   await buildDistribution(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
-  console.log('build: wrote ESM, IIFE, and CSS');
+  console.log('build: wrote ESM, IIFE, CSS, and size report');
 }

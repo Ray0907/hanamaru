@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { checkDistribution, npmInvocationFor } from '../../scripts/check-size.mjs';
+import {
+  checkDistribution,
+  measureDistribution,
+  npmInvocationFor,
+  writeSizeReport,
+} from '../../scripts/check-size.mjs';
 
 async function createDistribution(pkg = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-size-'));
@@ -137,4 +142,51 @@ test('checkDistribution validates the actual production npm tree by default', as
   const rows = await checkDistribution(root);
 
   assert.equal(rows.length, 2);
+});
+
+test('size report uses one deterministic schema for measure, write, and check', async (t) => {
+  const root = await createDistribution({});
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const measured = await measureDistribution(root);
+  const written = await writeSizeReport(root, measured);
+  const expected = `${JSON.stringify({
+    budgets: {
+      hardCombinedGzip: 20_480,
+      stretchCombinedGzip: 18_432,
+    },
+    css: measured.css,
+    formats: measured.formats,
+    schemaVersion: 1,
+  }, null, 2)}\n`;
+
+  assert.equal(written, expected);
+  assert.equal(await readFile(path.join(root, 'dist', 'size-report.json'), 'utf8'), expected);
+  assert.deepEqual(Object.keys(JSON.parse(written).formats[0]), [
+    'combined',
+    'cssGzip',
+    'file',
+    'gzip',
+    'raw',
+    'stretch',
+  ]);
+  const rows = await checkDistribution(root, { checkNpmTree: false });
+  assert.deepEqual(rows, measured.formats);
+  assert.equal(await readFile(path.join(root, 'dist', 'size-report.json'), 'utf8'), expected);
+});
+
+test('size report excludes its own bytes and check rewrites stale metadata', async (t) => {
+  const root = await createDistribution({});
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, 'dist', 'size-report.json'), '{"stale":true}\n');
+
+  const before = await measureDistribution(root);
+  await writeFile(path.join(root, 'dist', 'size-report.json'), 'x'.repeat(100_000));
+  const after = await measureDistribution(root);
+  assert.deepEqual(after, before);
+
+  await checkDistribution(root, { checkNpmTree: false });
+  const rewritten = JSON.parse(await readFile(path.join(root, 'dist', 'size-report.json'), 'utf8'));
+  assert.deepEqual(rewritten.formats, before.formats);
+  assert.deepEqual(rewritten.css, before.css);
 });

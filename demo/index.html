@@ -110,7 +110,14 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
 &lt;/p&gt;</span></span>
 <span class="demo-code-step" data-demo-code-step="1"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">02</span><span data-demo-code-fragment>&lt;p id="locator-proof"&gt;
   …redraws the correction when the document changes…
-&lt;/p&gt;</span></span></code></pre>
+&lt;/p&gt;</span></span>
+<span class="demo-mode-definition" data-demo-code-fragment>&lt;span id="api-mode-target" data-hana="highlight"
+  data-hana-note="Scanned from authored HTML."&gt;…&lt;/span&gt;
+&lt;script type="module"&gt;
+  import { scan } from '/dist/hanamaru.esm.js'
+  const { annotations } = scan(document.querySelector('#mode-proof'))
+  annotations[0].show()
+&lt;/script&gt;</span></code></pre>
               </section>
 
               <section id="demo-panel-story" class="demo-code-panel" role="tabpanel"
@@ -120,7 +127,10 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
   mark: 'underline', note: 'Still attached.' }</span></span>
 <span class="demo-code-step" data-demo-code-step="1"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">02</span><span data-demo-code-fragment>{ target: { within: '#locator-proof',
   text: 'redraws the correction when the document changes' },
-  mark: 'circle', note: 'Measured again.' }</span></span></code></pre>
+  mark: 'circle', note: 'Measured again.' }</span></span>
+<span class="demo-mode-definition" data-demo-code-fragment>story([{ target: '#api-mode-target', mark: 'circle',
+  note: 'Played through the Story API.' }],
+  { trigger: 'manual', motion: 'never' }).play()</span></code></pre>
               </section>
 
               <section id="demo-panel-json" class="demo-code-panel" role="tabpanel"
@@ -130,7 +140,9 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
   "mark": "underline", "note": "Still attached." }</span></span>
 <span class="demo-code-step" data-demo-code-step="1"><span class="demo-code-step__marker" data-demo-step-marker aria-hidden="true">02</span><span data-demo-code-fragment>{ "target": { "within": "#locator-proof",
   "text": "redraws the correction when the document changes" },
-  "mark": "circle", "note": "Measured again." }</span></span></code></pre>
+  "mark": "circle", "note": "Measured again." }</span></span>
+<span class="demo-mode-definition" data-demo-code-fragment>{ "target": "#api-mode-target", "mark": "box",
+  "note": "Parsed locally, rendered through annotate()." }</span></code></pre>
               </section>
 
               <div class="demo-story-controls" data-demo-story-controls>
@@ -139,6 +151,7 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
                 <button type="button" data-demo-story-action="resume" disabled>Resume story</button>
                 <button type="button" data-demo-story-action="replay" disabled>Replay story</button>
                 <button type="button" data-demo-copy-code>Copy active code</button>
+                <button type="button" data-demo-mode-apply>Apply active mode</button>
               </div>
 
               <p class="demo-completion" data-demo-completion>0 of 2 accepted · idle</p>
@@ -170,6 +183,127 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
             </label>
           </div>
           <p class="demo-status" role="status" aria-live="polite">Local proof ready.</p>
+        </section>
+      </section>
+
+      <section class="demo-proof-sections" aria-labelledby="proof-lab-title"
+        data-demo-proof-sections>
+        <header class="demo-lab-heading">
+          <p>Evidence ledger · 002</p>
+          <h2 id="proof-lab-title">Stress the page.<br>Keep the redline.</h2>
+          <p>
+            These are live public controllers, not staged drawings. Change the measure, replace
+            the mark, or run the same idea through three authored formats.
+          </p>
+        </header>
+
+        <section class="demo-proof-band" aria-labelledby="reflow-title">
+          <header class="demo-proof-band__label">
+            <p>Reflow challenge</p>
+            <h3 id="reflow-title">A note that survives the ruler</h3>
+          </header>
+          <div class="demo-proof-band__work">
+            <label class="demo-width-control">
+              <span>Proof width</span>
+              <span data-demo-reflow-value>760px</span>
+              <input id="demo-proof-width" type="range" min="320" max="760" value="760"
+                aria-label="Proof width" data-demo-reflow-control>
+              <span class="demo-width-control__limits" aria-hidden="true">
+                <span>320</span><span>760 px</span>
+              </span>
+            </label>
+            <div class="demo-reflow-stage">
+              <article class="demo-reflow-specimen" data-demo-reflow-specimen>
+                <p class="demo-reflow-specimen__register">760 / responsive copy measure</p>
+                <p id="reflow-copy">
+                  Narrow this proof until the sentence folds. Through every line break,
+                  this note stays attached to the phrase it corrects.
+                </p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="demo-proof-band" aria-labelledby="mark-ledger-title"
+          data-demo-mark-ledger>
+          <header class="demo-proof-band__label">
+            <p>Specimen ledger</p>
+            <h3 id="mark-ledger-title">Six marks, one measured target</h3>
+          </header>
+          <div class="demo-proof-band__work demo-mark-work">
+            <div class="demo-mark-controls" aria-label="Select annotation mark">
+              <button type="button" aria-pressed="true" data-demo-mark="underline">underline</button>
+              <button type="button" aria-pressed="false" data-demo-mark="highlight">highlight</button>
+              <button type="button" aria-pressed="false" data-demo-mark="circle">circle</button>
+              <button type="button" aria-pressed="false" data-demo-mark="box">box</button>
+              <button type="button" aria-pressed="false" data-demo-mark="strike">strike</button>
+              <button type="button" aria-pressed="false" data-demo-mark="bracket">bracket</button>
+            </div>
+            <div class="demo-mark-specimen">
+              <p><span data-demo-ledger-target>Every mark comes from one measured target.</span></p>
+              <div class="demo-mark-state-line">
+                <p data-demo-mark-state>Selected · underline</p>
+                <button class="demo-stamp demo-stamp--secondary" type="button"
+                  data-demo-mark-replay>Replay selected mark</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="mode-proof" class="demo-proof-band" aria-labelledby="mode-proof-title"
+          data-demo-mode-proof>
+          <header class="demo-proof-band__label">
+            <p>API modes</p>
+            <h3 id="mode-proof-title">The active source becomes the result</h3>
+          </header>
+          <div class="demo-proof-band__work demo-mode-work">
+            <p id="api-mode-target" data-demo-mode-target>
+              One target can be declared, sequenced, or parsed without changing the renderer.
+            </p>
+            <p class="demo-mode-state" data-demo-mode-state>
+              Choose HTML, Story, or JSON above, then apply that runnable definition.
+            </p>
+          </div>
+        </section>
+
+        <section class="demo-reliability" aria-labelledby="reliability-title">
+          <header class="demo-proof-band__label">
+            <p>Reliability docket</p>
+            <h3 id="reliability-title">What this local build can prove</h3>
+          </header>
+          <div class="demo-reliability__body" role="region" aria-label="Reliability docket">
+            <p class="demo-size-state" data-demo-size-state>Measuring this local build…</p>
+            <dl class="demo-size-ledger" aria-label="Measured distribution size">
+              <div><dt>ESM + CSS</dt><dd data-testid="size-esm">Measuring…</dd></div>
+              <div><dt>IIFE + CSS</dt><dd data-testid="size-iife">Measuring…</dd></div>
+              <div><dt>CSS</dt><dd data-testid="size-css">Measuring…</dd></div>
+            </dl>
+            <dl class="demo-fact-ledger">
+              <div><dt>Dependency line</dt><dd>Zero production dependencies</dd></div>
+              <div><dt>Distribution</dt><dd>ES2020 ESM + IIFE</dd></div>
+              <div><dt>Theme</dt><dd>CSS-variable theming</dd></div>
+              <div><dt>Triggers</dt><dd>manual · load · viewport</dd></div>
+              <div><dt>Tested engines</dt><dd>Playwright: Chromium · Firefox · WebKit</dd></div>
+            </dl>
+            <div class="demo-reliability__notes">
+              <section aria-labelledby="fallback-title">
+                <h4 id="fallback-title">Graceful fallbacks</h4>
+                <p>
+                  Without ResizeObserver, use window resize plus explicit refresh(). Without
+                  IntersectionObserver, viewport triggers degrade to load. Without the Web
+                  Animations API, CSS animation and elapsed-time accounting remain. The CSS
+                  Highlight API is not required because Range geometry renders through SVG.
+                </p>
+              </section>
+              <section aria-labelledby="v1-docket-title">
+                <h4 id="v1-docket-title">Explicit V1 limitations</h4>
+                <p>
+                  No cross-document or cross-shadow-root ranges, editable-document authoring,
+                  persistence, collaboration, image annotation, or arbitrary drag positioning.
+                </p>
+              </section>
+            </div>
+          </div>
         </section>
       </section>
 
