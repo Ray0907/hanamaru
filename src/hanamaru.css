@@ -1,13 +1,20 @@
 .hana-overlay {
   --hana-color: #c92f2a;
+  --hana-mark-color: var(--hana-color);
   --hana-highlight-color: rgb(244 207 63 / 48%);
   --hana-note-background: #fffef9;
   --hana-note-color: #1f2733;
+  --hana-stroke-width: 2.5px;
+  --hana-padding: 0.55rem 0.7rem;
+  --hana-note-gap: 16px;
+  --hana-font: 600 0.875rem/1.35 system-ui, sans-serif;
+  --hana-duration: 650ms;
+  --hana-z-index: 2147483000;
   position: fixed;
   inset: 0;
   overflow: visible;
   pointer-events: none;
-  z-index: var(--hana-z-index, 2147483000);
+  z-index: var(--hana-z-index);
 }
 
 .hana-svg-layer,
@@ -25,8 +32,20 @@
   stroke: var(--hana-color);
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: var(--hana-stroke-width, 2.5px);
+  stroke-width: var(--hana-stroke-width);
   vector-effect: non-scaling-stroke;
+}
+
+.hana-mark-path {
+  stroke: var(--hana-mark-color);
+}
+
+.hana-connector-path {
+  stroke: var(--hana-color);
+}
+
+.hana-annotation[hidden] {
+  display: none;
 }
 
 .hana-annotation[data-hana-mark="highlight"] .hana-mark-path {
@@ -41,12 +60,12 @@
   max-height: calc(100vh - 24px);
   overflow: auto;
   overflow-wrap: anywhere;
-  padding: 0.55rem 0.7rem;
+  padding: var(--hana-padding);
   border: 1.5px solid var(--hana-color);
   border-radius: 0.2rem;
   background: var(--hana-note-background);
   color: var(--hana-note-color);
-  font: 600 0.875rem/1.35 system-ui, sans-serif;
+  font: var(--hana-font);
   box-shadow: 2px 3px 0 rgb(31 39 51 / 12%);
   pointer-events: none;
 }

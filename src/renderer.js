@@ -58,7 +58,7 @@ export function createRenderer({ id, record, options, lease }) {
   group.setAttribute('class', 'hana-annotation');
   group.setAttribute('data-hana-id', id);
   group.setAttribute('data-hana-mark', options.mark);
-  group.hidden = true;
+  group.setAttribute('hidden', '');
   shared.svgLayer.append(group);
 
   const noteElement = options.note === null ? null : doc.createElement('div');
@@ -80,18 +80,8 @@ export function createRenderer({ id, record, options, lease }) {
   let activeAnimations = [];
   let fallbackClock = null;
   let overflowSequence = 0;
-  const scheduledFrames = new Set();
   if (noteElement !== null && options.accessible) {
     writeDescription(owner, noteId, true);
-  }
-
-  function scheduleFrame(callback) {
-    let handle;
-    handle = win.requestAnimationFrame(() => {
-      scheduledFrames.delete(handle);
-      callback();
-    });
-    scheduledFrames.add(handle);
   }
 
   function scheduleOverflowCheck() {
@@ -99,21 +89,26 @@ export function createRenderer({ id, record, options, lease }) {
       return;
     }
     const sequence = ++overflowSequence;
-    scheduleFrame(() => {
-      if (destroyed || sequence !== overflowSequence) {
-        return;
-      }
-      const overflowing = noteElement.scrollHeight > noteElement.clientHeight;
-      scheduleFrame(() => {
-        if (destroyed || sequence !== overflowSequence) {
+    const generation = shared.generationFor(id);
+    shared.enqueue({
+      id,
+      generation,
+      read() {
+        return {
+          overflowing: noteElement.scrollHeight > noteElement.clientHeight,
+          sequence,
+        };
+      },
+      write(result) {
+        if (destroyed || result.sequence !== overflowSequence) {
           return;
         }
-        if (overflowing) {
+        if (result.overflowing) {
           noteElement.setAttribute('tabindex', '0');
         } else {
           noteElement.removeAttribute('tabindex');
         }
-      });
+      },
     });
   }
 
@@ -156,7 +151,7 @@ export function createRenderer({ id, record, options, lease }) {
       ));
     }
     group.replaceChildren(fragment);
-    group.hidden = false;
+    group.removeAttribute('hidden');
     group.classList.add('hana-is-visible');
 
     if (noteElement !== null) {
@@ -235,7 +230,7 @@ export function createRenderer({ id, record, options, lease }) {
       return { animations: [], finished: Promise.resolve() };
     }
     cancelMotion();
-    group.hidden = false;
+    group.removeAttribute('hidden');
     if (noteElement !== null) {
       noteElement.hidden = false;
       noteElement.classList.remove('hana-is-hidden');
@@ -364,7 +359,7 @@ export function createRenderer({ id, record, options, lease }) {
     }
     cancelMotion();
     overflowSequence += 1;
-    group.hidden = true;
+    group.setAttribute('hidden', '');
     group.classList.remove('hana-is-visible');
     if (noteElement !== null) {
       noteElement.classList.add('hana-is-hidden');
@@ -380,10 +375,6 @@ export function createRenderer({ id, record, options, lease }) {
     destroyed = true;
     cancelMotion();
     overflowSequence += 1;
-    for (const handle of scheduledFrames) {
-      win.cancelAnimationFrame(handle);
-    }
-    scheduledFrames.clear();
     if (noteElement !== null && options.accessible) {
       writeDescription(owner, noteId, false);
     }

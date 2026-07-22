@@ -181,6 +181,7 @@ test('shared ownership keeps one document root and observer set until the final 
     ownInterface: ['noteLayer', 'overlay', 'svgLayer'],
     methodInterface: [
       'bumpGeneration',
+      'enqueue',
       'generationFor',
       'observeIntersection',
       'observeLayout',
@@ -219,6 +220,69 @@ test('shared ownership keeps one document root and observer set until the final 
     resizeObservers: 2,
     mutationObservers: 2,
     windowResizeAdds: 2,
+  });
+});
+
+test('public queue keeps shared read/write ordering and rejects stale controller tokens', async ({ page }) => {
+  await installInstrumentation(page);
+
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const lease = acquireDocumentResources(document);
+    const { shared } = lease;
+    const state = window.__resources;
+    const events = [];
+    for (const id of ['alpha', 'beta', 'aba']) shared.registerController(id);
+
+    for (const id of ['alpha', 'beta']) {
+      shared.enqueue({
+        id,
+        generation: 0,
+        read() { events.push(`read:${id}`); return id; },
+        write(value) { events.push(`write:${value}`); },
+      });
+    }
+    const immediate = [...events];
+    state.runFrame();
+    const ordered = [...events];
+
+    shared.enqueue({
+      id: 'alpha', generation: 0,
+      read() { events.push('stale-read'); },
+      write() { events.push('stale-write'); },
+    });
+    shared.bumpGeneration('alpha');
+    state.runFrame();
+
+    shared.enqueue({
+      id: 'aba', generation: 0,
+      read() {
+        events.push('aba-read');
+        shared.releaseController('aba');
+        shared.registerController('aba');
+        return 'old';
+      },
+      write() { events.push('aba-write'); },
+    });
+    state.runFrame();
+
+    let staleError;
+    try {
+      shared.enqueue({ id: 'alpha', generation: 0, read() {}, write() {} });
+    } catch (error) {
+      staleError = error.message;
+    }
+    const finalEvents = [...events];
+    for (const id of ['alpha', 'beta', 'aba']) shared.releaseController(id);
+    lease.release();
+    return { immediate, ordered, finalEvents, staleError };
+  });
+
+  expect(result).toEqual({
+    immediate: [],
+    ordered: ['read:alpha', 'read:beta', 'write:alpha', 'write:beta'],
+    finalEvents: ['read:alpha', 'read:beta', 'write:alpha', 'write:beta', 'aba-read'],
+    staleError: 'stale controller generation: alpha',
   });
 });
 

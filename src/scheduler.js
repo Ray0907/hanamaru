@@ -320,6 +320,36 @@ class SharedDocumentResources {
     return this.#requireController(id).generation;
   }
 
+  enqueue(options) {
+    this.#requireAlive();
+    if (options === null || typeof options !== 'object') {
+      throw new TypeError('queued controller work must be an object');
+    }
+    const {
+      id,
+      generation,
+      read,
+      write,
+      onError,
+    } = options;
+    const controller = this.#requireController(id);
+    if (generation !== controller.generation) {
+      throw new Error(`stale controller generation: ${id}`);
+    }
+    requireFunction('read', read);
+    requireFunction('write', write);
+    if (onError !== undefined) {
+      requireFunction('onError', onError);
+    }
+    this.#frameQueue.enqueue({
+      key: id,
+      generation: controller.token,
+      read,
+      write,
+      onError,
+    });
+  }
+
   observeLayout(options) {
     this.#requireAlive();
     if (options === null || typeof options !== 'object') {

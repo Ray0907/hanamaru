@@ -9,6 +9,7 @@ test('renderer structure owns namespaced nodes and consumes fixed layout bytes',
     const { acquireDocumentResources } = await import('/src/scheduler.js');
     const { createRenderer } = await import('/src/renderer.js');
     const lease = acquireDocumentResources(document);
+    lease.shared.registerController('proof-1');
     const owner = document.querySelector('#target');
     const record = { kind: 'element', element: owner, ownerElement: owner };
     const renderer = createRenderer({
@@ -48,6 +49,7 @@ test('renderer structure owns namespaced nodes and consumes fixed layout bytes',
       peerCount: measurement.peerNoteRects.length,
     };
     renderer.destroy();
+    lease.shared.releaseController('proof-1');
     lease.release();
     return output;
   });
@@ -78,6 +80,7 @@ test('renderer structure keeps an undrawn note measurable without revealing it',
     const { acquireDocumentResources } = await import('/src/scheduler.js');
     const { createRenderer } = await import('/src/renderer.js');
     const lease = acquireDocumentResources(document);
+    lease.shared.registerController('measurable');
     const owner = document.querySelector('#target');
     const renderer = createRenderer({
       id: 'measurable', record: { kind: 'element', element: owner, ownerElement: owner },
@@ -92,6 +95,7 @@ test('renderer structure keeps an undrawn note measurable without revealing it',
       readOnly: renderer.noteElement.className === beforeClass,
     };
     renderer.destroy();
+    lease.shared.releaseController('measurable');
     lease.release();
     return output;
   });
@@ -101,11 +105,47 @@ test('renderer structure keeps an undrawn note measurable without revealing it',
   });
 });
 
+test('renderer structure uses a real SVG hidden state and draw restores visibility', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    lease.shared.registerController('svg-hidden');
+    const owner = document.querySelector('#target');
+    const renderer = createRenderer({
+      id: 'svg-hidden', record: { kind: 'element', element: owner, ownerElement: owner },
+      options: { mark: 'underline', note: null, accessible: false }, lease,
+    });
+    const layout = {
+      targetRects: [], unionRect: null, markPaths: ['M 10 10 L 40 10'], side: 'right',
+      noteRect: null, connector: { shaft: '', head: '' },
+      viewport: { width: innerWidth, height: innerHeight },
+    };
+    const initial = [renderer.group.hasAttribute('hidden'), getComputedStyle(renderer.group).display];
+    renderer.draw(layout);
+    const drawn = [renderer.group.hasAttribute('hidden'), getComputedStyle(renderer.group).display];
+    renderer.hide();
+    const hidden = [renderer.group.hasAttribute('hidden'), getComputedStyle(renderer.group).display];
+    renderer.draw(layout);
+    const redrawn = [renderer.group.hasAttribute('hidden'), getComputedStyle(renderer.group).display];
+    renderer.destroy();
+    lease.shared.releaseController('svg-hidden');
+    lease.release();
+    return { initial, drawn, hidden, redrawn };
+  });
+
+  expect(result).toEqual({
+    initial: [true, 'none'], drawn: [false, 'inline'],
+    hidden: [true, 'none'], redrawn: [false, 'inline'],
+  });
+});
+
 test('renderer structure transfers and tears down accessible owner tokens safely', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireDocumentResources } = await import('/src/scheduler.js');
     const { createRenderer } = await import('/src/renderer.js');
     const lease = acquireDocumentResources(document);
+    lease.shared.registerController('proof-transfer');
     const first = document.querySelector('#target');
     const second = document.querySelector('#next-owner');
     const renderer = createRenderer({
@@ -125,6 +165,7 @@ test('renderer structure transfers and tears down accessible owner tokens safely
       afterDestroy: [first.getAttribute('aria-describedby'), second.getAttribute('aria-describedby')],
       ownedNodes: document.querySelectorAll('[data-hana-id="proof-transfer"]').length,
     };
+    lease.shared.releaseController('proof-transfer');
     lease.release();
     return result;
   });
@@ -146,6 +187,7 @@ test('renderer structure preserves the generated path counts for all six marks',
     const targetRects = [rect(20, 20, 30, 10), rect(20, 35, 45, 10)];
     const result = {};
     for (const mark of ['underline', 'highlight', 'strike', 'circle', 'box', 'bracket']) {
+      lease.shared.registerController(`mark-${mark}`);
       const renderer = createRenderer({
         id: `mark-${mark}`, record: { kind: 'element', element: owner, ownerElement: owner },
         options: { mark, note: null, accessible: false }, lease,
@@ -157,6 +199,7 @@ test('renderer structure preserves the generated path counts for all six marks',
       });
       result[mark] = renderer.group.querySelectorAll('.hana-mark-path').length;
       renderer.destroy();
+      lease.shared.releaseController(`mark-${mark}`);
     }
     lease.release();
     return result;
@@ -172,6 +215,8 @@ test('renderer structure keeps decorative notes hidden and schedules overflow fo
     const { acquireDocumentResources } = await import('/src/scheduler.js');
     const { createRenderer } = await import('/src/renderer.js');
     const lease = acquireDocumentResources(document);
+    lease.shared.registerController('decorative');
+    lease.shared.registerController('overflow');
     const owner = document.querySelector('#target');
     const layout = {
       targetRects: [], unionRect: null, markPaths: [], side: 'top',
@@ -205,6 +250,8 @@ test('renderer structure keeps decorative notes hidden and schedules overflow fo
     };
     decorative.destroy();
     accessible.destroy();
+    lease.shared.releaseController('decorative');
+    lease.shared.releaseController('overflow');
     lease.release();
     return result;
   });
@@ -215,11 +262,70 @@ test('renderer structure keeps decorative notes hidden and schedules overflow fo
   });
 });
 
+test('renderer structure suppresses stale overflow writes after generation, ABA, and destroy', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    const { shared } = lease;
+    shared.registerController('overflow-stale');
+    const owner = document.querySelector('#target');
+    const renderer = createRenderer({
+      id: 'overflow-stale', record: { kind: 'element', element: owner, ownerElement: owner },
+      options: { mark: 'box', note: 'Overflowing note', accessible: true }, lease,
+    });
+    const note = renderer.noteElement;
+    Object.defineProperties(note, {
+      scrollHeight: { configurable: true, get: () => 80 },
+      clientHeight: { configurable: true, get: () => 30 },
+    });
+    const layout = {
+      targetRects: [], unionRect: null, markPaths: [], side: 'right',
+      noteRect: { x: 20, y: 20, width: 100, height: 30 },
+      connector: { shaft: '', head: '' }, viewport: { width: innerWidth, height: innerHeight },
+    };
+    const frames = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    renderer.draw(layout);
+    const immediate = note.getAttribute('tabindex');
+    shared.bumpGeneration('overflow-stale');
+    await frames();
+    const afterGeneration = note.getAttribute('tabindex');
+
+    note.removeAttribute('tabindex');
+    renderer.draw(layout);
+    shared.releaseController('overflow-stale');
+    shared.registerController('overflow-stale');
+    await frames();
+    const afterAba = note.getAttribute('tabindex');
+
+    note.removeAttribute('tabindex');
+    renderer.draw(layout);
+    shared.registerController('overflow-destroyer');
+    shared.enqueue({
+      id: 'overflow-destroyer', generation: 0,
+      read() { renderer.destroy(); },
+      write() {},
+    });
+    await frames();
+    const afterDestroy = note.getAttribute('tabindex');
+    shared.releaseController('overflow-stale');
+    shared.releaseController('overflow-destroyer');
+    lease.release();
+    return { immediate, afterGeneration, afterAba, afterDestroy };
+  });
+
+  expect(result).toEqual({
+    immediate: null, afterGeneration: null, afterAba: null, afterDestroy: null,
+  });
+});
+
 test('motion allocates WAAPI phases and controls every active handle', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireDocumentResources } = await import('/src/scheduler.js');
     const { createRenderer } = await import('/src/renderer.js');
     const lease = acquireDocumentResources(document);
+    lease.shared.registerController('motion-waapi');
     const owner = document.querySelector('#target');
     const calls = [];
     const originalAnimate = Element.prototype.animate;
@@ -265,10 +371,11 @@ test('motion allocates WAAPI phases and controls every active handle', async ({ 
     };
     const retained = [renderer.group.isConnected, renderer.noteElement.isConnected];
     renderer.hide();
-    output.hidden = [renderer.group.hidden, renderer.noteElement.classList.contains('hana-is-hidden')];
+    output.hidden = [renderer.group.hasAttribute('hidden'), renderer.noteElement.classList.contains('hana-is-hidden')];
     output.cancelled = calls.map((call) => call.cancelled);
     output.retained = retained;
     renderer.destroy();
+    lease.shared.releaseController('motion-waapi');
     lease.release();
     Element.prototype.animate = originalAnimate;
     return output;
@@ -293,6 +400,7 @@ test('motion fallback preserves elapsed time across pause and supports finish an
     const { acquireDocumentResources } = await import('/src/scheduler.js');
     const { createRenderer } = await import('/src/renderer.js');
     const lease = acquireDocumentResources(document);
+    lease.shared.registerController('motion-fallback');
     const owner = document.querySelector('#target');
     const originalAnimate = Element.prototype.animate;
     Element.prototype.animate = undefined;
@@ -342,6 +450,7 @@ test('motion fallback preserves elapsed time across pause and supports finish an
       zeroResolved,
     };
     renderer.destroy();
+    lease.shared.releaseController('motion-fallback');
     lease.release();
     Element.prototype.animate = originalAnimate;
     return output;
