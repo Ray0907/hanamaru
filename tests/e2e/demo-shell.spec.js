@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 
 const directionContract = `<!--
@@ -13,6 +14,23 @@ const localStarter = `<link rel="stylesheet" href="./dist/hanamaru.css">
   import { scan } from './dist/hanamaru.esm.js'
   scan()
 </script>`;
+
+function channelToLinear(channel) {
+  const normalized = channel / 255;
+  return normalized <= 0.04045
+    ? normalized / 12.92
+    : ((normalized + 0.055) / 1.055) ** 2.4;
+}
+
+function luminance(cssColor) {
+  const channels = cssColor.match(/[\d.]+/g).slice(0, 3).map(Number).map(channelToLinear);
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(foreground, background) {
+  const [bright, dark] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+  return (bright + 0.05) / (dark + 0.05);
+}
 
 test('serves one contracted demo document at the root and demo routes', async ({ request }) => {
   for (const route of ['/', '/demo/', '/demo/index.html']) {
@@ -113,3 +131,45 @@ test('keeps the narrow page contained while code remains locally scrollable', as
   expect(containment.pageWidth).toBeLessThanOrEqual(containment.viewportWidth);
   expect(containment.codeOverflow).toBe('auto');
 });
+
+test('keeps the primary correction stamp inside the 1440 by 900 first viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+
+  const primary = page.getByRole('link', { name: 'Open Live Playground' });
+  await expect(primary).toBeVisible();
+  const box = await primary.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y + box.height).toBeLessThanOrEqual(900);
+});
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'mobile', width: 390, height: 844 },
+]) {
+  test(`renders readable correction stamps with no action contrast violations on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto('/');
+
+    const primary = page.getByRole('link', { name: 'Open Live Playground' });
+    const styles = await primary.evaluate((node) => {
+      const computed = getComputedStyle(node);
+      return {
+        background: computed.backgroundColor,
+        color: computed.color,
+        fontWeight: Number(computed.fontWeight),
+      };
+    });
+    expect(styles.background).toBe('rgb(201, 47, 42)');
+    expect(styles.color).toBe('rgb(255, 254, 249)');
+    expect(styles.fontWeight).toBeGreaterThanOrEqual(800);
+    expect(contrastRatio(styles.color, styles.background)).toBeGreaterThanOrEqual(4.5);
+
+    const results = await new AxeBuilder({ page })
+      .include('.demo-actions')
+      .withRules(['color-contrast'])
+      .analyze();
+    expect(results.violations).toEqual([]);
+  });
+}
