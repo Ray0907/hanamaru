@@ -49,8 +49,39 @@ function createPath(doc, classes, value) {
   return path;
 }
 
+function cssTime(value, fallback) {
+  const input = value.trim();
+  const amount = Number.parseFloat(input);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return fallback;
+  }
+  if (input.endsWith('ms')) {
+    return amount;
+  }
+  if (input.endsWith('s')) {
+    return amount * 1000;
+  }
+  return fallback;
+}
+
+function cssPixels(value, fallback) {
+  const input = value.trim();
+  const amount = Number.parseFloat(input);
+  return Number.isFinite(amount) && amount >= 0 && input.endsWith('px') ? amount : fallback;
+}
+
+export function readThemeMetrics(element) {
+  // Controllers consume noteGap during their scheduler read before calling pure placement geometry.
+  const style = element.ownerDocument.defaultView.getComputedStyle(element);
+  return {
+    duration: cssTime(style.getPropertyValue('--hana-duration'), 650),
+    noteGap: cssPixels(style.getPropertyValue('--hana-note-gap'), 16),
+  };
+}
+
 export function createRenderer({ id, record, options, lease }) {
   const { shared } = lease;
+  shared.generationFor(id);
   const doc = shared.overlay.ownerDocument;
   const win = doc.defaultView;
   const noteId = `hana-note-${id}`;
@@ -76,12 +107,26 @@ export function createRenderer({ id, record, options, lease }) {
   }
 
   let owner = record.ownerElement ?? null;
+  let descriptionAssociated = false;
   let destroyed = false;
   let activeAnimations = [];
-  let fallbackClock = null;
+  let motionRun = null;
   let overflowSequence = 0;
-  if (noteElement !== null && options.accessible) {
+
+  function associateDescription() {
+    if (descriptionAssociated || noteElement === null || !options.accessible) {
+      return;
+    }
     writeDescription(owner, noteId, true);
+    descriptionAssociated = true;
+  }
+
+  function removeDescription() {
+    if (!descriptionAssociated) {
+      return;
+    }
+    writeDescription(owner, noteId, false);
+    descriptionAssociated = false;
   }
 
   function scheduleOverflowCheck() {
@@ -161,6 +206,7 @@ export function createRenderer({ id, record, options, lease }) {
       noteElement.hidden = false;
       noteElement.classList.remove('hana-is-hidden');
       noteElement.classList.add('hana-is-visible');
+      associateDescription();
       scheduleOverflowCheck();
     }
   }
@@ -169,7 +215,7 @@ export function createRenderer({ id, record, options, lease }) {
     if (destroyed || nextOwner === owner) {
       return;
     }
-    if (noteElement !== null && options.accessible) {
+    if (descriptionAssociated) {
       writeDescription(owner, noteId, false);
       writeDescription(nextOwner, noteId, true);
     }
@@ -186,6 +232,11 @@ export function createRenderer({ id, record, options, lease }) {
       path.style.strokeDasharray = '1';
       path.style.strokeDashoffset = '0';
     }
+    if (options.mark === 'highlight') {
+      for (const path of group.querySelectorAll('.hana-mark-path')) {
+        path.style.clipPath = 'inset(0px 0% 0px 0px)';
+      }
+    }
     if (noteElement !== null) {
       noteElement.style.opacity = '1';
       noteElement.style.transform = 'translateY(0px)';
@@ -194,25 +245,66 @@ export function createRenderer({ id, record, options, lease }) {
     setMotionClass('hana-is-paused', false);
   }
 
-  function settleFallback(clock) {
-    if (clock.settled) {
+  function settleMotion(run) {
+    if (run.settled) {
       return;
     }
-    clock.settled = true;
-    if (clock.timeout !== null) {
-      win.clearTimeout(clock.timeout);
+    run.settled = true;
+    if (run.timeout !== null) {
+      win.clearTimeout(run.timeout);
     }
+    activeAnimations = [];
     applyFinalStyles();
-    if (fallbackClock === clock) {
-      fallbackClock = null;
+    if (motionRun === run) {
+      motionRun = null;
     }
-    clock.resolve();
+    run.resolve();
   }
 
-  function scheduleFallback(clock) {
-    const remaining = Math.max(0, clock.duration - clock.elapsed);
-    clock.startedAt = win.performance.now();
-    clock.timeout = win.setTimeout(() => settleFallback(clock), remaining);
+  function rejectMotion(run) {
+    if (run === null || run.settled) {
+      return;
+    }
+    run.settled = true;
+    if (run.timeout !== null) {
+      win.clearTimeout(run.timeout);
+    }
+    if (motionRun === run) {
+      motionRun = null;
+    }
+    setMotionClass('hana-is-animating', false);
+    setMotionClass('hana-is-paused', false);
+    run.reject(new win.DOMException('Animation cancelled', 'AbortError'));
+  }
+
+  function scheduleMotion(run) {
+    const remaining = Math.max(0, run.duration - run.elapsed);
+    run.startedAt = win.performance.now();
+    run.timeout = win.setTimeout(() => settleMotion(run), remaining);
+  }
+
+  function createMotionRun(duration) {
+    let resolve;
+    let reject;
+    const finished = new Promise((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    finished.catch(() => {});
+    const run = {
+      duration,
+      elapsed: 0,
+      finished,
+      paused: false,
+      reject,
+      resolve,
+      settled: false,
+      startedAt: win.performance.now(),
+      timeout: null,
+    };
+    motionRun = run;
+    scheduleMotion(run);
+    return run;
   }
 
   function cancelMotion() {
@@ -220,9 +312,7 @@ export function createRenderer({ id, record, options, lease }) {
       animation.cancel();
     }
     activeAnimations = [];
-    if (fallbackClock !== null) {
-      settleFallback(fallbackClock);
-    }
+    rejectMotion(motionRun);
   }
 
   function animate(duration) {
@@ -234,26 +324,54 @@ export function createRenderer({ id, record, options, lease }) {
     if (noteElement !== null) {
       noteElement.hidden = false;
       noteElement.classList.remove('hana-is-hidden');
+      associateDescription();
     }
 
-    const markDuration = duration * 0.55;
-    const connectorDuration = duration * 0.25;
-    const connectorDelay = duration * 0.55;
-    const noteDuration = duration * 0.2;
-    const noteDelay = duration * 0.8;
-    if (duration === 0) {
+    const resolvedDuration = duration ?? readThemeMetrics(group).duration;
+    const markDuration = resolvedDuration * 0.55;
+    const connectorDuration = resolvedDuration * 0.25;
+    const connectorDelay = resolvedDuration * 0.55;
+    const noteDuration = resolvedDuration * 0.2;
+    const noteDelay = resolvedDuration * 0.8;
+    group.style.setProperty('--hana-duration', `${resolvedDuration}ms`);
+    group.style.setProperty('--hana-mark-duration', `${markDuration}ms`);
+    group.style.setProperty('--hana-mark-delay', '0ms');
+    group.style.setProperty('--hana-connector-duration', `${connectorDuration}ms`);
+    group.style.setProperty('--hana-connector-delay', `${connectorDelay}ms`);
+    if (noteElement !== null) {
+      noteElement.style.setProperty('--hana-duration', `${resolvedDuration}ms`);
+      noteElement.style.setProperty('--hana-note-duration', `${noteDuration}ms`);
+      noteElement.style.setProperty('--hana-note-delay', `${noteDelay}ms`);
+    }
+    if (resolvedDuration === 0) {
       applyFinalStyles();
       return { animations: [], finished: Promise.resolve() };
     }
 
     const markPaths = [...group.querySelectorAll('.hana-mark-path')];
     const connectorPaths = [...group.querySelectorAll('.hana-connector-path')];
+    const run = createMotionRun(resolvedDuration);
     if (typeof group.animate === 'function') {
       const animations = [];
-      const animatePath = (path, phaseDuration, delay) => {
+      const track = (animation) => {
+        animation.finished.catch(() => {});
+        animations.push(animation);
+      };
+      const animatePath = (path, phaseDuration, delay, highlight = false) => {
+        if (highlight) {
+          path.style.clipPath = 'inset(0px 100% 0px 0px)';
+          track(path.animate(
+            [
+              { clipPath: 'inset(0px 100% 0px 0px)' },
+              { clipPath: 'inset(0px 0% 0px 0px)' },
+            ],
+            { duration: phaseDuration, delay, fill: 'both', easing: 'ease-out' },
+          ));
+          return;
+        }
         path.style.strokeDasharray = '1';
         path.style.strokeDashoffset = '1';
-        animations.push(path.animate(
+        track(path.animate(
           [
             { strokeDasharray: '1', strokeDashoffset: '1' },
             { strokeDasharray: '1', strokeDashoffset: '0' },
@@ -262,13 +380,13 @@ export function createRenderer({ id, record, options, lease }) {
         ));
       };
       for (const path of markPaths) {
-        animatePath(path, markDuration, 0);
+        animatePath(path, markDuration, 0, options.mark === 'highlight');
       }
       for (const path of connectorPaths) {
         animatePath(path, connectorDuration, connectorDelay);
       }
       if (noteElement !== null) {
-        animations.push(noteElement.animate(
+        track(noteElement.animate(
           [
             { opacity: 0, transform: 'translateY(6px)' },
             { opacity: 1, transform: 'translateY(0px)' },
@@ -277,55 +395,28 @@ export function createRenderer({ id, record, options, lease }) {
         ));
       }
       activeAnimations = animations;
-      const finished = Promise.all(animations.map((animation) => animation.finished))
-        .then(() => applyFinalStyles());
-      return { animations, finished };
+      return { animations, finished: run.finished };
     }
 
-    group.style.setProperty('--hana-duration', `${duration}ms`);
-    group.style.setProperty('--hana-mark-duration', `${markDuration}ms`);
-    group.style.setProperty('--hana-mark-delay', '0ms');
-    group.style.setProperty('--hana-connector-duration', `${connectorDuration}ms`);
-    group.style.setProperty('--hana-connector-delay', `${connectorDelay}ms`);
-    if (noteElement !== null) {
-      noteElement.style.setProperty('--hana-duration', `${duration}ms`);
-      noteElement.style.setProperty('--hana-note-duration', `${noteDuration}ms`);
-      noteElement.style.setProperty('--hana-note-delay', `${noteDelay}ms`);
-    }
     setMotionClass('hana-is-animating', true);
-    let resolveFinished;
-    const finished = new Promise((resolve) => {
-      resolveFinished = resolve;
-    });
-    const clock = {
-      duration,
-      elapsed: 0,
-      paused: false,
-      resolve: resolveFinished,
-      settled: false,
-      startedAt: win.performance.now(),
-      timeout: null,
-    };
-    fallbackClock = clock;
-    scheduleFallback(clock);
-    return { animations: [], finished };
+    return { animations: [], finished: run.finished };
   }
 
   function pause() {
     for (const animation of activeAnimations) {
       animation.pause();
     }
-    const clock = fallbackClock;
-    if (clock === null || clock.paused || clock.settled) {
+    const run = motionRun;
+    if (run === null || run.paused || run.settled) {
       return;
     }
-    clock.elapsed = Math.min(
-      clock.duration,
-      clock.elapsed + (win.performance.now() - clock.startedAt),
+    run.elapsed = Math.min(
+      run.duration,
+      run.elapsed + (win.performance.now() - run.startedAt),
     );
-    win.clearTimeout(clock.timeout);
-    clock.timeout = null;
-    clock.paused = true;
+    win.clearTimeout(run.timeout);
+    run.timeout = null;
+    run.paused = true;
     setMotionClass('hana-is-paused', true);
   }
 
@@ -333,21 +424,21 @@ export function createRenderer({ id, record, options, lease }) {
     for (const animation of activeAnimations) {
       animation.play();
     }
-    const clock = fallbackClock;
-    if (clock === null || !clock.paused || clock.settled) {
+    const run = motionRun;
+    if (run === null || !run.paused || run.settled) {
       return;
     }
-    clock.paused = false;
+    run.paused = false;
     setMotionClass('hana-is-paused', false);
-    scheduleFallback(clock);
+    scheduleMotion(run);
   }
 
   function finish() {
     for (const animation of activeAnimations) {
       animation.finish();
     }
-    if (fallbackClock !== null) {
-      settleFallback(fallbackClock);
+    if (motionRun !== null) {
+      settleMotion(motionRun);
     } else {
       applyFinalStyles();
     }
@@ -358,6 +449,7 @@ export function createRenderer({ id, record, options, lease }) {
       return;
     }
     cancelMotion();
+    removeDescription();
     overflowSequence += 1;
     group.setAttribute('hidden', '');
     group.classList.remove('hana-is-visible');
@@ -374,10 +466,8 @@ export function createRenderer({ id, record, options, lease }) {
     }
     destroyed = true;
     cancelMotion();
+    removeDescription();
     overflowSequence += 1;
-    if (noteElement !== null && options.accessible) {
-      writeDescription(owner, noteId, false);
-    }
     group.remove();
     noteElement?.remove();
   }

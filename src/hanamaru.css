@@ -82,6 +82,10 @@
   animation: hana-mark-draw var(--hana-mark-duration) ease-out var(--hana-mark-delay) both;
 }
 
+.hana-annotation[data-hana-mark="highlight"].hana-is-animating .hana-mark-path {
+  animation: hana-highlight-reveal var(--hana-mark-duration) ease-out var(--hana-mark-delay) both;
+}
+
 .hana-is-animating .hana-connector-path {
   animation: hana-connector-draw var(--hana-connector-duration) ease-out var(--hana-connector-delay) both;
 }
@@ -98,6 +102,11 @@
 @keyframes hana-mark-draw {
   from { stroke-dasharray: 1; stroke-dashoffset: 1; }
   to { stroke-dasharray: 1; stroke-dashoffset: 0; }
+}
+
+@keyframes hana-highlight-reveal {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0% 0 0); }
 }
 
 @keyframes hana-connector-draw {

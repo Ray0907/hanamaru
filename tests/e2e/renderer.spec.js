@@ -91,6 +91,7 @@ test('renderer structure keeps an undrawn note measurable without revealing it',
     const output = {
       measurable: measurement.noteRect.width > 0 && measurement.noteRect.height > 0,
       hiddenAttribute: renderer.noteElement.hidden,
+      ownerDescription: owner.getAttribute('aria-describedby'),
       visibility: getComputedStyle(renderer.noteElement).visibility,
       readOnly: renderer.noteElement.className === beforeClass,
     };
@@ -101,7 +102,44 @@ test('renderer structure keeps an undrawn note measurable without revealing it',
   });
 
   expect(result).toEqual({
-    measurable: true, hiddenAttribute: false, visibility: 'hidden', readOnly: true,
+    measurable: true, hiddenAttribute: false, ownerDescription: 'author-token',
+    visibility: 'hidden', readOnly: true,
+  });
+});
+
+test('renderer structure fails before owned DOM or ARIA mutation for an unregistered id', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    const owner = document.querySelector('#target');
+    const before = {
+      descriptions: owner.getAttribute('aria-describedby'),
+      groups: lease.shared.svgLayer.childElementCount,
+      notes: lease.shared.noteLayer.childElementCount,
+    };
+    let error;
+    try {
+      createRenderer({
+        id: 'not-registered', record: { kind: 'element', element: owner, ownerElement: owner },
+        options: { mark: 'circle', note: 'Must not mount', accessible: true }, lease,
+      });
+    } catch (caught) {
+      error = caught.message;
+    }
+    const after = {
+      descriptions: owner.getAttribute('aria-describedby'),
+      groups: lease.shared.svgLayer.childElementCount,
+      notes: lease.shared.noteLayer.childElementCount,
+    };
+    lease.release();
+    return { before, after, error };
+  });
+
+  expect(result).toEqual({
+    before: { descriptions: 'author-token', groups: 0, notes: 0 },
+    after: { descriptions: 'author-token', groups: 0, notes: 0 },
+    error: 'controller is not registered: not-registered',
   });
 });
 
@@ -154,14 +192,29 @@ test('renderer structure transfers and tears down accessible owner tokens safely
       options: { mark: 'circle', note: 'Meaningful note', accessible: true },
       lease,
     });
-    first.setAttribute('aria-describedby', `${first.getAttribute('aria-describedby')} author-after`);
+    const idle = [first.getAttribute('aria-describedby'), second.getAttribute('aria-describedby')];
     renderer.updateOwner(second);
+    const hiddenTransfer = [first.getAttribute('aria-describedby'), second.getAttribute('aria-describedby')];
+    const layout = {
+      targetRects: [], unionRect: null, markPaths: [], side: 'right',
+      noteRect: { x: 10, y: 10, width: 100, height: 30 },
+      connector: { shaft: '', head: '' }, viewport: { width: innerWidth, height: innerHeight },
+    };
+    renderer.draw(layout);
+    const visible = [first.getAttribute('aria-describedby'), second.getAttribute('aria-describedby')];
+    first.setAttribute('aria-describedby', `${first.getAttribute('aria-describedby')} author-after`);
+    renderer.updateOwner(first);
     const transferred = [first.getAttribute('aria-describedby'), second.getAttribute('aria-describedby')];
+    renderer.hide();
+    const hidden = [first.getAttribute('aria-describedby'), second.getAttribute('aria-describedby')];
+    renderer.updateOwner(second);
+    renderer.draw(layout);
+    const reshown = [first.getAttribute('aria-describedby'), second.getAttribute('aria-describedby')];
     second.setAttribute('aria-describedby', `${second.getAttribute('aria-describedby')} concurrent-note`);
     renderer.destroy();
     renderer.destroy();
     const result = {
-      transferred,
+      idle, hiddenTransfer, visible, transferred, hidden, reshown,
       afterDestroy: [first.getAttribute('aria-describedby'), second.getAttribute('aria-describedby')],
       ownedNodes: document.querySelectorAll('[data-hana-id="proof-transfer"]').length,
     };
@@ -171,7 +224,12 @@ test('renderer structure transfers and tears down accessible owner tokens safely
   });
 
   expect(result).toEqual({
-    transferred: ['author-token author-after', 'next-author hana-note-proof-transfer'],
+    idle: ['author-token', 'next-author'],
+    hiddenTransfer: ['author-token', 'next-author'],
+    visible: ['author-token', 'next-author hana-note-proof-transfer'],
+    transferred: ['author-token author-after hana-note-proof-transfer', 'next-author'],
+    hidden: ['author-token author-after', 'next-author'],
+    reshown: ['author-token author-after', 'next-author hana-note-proof-transfer'],
     afterDestroy: ['author-token author-after', 'next-author concurrent-note'],
     ownedNodes: 0,
   });
@@ -355,10 +413,10 @@ test('motion allocates WAAPI phases and controls every active handle', async ({ 
       viewport: { width: innerWidth, height: innerHeight },
     });
     const run = renderer.animate(1000);
-    await run.finished;
     renderer.pause();
     renderer.resume();
     renderer.finish();
+    await run.finished;
     const output = {
       animations: run.animations.length,
       calls: calls.map(({ className, timing, paused, played, finishedCalls }) => ({
@@ -391,8 +449,205 @@ test('motion allocates WAAPI phases and controls every active handle', async ({ 
       { className: 'hana-note hana-is-visible', timing: { duration: 200, delay: 800, fill: 'both', easing: 'ease-out' }, paused: 1, played: 1, finishedCalls: 1 },
     ],
     final: { pathOffsets: ['0', '0', '0', '0'], noteOpacity: '1' },
-    hidden: [true, true], cancelled: [1, 1, 1, 1, 1], retained: [true, true],
+    hidden: [true, true], cancelled: [0, 0, 0, 0, 0], retained: [true, true],
   });
+});
+
+test('motion keeps mark-only WAAPI and fallback finished on the full-duration clock', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    const owner = document.querySelector('#target');
+    const originalAnimate = Element.prototype.animate;
+    const layout = {
+      targetRects: [], unionRect: null, markPaths: ['M 0 0 L 30 0'], side: 'right',
+      noteRect: null, connector: { shaft: '', head: '' },
+      viewport: { width: innerWidth, height: innerHeight },
+    };
+    const runMode = async (id, fallback) => {
+      lease.shared.registerController(id);
+      Element.prototype.animate = fallback ? undefined : originalAnimate;
+      const renderer = createRenderer({
+        id, record: { kind: 'element', element: owner, ownerElement: owner },
+        options: { mark: 'underline', note: null, accessible: false }, lease,
+      });
+      renderer.draw(layout);
+      const startedAt = performance.now();
+      await renderer.animate(100).finished;
+      const elapsed = performance.now() - startedAt;
+      renderer.destroy();
+      lease.shared.releaseController(id);
+      return elapsed;
+    };
+    const waapi = await runMode('clock-waapi', false);
+    const fallback = await runMode('clock-fallback', true);
+    Element.prototype.animate = originalAnimate;
+    lease.release();
+    return { waapi, fallback };
+  });
+
+  expect(result.waapi).toBeGreaterThanOrEqual(85);
+  expect(result.fallback).toBeGreaterThanOrEqual(85);
+  expect(Math.abs(result.waapi - result.fallback)).toBeLessThan(50);
+});
+
+test('motion rejects intentional hide and replay consistently without native rejection leaks', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    const owner = document.querySelector('#target');
+    const originalAnimate = Element.prototype.animate;
+    let unhandled = 0;
+    addEventListener('unhandledrejection', (event) => { unhandled += 1; event.preventDefault(); });
+    const layout = {
+      targetRects: [], unionRect: null, markPaths: ['M 0 0 L 30 0'], side: 'right',
+      noteRect: null, connector: { shaft: '', head: '' },
+      viewport: { width: innerWidth, height: innerHeight },
+    };
+    const runMode = async (id, fallback) => {
+      lease.shared.registerController(id);
+      Element.prototype.animate = fallback ? undefined : originalAnimate;
+      const renderer = createRenderer({
+        id, record: { kind: 'element', element: owner, ownerElement: owner },
+        options: { mark: 'underline', note: null, accessible: false }, lease,
+      });
+      renderer.draw(layout);
+      const hiddenRun = renderer.animate(1000);
+      const hiddenOutcome = hiddenRun.finished.then(() => 'resolved', (error) => error.name);
+      renderer.hide();
+      renderer.draw(layout);
+      const replayedRun = renderer.animate(1000);
+      const replayedOutcome = replayedRun.finished.then(() => 'resolved', (error) => error.name);
+      const replacement = renderer.animate(0);
+      const outcomes = [await hiddenOutcome, await replayedOutcome, await replacement.finished.then(() => 'resolved')];
+      renderer.destroy();
+      lease.shared.releaseController(id);
+      return outcomes;
+    };
+    const waapi = await runMode('cancel-waapi', false);
+    const fallback = await runMode('cancel-fallback', true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    Element.prototype.animate = originalAnimate;
+    lease.release();
+    return { waapi, fallback, unhandled };
+  });
+
+  expect(result).toEqual({
+    waapi: ['AbortError', 'AbortError', 'resolved'],
+    fallback: ['AbortError', 'AbortError', 'resolved'],
+    unhandled: 0,
+  });
+});
+
+test('motion reveals highlight fill in WAAPI and fallback paths', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    const owner = document.querySelector('#target');
+    const originalAnimate = Element.prototype.animate;
+    const layout = {
+      targetRects: [], unionRect: null, markPaths: ['M 0 0 L 80 0 L 80 20 L 0 20 Z'], side: 'right',
+      noteRect: null, connector: { shaft: '', head: '' },
+      viewport: { width: innerWidth, height: innerHeight },
+    };
+
+    lease.shared.registerController('highlight-waapi');
+    const waapiRenderer = createRenderer({
+      id: 'highlight-waapi', record: { kind: 'element', element: owner, ownerElement: owner },
+      options: { mark: 'highlight', note: null, accessible: false }, lease,
+    });
+    waapiRenderer.draw(layout);
+    const waapiRun = waapiRenderer.animate(200);
+    const animation = waapiRun.animations[0];
+    waapiRenderer.pause();
+    animation.currentTime = 0;
+    const start = getComputedStyle(waapiRenderer.group.firstElementChild).clipPath;
+    animation.currentTime = 55;
+    const middle = getComputedStyle(waapiRenderer.group.firstElementChild).clipPath;
+    animation.currentTime = 110;
+    const end = getComputedStyle(waapiRenderer.group.firstElementChild).clipPath;
+    const keyframeValues = animation.effect.getKeyframes().map((frame) => frame.clipPath ?? null);
+    waapiRenderer.finish();
+    await waapiRun.finished;
+    const waapiFinal = waapiRenderer.group.firstElementChild.style.clipPath;
+    waapiRenderer.destroy();
+    lease.shared.releaseController('highlight-waapi');
+
+    Element.prototype.animate = undefined;
+    lease.shared.registerController('highlight-fallback');
+    const fallbackRenderer = createRenderer({
+      id: 'highlight-fallback', record: { kind: 'element', element: owner, ownerElement: owner },
+      options: { mark: 'highlight', note: null, accessible: false }, lease,
+    });
+    fallbackRenderer.draw(layout);
+    const fallbackRun = fallbackRenderer.animate(200);
+    const fallbackName = getComputedStyle(fallbackRenderer.group.firstElementChild).animationName;
+    fallbackRenderer.finish();
+    await fallbackRun.finished;
+    const fallbackFinal = fallbackRenderer.group.firstElementChild.style.clipPath;
+    fallbackRenderer.destroy();
+    lease.shared.releaseController('highlight-fallback');
+    Element.prototype.animate = originalAnimate;
+    lease.release();
+    return {
+      waapiUsesClip: keyframeValues.every((value) => typeof value === 'string')
+        && keyframeValues[0].includes('100%') && keyframeValues.at(-1).includes('0%'),
+      waapiProgresses: start !== middle && middle !== end,
+      waapiFinal,
+      fallbackName,
+      fallbackFinal,
+    };
+  });
+
+  expect(result).toEqual({
+    waapiUsesClip: true,
+    waapiProgresses: true,
+    waapiFinal: 'inset(0px 0% 0px 0px)',
+    fallbackName: 'hana-highlight-reveal',
+    fallbackFinal: 'inset(0px 0% 0px 0px)',
+  });
+});
+
+test('motion reads author duration and note-gap theme metrics without changing renderer shapes', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer, readThemeMetrics } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    lease.shared.overlay.style.setProperty('--hana-duration', '90ms');
+    lease.shared.overlay.style.setProperty('--hana-note-gap', '24px');
+    lease.shared.registerController('theme-motion');
+    const owner = document.querySelector('#target');
+    const renderer = createRenderer({
+      id: 'theme-motion', record: { kind: 'element', element: owner, ownerElement: owner },
+      options: { mark: 'underline', note: null, accessible: false }, lease,
+    });
+    renderer.draw({
+      targetRects: [], unionRect: null, markPaths: ['M 0 0 L 20 0'], side: 'right',
+      noteRect: null, connector: { shaft: '', head: '' },
+      viewport: { width: innerWidth, height: innerHeight },
+    });
+    const metrics = readThemeMetrics(renderer.group);
+    const startedAt = performance.now();
+    await renderer.animate().finished;
+    const elapsed = performance.now() - startedAt;
+    const measureKeys = Object.keys(renderer.measure());
+    const rendererKeys = Object.keys(renderer);
+    renderer.destroy();
+    lease.shared.releaseController('theme-motion');
+    lease.release();
+    return { metrics, elapsed, measureKeys, rendererKeys };
+  });
+
+  expect(result.metrics).toEqual({ duration: 90, noteGap: 24 });
+  expect(result.elapsed).toBeGreaterThanOrEqual(75);
+  expect(result.measureKeys).toEqual(['noteRect', 'peerNoteRects', 'viewport']);
+  expect(result.rendererKeys).toEqual([
+    'group', 'noteElement', 'measure', 'draw', 'animate',
+    'updateOwner', 'pause', 'resume', 'finish', 'hide', 'destroy',
+  ]);
 });
 
 test('motion fallback preserves elapsed time across pause and supports finish and zero duration', async ({ page }) => {
