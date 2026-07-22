@@ -62,6 +62,17 @@ test('clampNoteRect caps size then positions a note inside the inset viewport', 
   );
 });
 
+test('clampNoteRect keeps zero-sized notes inside tiny viewport axes', () => {
+  assert.deepEqual(
+    clampNoteRect(rect(-30, -40, 100, 100), { width: 10, height: 20 }, 12),
+    rect(5, 10, 0, 0),
+  );
+  assert.deepEqual(
+    clampNoteRect(rect(-30, 900, 100, 100), { width: 10, height: 100 }, 12),
+    rect(5, 12, 0, 76),
+  );
+});
+
 test('noteCandidates centers notes around every target edge with the default gap', () => {
   assert.deepEqual(
     noteCandidates(rect(50, 100, 100, 40), { width: 120, height: 60 }),

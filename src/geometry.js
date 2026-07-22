@@ -38,12 +38,14 @@ export function intersectionArea(a, b) {
 }
 
 export function clampNoteRect(input, viewport, inset = 12) {
-  const width = Math.min(input.width, Math.max(0, viewport.width - (2 * inset)));
-  const height = Math.min(input.height, Math.max(0, viewport.height - (2 * inset)));
-  const minX = inset;
-  const minY = inset;
-  const maxX = viewport.width - inset - width;
-  const maxY = viewport.height - inset - height;
+  const horizontalInset = Math.min(inset, viewport.width / 2);
+  const verticalInset = Math.min(inset, viewport.height / 2);
+  const width = Math.max(0, Math.min(input.width, viewport.width - (2 * horizontalInset)));
+  const height = Math.max(0, Math.min(input.height, viewport.height - (2 * verticalInset)));
+  const minX = horizontalInset;
+  const minY = verticalInset;
+  const maxX = viewport.width - horizontalInset - width;
+  const maxY = viewport.height - verticalInset - height;
   const x = Math.max(minX, Math.min(input.x, maxX));
   const y = Math.max(minY, Math.min(input.y, maxY));
 
