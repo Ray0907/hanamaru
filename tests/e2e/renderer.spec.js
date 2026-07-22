@@ -235,6 +235,44 @@ test('renderer structure transfers and tears down accessible owner tokens safely
   });
 });
 
+test('renderer restores an externally removed own description token without disturbing peers', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    lease.shared.registerController('description-heal');
+    const owner = document.querySelector('#target');
+    owner.setAttribute('aria-describedby', 'author-token concurrent-note');
+    const renderer = createRenderer({
+      id: 'description-heal',
+      record: { kind: 'element', element: owner, ownerElement: owner },
+      options: { mark: 'circle', note: 'Self-healing note', accessible: true },
+      lease,
+    });
+    const layout = {
+      targetRects: [], unionRect: null, markPaths: [], side: 'right',
+      noteRect: { x: 10, y: 10, width: 100, height: 30 },
+      connector: { shaft: '', head: '' }, viewport: { width: innerWidth, height: innerHeight },
+    };
+    renderer.draw(layout);
+    const associated = owner.getAttribute('aria-describedby');
+    owner.setAttribute('aria-describedby', 'author-token concurrent-note');
+    renderer.draw(layout);
+    const healed = owner.getAttribute('aria-describedby');
+    renderer.destroy();
+    const destroyed = owner.getAttribute('aria-describedby');
+    lease.shared.releaseController('description-heal');
+    lease.release();
+    return { associated, healed, destroyed };
+  });
+
+  expect(result).toEqual({
+    associated: 'author-token concurrent-note hana-note-description-heal',
+    healed: 'author-token concurrent-note hana-note-description-heal',
+    destroyed: 'author-token concurrent-note',
+  });
+});
+
 test('renderer structure preserves the generated path counts for all six marks', async ({ page }) => {
   const counts = await page.evaluate(async () => {
     const { buildMarkPaths, rect } = await import('/src/geometry.js');

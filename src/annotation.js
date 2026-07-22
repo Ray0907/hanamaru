@@ -431,6 +431,12 @@ export function createAnnotation(target, rawOptions, env) {
     return error;
   }
 
+  function reportSupersededRuntimeFailure(cause) {
+    const error = stateError(cause);
+    dispatch(env, record.ownerElement, 'hana:error', { controller, error });
+    return error;
+  }
+
   function handleScheduledFailure(error) {
     if (error instanceof HanamaruTargetError) reportTargetFailure(error);
     else handleRuntimeFailure(error);
@@ -659,7 +665,10 @@ export function createAnnotation(target, rawOptions, env) {
       forceHideRenderer(renderer, knownOwners);
     }
     cancelPending('hide', wasActive);
-    if (!isCurrentOperation(operation)) return controller;
+    if (!isCurrentOperation(operation)) {
+      if (hideFailure !== null) reportSupersededRuntimeFailure(hideFailure);
+      return controller;
+    }
     if (hideFailure !== null) {
       handleRuntimeFailure(hideFailure);
       if (!isCurrentOperation(operation)) return controller;
@@ -682,7 +691,10 @@ export function createAnnotation(target, rawOptions, env) {
       forceHideRenderer(renderer, knownOwners);
     }
     cancelPending('replay', wasActive);
-    if (!isCurrentOperation(operation)) return controller;
+    if (!isCurrentOperation(operation)) {
+      if (hideFailure !== null) reportSupersededRuntimeFailure(hideFailure);
+      return controller;
+    }
     startDeferredRun();
     if (hideFailure !== null) {
       handleRuntimeFailure(hideFailure);

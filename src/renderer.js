@@ -114,9 +114,12 @@ export function createRenderer({ id, record, options, lease }) {
   let overflowSequence = 0;
 
   function associateDescription() {
-    if (descriptionAssociated || noteElement === null || !options.accessible) {
+    if (noteElement === null || !options.accessible) {
       return;
     }
+    const ownerHasToken = typeof owner?.getAttribute === 'function'
+      && descriptionTokens(owner.getAttribute('aria-describedby')).includes(noteId);
+    if (descriptionAssociated && ownerHasToken) return;
     writeDescription(owner, noteId, true);
     descriptionAssociated = true;
   }

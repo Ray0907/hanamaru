@@ -389,6 +389,92 @@ test('hana:cancel show restores real renderer visibility and its stable ARIA not
   })));
 });
 
+test('hana:cancel show survives a hide failure while reporting it exactly once', async ({ page }) => {
+  const results = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const output = [];
+
+    for (const action of ['hide', 'replay']) {
+      const target = document.createElement('span');
+      target.textContent = `${action} failed hide replacement`;
+      target.style.display = 'inline-block';
+      target.setAttribute('aria-describedby', 'author-token');
+      document.querySelector('#arena').append(target);
+      const controller = annotate(target, {
+        mark: 'circle', note: 'Recoverable note', accessible: true, duration: 0,
+      });
+      const errors = [];
+      let completes = 0;
+      target.addEventListener('hana:error', (event) => errors.push({
+        name: event.detail.error.name,
+        code: event.detail.error.code,
+        cause: event.detail.error.details.cause.message,
+      }));
+      target.addEventListener('hana:complete', () => { completes += 1; });
+      controller.show();
+      const initialRun = controller.finished;
+      await initialRun;
+      const noteId = document.querySelector('.hana-note').id;
+      const nativeGetAttribute = target.getAttribute;
+      let hideReadFailed = false;
+      target.getAttribute = function getAttribute(name) {
+        if (name === 'aria-describedby' && !hideReadFailed) {
+          hideReadFailed = true;
+          this.setAttribute('aria-describedby', 'author-token');
+          throw new Error('forced hide failure');
+        }
+        return nativeGetAttribute.call(this, name);
+      };
+      let replacementRun = null;
+      target.addEventListener('hana:cancel', (event) => {
+        if (event.detail.reason !== action) return;
+        target.getAttribute = nativeGetAttribute;
+        controller.show();
+        replacementRun = controller.finished;
+      });
+
+      controller[action]();
+      const outcome = await Promise.race([
+        replacementRun.then(() => 'resolved', () => 'rejected'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 1000)),
+      ]);
+      const group = document.querySelector('.hana-annotation');
+      const note = document.querySelector('.hana-note');
+      output.push({
+        action,
+        outcome,
+        freshRun: replacementRun !== initialRun,
+        sameFinished: controller.finished === replacementRun,
+        state: controller.state,
+        completes,
+        errors,
+        groupHidden: group.hasAttribute('hidden'),
+        noteHidden: note.hidden || getComputedStyle(note).visibility === 'hidden',
+        descriptionHasStableNote: (target.getAttribute('aria-describedby') ?? '')
+          .split(/\s+/u).includes(noteId),
+      });
+      controller.destroy();
+      target.remove();
+    }
+    return output;
+  });
+
+  expect(results).toEqual(['hide', 'replay'].map((action) => ({
+    action,
+    outcome: 'resolved',
+    freshRun: true,
+    sameFinished: true,
+    state: 'visible',
+    completes: 2,
+    errors: [{
+      name: 'HanamaruStateError', code: 'HANA_STATE_RUNTIME', cause: 'forced hide failure',
+    }],
+    groupHidden: false,
+    noteHidden: false,
+    descriptionHasStableNote: true,
+  })));
+});
+
 test('selector replacement while visibility is not requested recovers hidden without drawing', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');
