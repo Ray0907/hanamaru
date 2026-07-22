@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { checkDistribution } from '../../scripts/check-size.mjs';
+import { checkDistribution, npmExecutableFor } from '../../scripts/check-size.mjs';
 
 async function createDistribution(pkg = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-size-'));
@@ -46,4 +46,18 @@ test('checkDistribution returns ESM then IIFE metric rows', async (t) => {
   const rows = await checkDistribution(root, { checkNpmTree: false });
 
   assert.deepEqual(rows.map((row) => row.file), ['hanamaru.esm.js', 'hanamaru.iife.js']);
+});
+
+test('npmExecutableFor selects the Windows command shim only on win32', () => {
+  assert.equal(npmExecutableFor('win32'), 'npm.cmd');
+  assert.equal(npmExecutableFor('linux'), 'npm');
+});
+
+test('checkDistribution validates the actual production npm tree by default', async (t) => {
+  const root = await createDistribution({});
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const rows = await checkDistribution(root);
+
+  assert.equal(rows.length, 2);
 });

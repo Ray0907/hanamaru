@@ -8,10 +8,14 @@ import { promisify } from 'node:util';
 const executeFile = promisify(execFile);
 const distributionFiles = ['hanamaru.esm.js', 'hanamaru.iife.js'];
 
+export function npmExecutableFor(platform) {
+  return platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
 async function assertNoProductionPackages(root) {
   let result;
   try {
-    result = await executeFile('npm', ['ls', '--omit=dev', '--json'], { cwd: root });
+    result = await executeFile(npmExecutableFor(process.platform), ['ls', '--omit=dev', '--json'], { cwd: root });
   } catch {
     throw new Error('dist-check: npm ls --omit=dev failed');
   }
