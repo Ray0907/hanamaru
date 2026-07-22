@@ -112,7 +112,7 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/tests/fixtures/resources.html');
 });
 
-test('shares one document root and observer set until the final lease releases', async ({ page }) => {
+test('shared ownership keeps one document root and observer set until the final lease releases', async ({ page }) => {
   await installInstrumentation(page);
 
   const result = await page.evaluate(async () => {
@@ -259,7 +259,7 @@ test('registers controller generations and rejects invalid or duplicate IDs', as
   expect(result.outcomes.map(([kind]) => kind)).toEqual(['TypeError', 'TypeError', 'TypeError', 'ok', 'Error']);
 });
 
-test('shares passive scroll ancestors and resize targets while routing signals by controller', async ({ page }) => {
+test('shares scroll and resize resources while routing signals by controller', async ({ page }) => {
   await installInstrumentation(page);
 
   const result = await page.evaluate(async () => {
