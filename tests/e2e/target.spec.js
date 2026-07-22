@@ -200,3 +200,238 @@ test('@range rejects disconnected and cross-document Range boundaries', async ({
     ['HanamaruTargetError', 'HANA_TARGET_INVALID', true],
   ]);
 });
+
+test('@locator-map maps normalized split-node text to exact native Range boundaries without DOM mutation', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const within = document.querySelector('#split-locator');
+    const start = within.querySelector('[data-locator-part="start"]').firstChild;
+    const end = within.querySelector('[data-locator-part="end"]').firstChild;
+    const markup = within.innerHTML;
+    const childNodes = within.querySelectorAll('*').length;
+    const record = resolveTarget({ within, text: '  😀Alpha\\t beta  ' });
+    return {
+      kind: record.kind,
+      native: record.range instanceof Range,
+      owner: record.ownerElement === within && record.element === within,
+      startNode: record.range.startContainer === start,
+      startOffset: record.range.startOffset,
+      endNode: record.range.endContainer === end,
+      endOffset: record.range.endOffset,
+      normalizedSelection: record.range.toString().trim().replace(/\\s+/gu, ' '),
+      markupUnchanged: within.innerHTML === markup,
+      nodeCountUnchanged: within.querySelectorAll('*').length === childNodes,
+      wrappers: document.querySelectorAll('[data-hanamaru]').length,
+    };
+  })()`);
+  expect(result).toEqual({
+    kind: 'locator', native: true, owner: true,
+    startNode: true, startOffset: 7, endNode: true, endOffset: 4,
+    normalizedSelection: '😀Alpha beta', markupUnchanged: true,
+    nodeCountUnchanged: true, wrappers: 0,
+  });
+});
+
+test('@locator-map excludes forbidden subtrees and selects visible duplicate occurrences in document order', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const within = document.querySelector('#locator-root');
+    return [0, 1].map((occurrence) => {
+      const record = resolveTarget({ within, text: 'Tempting duplicate phrase', occurrence });
+      const expected = within.querySelector('[data-visible-duplicate="' + (occurrence === 0 ? 'first' : 'second') + '"]').firstChild;
+      return {
+        start: record.range.startContainer === expected && record.range.startOffset === 0,
+        end: record.range.endContainer === expected && record.range.endOffset === expected.data.length,
+        selected: record.range.toString(),
+      };
+    });
+  })()`);
+  expect(result).toEqual([
+    { start: true, end: true, selected: 'Tempting duplicate phrase' },
+    { start: true, end: true, selected: 'Tempting duplicate phrase' },
+  ]);
+});
+
+test('@locator reports missing, ambiguous, and out-of-range text matches with exact codes', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const within = '#locator-root';
+    const targets = [
+      { within, text: 'Not present' },
+      { within, text: 'Tempting duplicate phrase' },
+      { within, text: 'Tempting duplicate phrase', occurrence: 2 },
+    ];
+    return targets.map((target) => {
+      try { resolveTarget(target); return 'ok'; } catch (error) { return [error.name, error.code, Boolean(error.details)]; }
+    });
+  })()`);
+  expect(result).toEqual([
+    ['HanamaruTargetError', 'HANA_TARGET_MISSING', true],
+    ['HanamaruTargetError', 'HANA_TARGET_AMBIGUOUS', true],
+    ['HanamaruTargetError', 'HANA_TARGET_MISSING', true],
+  ]);
+});
+
+test('@locator exposes exact record shape and refreshes same-element text with a new Range', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const within = document.querySelector('#element-locator-host');
+    const target = { within, text: 'Element locator phrase' };
+    const record = resolveTarget(target);
+    const firstRange = record.range;
+    const source = record.source;
+    target.text = 'caller mutation';
+    within.innerHTML = 'Prefix <b>Element locator phrase</b> suffix';
+    const refreshed = record.refresh();
+    return {
+      keys: Object.keys(record).sort(),
+      sameRecord: refreshed === record,
+      newRange: record.range !== firstRange,
+      sameElement: record.element === within && record.ownerElement === within,
+      selected: record.range.toString(),
+      sourceCopy: source !== target && source.within === within && source.text === 'Element locator phrase' && !('occurrence' in source),
+    };
+  })()`);
+  expect(result).toEqual({
+    keys: ['element', 'kind', 'ownerElement', 'range', 'refresh', 'source'],
+    sameRecord: true, newRange: true, sameElement: true,
+    selected: 'Element locator phrase', sourceCopy: true,
+  });
+});
+
+test('@locator selector refresh adopts a unique replacement and rebuilds its Range', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const record = resolveTarget({ within: '#replaceable-locator-host', text: 'Original selector phrase' });
+    const firstElement = record.element;
+    const firstRange = record.range;
+    const replacement = document.createElement('section');
+    replacement.id = 'replaceable-locator-host';
+    replacement.innerHTML = '<i>Original</i> selector phrase';
+    firstElement.replaceWith(replacement);
+    const refreshed = record.refresh();
+    return {
+      sameRecord: refreshed === record,
+      replacement: record.element === replacement && record.ownerElement === replacement,
+      newRange: record.range !== firstRange,
+      selected: record.range.toString(),
+      source: record.source.within === '#replaceable-locator-host' && record.source.text === 'Original selector phrase',
+    };
+  })()`);
+  expect(result).toEqual({ sameRecord: true, replacement: true, newRange: true, selected: 'Original selector phrase', source: true });
+});
+
+test('@locator direct Element refresh never adopts a lookalike replacement and fails atomically', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const within = document.querySelector('#element-locator-host');
+    const record = resolveTarget({ within, text: 'Element locator phrase' });
+    const range = record.range;
+    const replacement = within.cloneNode(true);
+    within.replaceWith(replacement);
+    let code;
+    try { record.refresh(); } catch (error) { code = error.code; }
+    return {
+      code,
+      oldElement: record.element === within && record.ownerElement === within,
+      notReplacement: record.element !== replacement,
+      oldRange: record.range === range,
+    };
+  })()`);
+  expect(result).toEqual({
+    code: 'HANA_TARGET_INVALID', oldElement: true, notReplacement: true,
+    oldRange: true,
+  });
+});
+
+test('@locator selector refresh failures preserve the last successful element and Range atomically', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const record = resolveTarget({ within: '#replaceable-locator-host', text: 'Original selector phrase' });
+    const element = record.element;
+    const range = record.range;
+    const duplicate = element.cloneNode(true);
+    element.after(duplicate);
+    let code;
+    try { record.refresh(); } catch (error) { code = error.code; }
+    return {
+      code,
+      sameElement: record.element === element && record.ownerElement === element,
+      sameRange: record.range === range,
+      preservedSelection: record.range.toString(),
+    };
+  })()`);
+  expect(result).toEqual({
+    code: 'HANA_TARGET_AMBIGUOUS', sameElement: true, sameRange: true,
+    preservedSelection: 'Original selector phrase',
+  });
+});
+
+test('@locator validates plain own-key locator objects without invoking inherited getters', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    let inheritedCalls = 0;
+    const inherited = Object.create({
+      get within() { inheritedCalls += 1; throw new Error('inherited within invoked'); },
+      get text() { inheritedCalls += 1; throw new Error('inherited text invoked'); },
+    });
+    const array = [];
+    array.within = '#locator-root'; array.text = 'Before';
+    const targets = [
+      { within: '#locator-root', text: 42 },
+      { within: '#locator-root', text: 'Before', occurrence: -1 },
+      { within: '#locator-root' },
+      { text: 'Before' },
+      { within: '#locator-root', text: 'Before', extra: true },
+      array,
+      inherited,
+      Object.create(null, {
+        within: { value: '#element-locator-host', enumerable: true },
+        text: { value: 'Element locator phrase', enumerable: true },
+      }),
+    ];
+    const outcomes = targets.map((target) => {
+      try { return resolveTarget(target).kind; } catch (error) { return [error.name, error.code]; }
+    });
+    return { outcomes, inheritedCalls };
+  })()`);
+  expect(result).toEqual({
+    outcomes: [
+      ['HanamaruConfigError', 'HANA_CONFIG_INVALID'],
+      ['HanamaruConfigError', 'HANA_CONFIG_INVALID'],
+      ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+      ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+      ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+      ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+      ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+      'locator',
+    ],
+    inheritedCalls: 0,
+  });
+});
+
+test('@locator rejects invalid, missing, ambiguous, cross-document, and Shadow DOM within values', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const detached = document.createElement('div'); detached.textContent = 'needle';
+    const other = document.implementation.createHTMLDocument('other');
+    const foreign = other.body.appendChild(other.createElement('div')); foreign.textContent = 'needle';
+    const host = document.body.appendChild(document.createElement('div'));
+    const shadowWithin = host.attachShadow({ mode: 'open' }).appendChild(document.createElement('div'));
+    shadowWithin.textContent = 'needle';
+    const targets = [
+      { within: 42, text: 'needle' },
+      { within: '[', text: 'needle' },
+      { within: '#not-here', text: 'needle' },
+      { within: '.duplicate-target', text: 'needle' },
+      { within: detached, text: 'needle' },
+      { within: foreign, text: 'needle' },
+      { within: shadowWithin, text: 'needle' },
+    ];
+    const outcomes = targets.map((target) => {
+      try { resolveTarget(target); return 'ok'; } catch (error) { return [error.name, error.code]; }
+    });
+    host.remove();
+    return outcomes;
+  })()`);
+  expect(result).toEqual([
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+    ['HanamaruTargetError', 'HANA_TARGET_MISSING'],
+    ['HanamaruTargetError', 'HANA_TARGET_AMBIGUOUS'],
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+  ]);
+});
