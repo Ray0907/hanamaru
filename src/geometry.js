@@ -11,6 +11,79 @@ export function rect(x, y, width, height) {
   };
 }
 
+export function fnv1a(value) {
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
+  }
+
+  return hash >>> 0;
+}
+
+export function jitter(seed, label, amplitude = 1.5) {
+  const hash = fnv1a(`${seed}:${label}`);
+  const value = (((hash / 0xffffffff) * 2) - 1) * amplitude;
+  const rounded = Math.round(value * 100) / 100;
+
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+function formatCoordinate(value) {
+  const rounded = Math.round(value * 100) / 100;
+  const normalized = Object.is(rounded, -0) ? 0 : rounded;
+
+  return normalized.toFixed(2).replace(/\.0+$|(?<=\.[0-9])0$/, '');
+}
+
+export function buildMarkPaths(mark, rects, seed) {
+  if (!['underline', 'highlight', 'strike'].includes(mark)) {
+    throw new RangeError(`Unsupported mark: ${mark}`);
+  }
+
+  if (mark === 'strike') {
+    return rects.flatMap((item, index) => [0, 1].map((pass) => {
+      const centerX = (item.left + item.right) / 2;
+      const centerY = item.y + (item.height / 2);
+      const base = centerY + (pass === 0 ? -1 : 1);
+      const label = (point) => `strike:${index}:p${pass}:${point}`;
+      const coordinate = (baseValue, point) => (
+        formatCoordinate(baseValue + jitter(seed, label(point)))
+      );
+
+      return `M ${coordinate(item.left, 'x0')} ${coordinate(base, 'y0')}`
+        + ` Q ${coordinate(centerX, 'mx')} ${coordinate(base, 'my')}`
+        + ` ${coordinate(item.right, 'x1')} ${coordinate(base, 'y1')}`;
+    }));
+  }
+
+  return rects.map((item, index) => {
+    if (mark === 'highlight') {
+      const top = item.y + (item.height * 0.45);
+      const label = (point) => `highlight:${index}:${point}`;
+      const coordinate = (baseValue, point) => (
+        formatCoordinate(baseValue + jitter(seed, label(point)))
+      );
+
+      return `M ${coordinate(item.left, 'tlx')} ${coordinate(top, 'tly')}`
+        + ` L ${coordinate(item.right, 'trx')} ${coordinate(top, 'try')}`
+        + ` L ${coordinate(item.right, 'brx')} ${coordinate(item.bottom, 'bry')}`
+        + ` L ${coordinate(item.left, 'blx')} ${coordinate(item.bottom, 'bly')} Z`;
+    }
+
+    const base = item.bottom + 2;
+    const centerX = (item.left + item.right) / 2;
+    const label = (point) => `${mark}:${index}:${point}`;
+    const coordinate = (baseValue, point) => (
+      formatCoordinate(baseValue + jitter(seed, label(point)))
+    );
+
+    return `M ${coordinate(item.left, 'x0')} ${coordinate(base, 'y0')}`
+      + ` Q ${coordinate(centerX, 'mx')} ${coordinate(base, 'my')}`
+      + ` ${coordinate(item.right, 'x1')} ${coordinate(base, 'y1')}`;
+  });
+}
+
 export function unionRects(rects) {
   if (rects.length === 0) {
     return rect(0, 0, 0, 0);
