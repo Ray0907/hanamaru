@@ -650,6 +650,50 @@ test('motion reads author duration and note-gap theme metrics without changing r
   ]);
 });
 
+test('motion observes theme duration changes between runs without freezing the canonical variable', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer, readThemeMetrics } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    lease.shared.registerController('theme-switch');
+    const owner = document.querySelector('#target');
+    const renderer = createRenderer({
+      id: 'theme-switch', record: { kind: 'element', element: owner, ownerElement: owner },
+      options: { mark: 'underline', note: null, accessible: false }, lease,
+    });
+    renderer.draw({
+      targetRects: [], unionRect: null, markPaths: ['M 0 0 L 20 0'], side: 'right',
+      noteRect: null, connector: { shaft: '', head: '' },
+      viewport: { width: innerWidth, height: innerHeight },
+    });
+
+    lease.shared.overlay.style.setProperty('--hana-duration', '30ms');
+    let startedAt = performance.now();
+    await renderer.animate().finished;
+    const firstElapsed = performance.now() - startedAt;
+
+    lease.shared.overlay.style.setProperty('--hana-duration', '120ms');
+    const secondMetrics = readThemeMetrics(renderer.group);
+    startedAt = performance.now();
+    await renderer.animate().finished;
+    const secondElapsed = performance.now() - startedAt;
+
+    await renderer.animate(10).finished;
+    const inlineCanonical = renderer.group.style.getPropertyValue('--hana-duration');
+    const inheritedCanonical = getComputedStyle(renderer.group).getPropertyValue('--hana-duration').trim();
+    renderer.destroy();
+    lease.shared.releaseController('theme-switch');
+    lease.release();
+    return { firstElapsed, secondElapsed, secondMetrics, inlineCanonical, inheritedCanonical };
+  });
+
+  expect(result.firstElapsed).toBeGreaterThanOrEqual(20);
+  expect(result.secondElapsed).toBeGreaterThanOrEqual(100);
+  expect(result.secondMetrics.duration).toBe(120);
+  expect(result.inlineCanonical).toBe('');
+  expect(result.inheritedCanonical).toBe('120ms');
+});
+
 test('motion fallback preserves elapsed time across pause and supports finish and zero duration', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireDocumentResources } = await import('/src/scheduler.js');
@@ -681,7 +725,7 @@ test('motion fallback preserves elapsed time across pause and supports finish an
     await run.finished;
     const completed = resolved;
     const variables = {
-      duration: renderer.group.style.getPropertyValue('--hana-duration'),
+      canonicalInline: renderer.group.style.getPropertyValue('--hana-duration'),
       markDuration: renderer.group.style.getPropertyValue('--hana-mark-duration'),
       connectorDuration: renderer.group.style.getPropertyValue('--hana-connector-duration'),
       connectorDelay: renderer.group.style.getPropertyValue('--hana-connector-delay'),
@@ -717,7 +761,7 @@ test('motion fallback preserves elapsed time across pause and supports finish an
     stayedPending: true,
     completed: true,
     variables: {
-      duration: '120ms', markDuration: '66ms', connectorDuration: '30ms',
+      canonicalInline: '', markDuration: '66ms', connectorDuration: '30ms',
       connectorDelay: '66ms', noteDuration: '24ms', noteDelay: '96ms',
     },
     finishFinal: [false, '1'],

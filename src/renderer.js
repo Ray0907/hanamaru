@@ -333,13 +333,11 @@ export function createRenderer({ id, record, options, lease }) {
     const connectorDelay = resolvedDuration * 0.55;
     const noteDuration = resolvedDuration * 0.2;
     const noteDelay = resolvedDuration * 0.8;
-    group.style.setProperty('--hana-duration', `${resolvedDuration}ms`);
     group.style.setProperty('--hana-mark-duration', `${markDuration}ms`);
     group.style.setProperty('--hana-mark-delay', '0ms');
     group.style.setProperty('--hana-connector-duration', `${connectorDuration}ms`);
     group.style.setProperty('--hana-connector-delay', `${connectorDelay}ms`);
     if (noteElement !== null) {
-      noteElement.style.setProperty('--hana-duration', `${resolvedDuration}ms`);
       noteElement.style.setProperty('--hana-note-duration', `${noteDuration}ms`);
       noteElement.style.setProperty('--hana-note-delay', `${noteDelay}ms`);
     }
