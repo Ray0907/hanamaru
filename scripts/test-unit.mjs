@@ -1,20 +1,21 @@
 import { readdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const testsDirectory = new URL('../tests/unit/', import.meta.url);
+const testsDirectory = fileURLToPath(new URL('../tests/unit/', import.meta.url));
 
 async function findTests(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const names = await Promise.all(
     entries.map(async (entry) => {
-      const entryUrl = new URL(entry.name, directory);
+      const entryPath = join(directory, entry.name);
 
       if (entry.isDirectory()) {
-        return findTests(new URL(`${entry.name}/`, directory));
+        return findTests(entryPath);
       }
 
-      return entry.isFile() && entry.name.endsWith('.test.js') ? [fileURLToPath(entryUrl)] : [];
+      return entry.isFile() && entry.name.endsWith('.test.js') ? [entryPath] : [];
     }),
   );
 
