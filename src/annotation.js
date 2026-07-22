@@ -275,8 +275,14 @@ export function documentForTarget(target) {
   throw new TypeError('annotate() requires a target Document');
 }
 
-export function createAnnotationEnvironment(target) {
-  const doc = documentForTarget(target);
+export function createAnnotationEnvironment(target, documentOverride = undefined) {
+  const doc = documentOverride === undefined
+    ? documentForTarget(target)
+    : documentOverride;
+  if (doc === null || typeof doc !== 'object'
+    || doc.nodeType !== 9 || doc.defaultView === null) {
+    throw new TypeError('annotation document must be a Document with a browsing context');
+  }
   const win = doc.defaultView;
   const id = `hana-${++nextAnnotationId}`;
   let lease;

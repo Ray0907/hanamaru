@@ -133,6 +133,118 @@ test('story preflights all browser targets before mounting', async ({ page }) =>
   expect(output).toEqual({ code: 'HANA_TARGET_MISSING', owned: 0, overlays: 0 });
 });
 
+test('parent-imported story binds every selector and locator annotation to the first iframe document', async ({ page }) => {
+  const output = await page.evaluate(async () => {
+    const frame = document.createElement('iframe');
+    frame.srcdoc = `<!doctype html><html><body>
+      <p id="frame-first" style="display:inline-block">Iframe first</p>
+      <p id="frame-second" style="display:inline-block">Iframe second</p>
+      <p id="frame-copy" style="display:inline-block">Scoped exact iframe text</p>
+    </body></html>`;
+    document.body.append(frame);
+    await new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow;
+    const first = doc.querySelector('#frame-first');
+    const parentEvents = [];
+    const frameEvents = [];
+    let controller;
+    for (const type of ['hana:start', 'hana:step', 'hana:complete']) {
+      document.body.addEventListener(type, (event) => parentEvents.push(event.type));
+      doc.body.addEventListener(type, (event) => frameEvents.push({
+        type: event.type,
+        target: event.target.id,
+        story: event.detail.controller === controller,
+        iframeRealm: event instanceof win.CustomEvent,
+      }));
+    }
+
+    const { story } = await import('/src/story.js');
+    const locator = new win.Object();
+    locator.within = '#frame-copy';
+    locator.text = 'exact iframe text';
+    controller = story([
+      { target: first, mark: 'underline' },
+      { target: '#frame-second', mark: 'circle', note: 'Iframe selector note' },
+      {
+        target: locator,
+        mark: 'highlight',
+        note: 'Iframe locator note',
+      },
+    ], { gap: 0, motion: 'never' });
+    controller.play();
+    await controller.finished;
+    const visible = {
+      state: controller.state,
+      parentEvents,
+      frameEvents,
+      parentOverlays: document.querySelectorAll('[data-hana-overlay]').length,
+      frameOverlays: doc.querySelectorAll('[data-hana-overlay]').length,
+      parentOwned: document.querySelectorAll('[data-hana-id]').length,
+      frameOwned: doc.querySelectorAll('[data-hana-id]').length,
+      frameNotes: [...doc.querySelectorAll('.hana-note')].map((note) => note.textContent),
+      frameMarks: [...doc.querySelectorAll('.hana-annotation')]
+        .map((mark) => mark.getAttribute('data-hana-mark')),
+    };
+    controller.destroy();
+
+    const parentTarget = document.createElement('p');
+    parentTarget.id = 'parent-cross-document-target';
+    parentTarget.textContent = 'Parent target';
+    document.body.append(parentTarget);
+    let crossDocumentCode;
+    try {
+      story([
+        { target: first, mark: 'underline' },
+        { target: parentTarget, mark: 'box' },
+      ], { motion: 'never' });
+    } catch (error) {
+      crossDocumentCode = error.code;
+    }
+    const cleanup = {
+      crossDocumentCode,
+      parentOverlays: document.querySelectorAll('[data-hana-overlay]').length,
+      frameOverlays: doc.querySelectorAll('[data-hana-overlay]').length,
+      parentOwned: document.querySelectorAll('[data-hana-id]').length,
+      frameOwned: doc.querySelectorAll('[data-hana-id]').length,
+    };
+    parentTarget.remove();
+    frame.remove();
+    return { visible, cleanup };
+  });
+
+  expect(output.visible).toEqual({
+    state: 'complete',
+    parentEvents: [],
+    frameEvents: [
+      { type: 'hana:start', target: 'frame-first', story: true, iframeRealm: true },
+      { type: 'hana:step', target: 'frame-first', story: true, iframeRealm: true },
+      { type: 'hana:start', target: 'frame-first', story: false, iframeRealm: true },
+      { type: 'hana:complete', target: 'frame-first', story: false, iframeRealm: true },
+      { type: 'hana:step', target: 'frame-first', story: true, iframeRealm: true },
+      { type: 'hana:start', target: 'frame-second', story: false, iframeRealm: true },
+      { type: 'hana:complete', target: 'frame-second', story: false, iframeRealm: true },
+      { type: 'hana:step', target: 'frame-first', story: true, iframeRealm: true },
+      { type: 'hana:start', target: 'frame-copy', story: false, iframeRealm: true },
+      { type: 'hana:complete', target: 'frame-copy', story: false, iframeRealm: true },
+      { type: 'hana:complete', target: 'frame-first', story: true, iframeRealm: true },
+    ],
+    parentOverlays: 0,
+    frameOverlays: 1,
+    parentOwned: 0,
+    frameOwned: 5,
+    frameNotes: ['Iframe selector note', 'Iframe locator note'],
+    frameMarks: ['underline', 'circle', 'highlight'],
+  });
+  expect(output.cleanup).toEqual({
+    crossDocumentCode: 'HANA_TARGET_INVALID',
+    parentOverlays: 0,
+    frameOverlays: 0,
+    parentOwned: 0,
+    frameOwned: 0,
+  });
+});
+
 test('story target and renderer failures retain completed marks and remove pending marks', async ({ page }) => {
   const output = await page.evaluate(async () => {
     const { story } = await import('/src/story.js');

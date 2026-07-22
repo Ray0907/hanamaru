@@ -35,7 +35,7 @@ function defaultStoryEnvironment(steps) {
     acquireDocumentResources,
     clearTimeout(id) { win.clearTimeout(id); },
     createAnnotation(target, options) {
-      return createAnnotation(target, options, createAnnotationEnvironment(target));
+      return createAnnotation(target, options, createAnnotationEnvironment(target, doc));
     },
     createEvent(type, detail, owner) {
       owner.dispatchEvent(new win.CustomEvent(type, {
