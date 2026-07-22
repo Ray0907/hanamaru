@@ -1,0 +1,81 @@
+import { createServer } from 'node:http';
+import { readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+};
+
+function notFound(response) {
+  response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+  response.end('Not found');
+}
+
+export async function createStaticServer({ root = process.cwd(), port = 4173 } = {}) {
+  const resolvedRoot = path.resolve(root);
+  const rootPrefix = `${resolvedRoot}${path.sep}`;
+
+  const server = createServer(async (request, response) => {
+    let pathname;
+    try {
+      pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
+    } catch {
+      notFound(response);
+      return;
+    }
+
+    const relativePath = pathname === '/'
+      ? (await exists(path.join(resolvedRoot, 'demo', 'index.html')) ? 'demo/index.html' : 'index.html')
+      : pathname.replace(/^\/+/, '');
+    const filePath = path.resolve(resolvedRoot, relativePath);
+
+    if (filePath !== resolvedRoot && !filePath.startsWith(rootPrefix)) {
+      notFound(response);
+      return;
+    }
+
+    try {
+      const fileStat = await stat(filePath);
+      if (!fileStat.isFile()) {
+        notFound(response);
+        return;
+      }
+      const type = MIME_TYPES[path.extname(filePath)] ?? 'application/octet-stream';
+      response.writeHead(200, { 'content-type': type });
+      response.end(await readFile(filePath));
+    } catch {
+      notFound(response);
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  return { server, url: `http://127.0.0.1:${address.port}` };
+}
+
+const isDirectExecution = typeof process.argv[1] === 'string'
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isDirectExecution) {
+  const { server, url } = await createStaticServer();
+  console.log(url);
+  process.once('SIGTERM', () => server.close(() => process.exit(0)));
+}
+
+async function exists(filePath) {
+  try {
+    return (await stat(filePath)).isFile();
+  } catch {
+    return false;
+  }
+}
