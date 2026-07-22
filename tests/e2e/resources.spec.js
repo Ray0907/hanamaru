@@ -640,6 +640,60 @@ test('coalesces mutation bursts, runs every read before writes, and isolates cal
   ]);
 });
 
+test('does not write stale work after a controller ID is released and registered again', async ({ page }) => {
+  await installInstrumentation(page);
+
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { resolveTarget } = await import('/src/target.js');
+    const lease = acquireDocumentResources(document);
+    const { shared } = lease;
+    const state = window.__resources;
+    const record = resolveTarget('#selector-target');
+    const events = [];
+
+    const firstGeneration = shared.registerController('same');
+    shared.observeLayout({
+      id: 'same',
+      generation: firstGeneration,
+      record,
+      read() {
+        events.push('old-read');
+        shared.releaseController('same');
+        const nextGeneration = shared.registerController('same');
+        events.push(`new-generation:${nextGeneration}`);
+        shared.observeLayout({
+          id: 'same',
+          generation: nextGeneration,
+          record,
+          read() { events.push('new-read'); return 'new-value'; },
+          write(value) { events.push(`new-write:${value}`); },
+        });
+        return 'old-value';
+      },
+      write(value) { events.push(`old-write:${value}`); },
+    });
+
+    state.mutationObservers[0].deliver([{ target: record.element }]);
+    state.runFrame();
+    const afterReplacement = events.splice(0);
+    state.resizeObservers[0].deliver([record.element]);
+    state.runFrame();
+    const afterNewSignal = events.splice(0);
+    const publicGeneration = shared.generationFor('same');
+    shared.releaseController('same');
+    lease.release();
+    return { afterNewSignal, afterReplacement, firstGeneration, publicGeneration };
+  });
+
+  expect(result).toEqual({
+    afterNewSignal: ['new-read', 'new-write:new-value'],
+    afterReplacement: ['old-read', 'new-generation:0'],
+    firstGeneration: 0,
+    publicGeneration: 0,
+  });
+});
+
 test('falls back to shared window resize without ResizeObserver and reports unavailable intersection once', async ({ page }) => {
   await installInstrumentation(page, { resize: false, intersection: false });
 

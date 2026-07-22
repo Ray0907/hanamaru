@@ -202,7 +202,7 @@ class SharedDocumentResources {
 
   #frameQueue;
 
-  #generations = new Map();
+  #controllers = new Map();
 
   #intersections = new Map();
 
@@ -237,7 +237,7 @@ class SharedDocumentResources {
     this.#frameQueue = new FrameQueue({
       requestFrame,
       cancelFrame,
-      generationFor: (id) => this.#generations.get(id),
+      generationFor: (id) => this.#controllers.get(id)?.token,
     });
 
     const ResizeObserverConstructor = this.#window.ResizeObserver;
@@ -300,25 +300,24 @@ class SharedDocumentResources {
     if (typeof id !== 'string' || id.length === 0) {
       throw new TypeError('controller id must be a non-empty string');
     }
-    if (this.#generations.has(id)) {
+    if (this.#controllers.has(id)) {
       throw new Error(`controller already registered: ${id}`);
     }
 
-    this.#generations.set(id, 0);
+    this.#controllers.set(id, { generation: 0, token: {} });
     return 0;
   }
 
   bumpGeneration(id) {
-    this.#requireController(id);
-    const generation = this.#generations.get(id) + 1;
-    this.#generations.set(id, generation);
+    const controller = this.#requireController(id);
+    controller.generation += 1;
+    controller.token = {};
     this.#frameQueue.cancel(id);
-    return generation;
+    return controller.generation;
   }
 
   generationFor(id) {
-    this.#requireController(id);
-    return this.#generations.get(id);
+    return this.#requireController(id).generation;
   }
 
   observeLayout(options) {
@@ -329,7 +328,7 @@ class SharedDocumentResources {
     if (this.#layouts.has(options.id)) {
       throw new Error(`controller already observes layout: ${options.id}`);
     }
-    return this.#bindLayout(options.id, options);
+    return this.#bindLayout(options.id, options, false);
   }
 
   rebindLayout(id, options) {
@@ -337,7 +336,7 @@ class SharedDocumentResources {
     if (options === null || typeof options !== 'object') {
       throw new TypeError('layout observation must be an object');
     }
-    return this.#bindLayout(id, { ...options, id });
+    return this.#bindLayout(id, { ...options, id }, true);
   }
 
   observeIntersection(options) {
@@ -377,11 +376,11 @@ class SharedDocumentResources {
       target,
     };
     registration.observer = new IntersectionObserverConstructor((entries) => {
-      if (!this.#alive || !registration.active || !this.#generations.has(id)) {
+      if (!this.#alive || !registration.active || !this.#controllers.has(id)) {
         return;
       }
       for (const entry of entries) {
-        if (!this.#alive || !registration.active || !this.#generations.has(id)) {
+        if (!this.#alive || !registration.active || !this.#controllers.has(id)) {
           return;
         }
         if (entry.target !== target) {
@@ -407,7 +406,7 @@ class SharedDocumentResources {
   }
 
   releaseController(id) {
-    if (!this.#generations.has(id)) {
+    if (!this.#controllers.has(id)) {
       return;
     }
 
@@ -416,7 +415,7 @@ class SharedDocumentResources {
       this.#removeIntersection(registration);
     }
     this.#frameQueue.cancel(id);
-    this.#generations.delete(id);
+    this.#controllers.delete(id);
   }
 
   #removeIntersection(registration) {
@@ -433,8 +432,8 @@ class SharedDocumentResources {
     }
   }
 
-  #bindLayout(id, options) {
-    this.#requireController(id);
+  #bindLayout(id, options, renewToken) {
+    const controller = this.#requireController(id);
     const {
       generation,
       record,
@@ -443,7 +442,7 @@ class SharedDocumentResources {
       write,
       onError,
     } = options;
-    if (generation !== this.#generations.get(id)) {
+    if (generation !== controller.generation) {
       throw new Error(`stale controller generation: ${id}`);
     }
     if (record === null || typeof record !== 'object') {
@@ -459,6 +458,7 @@ class SharedDocumentResources {
     }
 
     const prior = this.#layouts.get(id);
+    const token = renewToken ? {} : controller.token;
     const binding = {
       generation,
       id,
@@ -469,9 +469,13 @@ class SharedDocumentResources {
       record,
       resizeTargets: this.#discoverResizeTargets(record, note),
       scrollTargets: this.#discoverScrollTargets(record),
-      token: {},
+      token,
       write,
     };
+    if (renewToken) {
+      controller.token = token;
+      this.#frameQueue.cancel(id);
+    }
     this.#layouts.set(id, binding);
     this.#diffScrollTargets(id, prior?.scrollTargets ?? new Set(), binding.scrollTargets);
     this.#diffResizeTargets(id, prior?.resizeTargets ?? new Set(), binding.resizeTargets);
@@ -615,12 +619,16 @@ class SharedDocumentResources {
       return;
     }
     const binding = this.#layouts.get(id);
-    if (binding === undefined || this.#generations.get(id) !== binding.generation) {
+    const controller = this.#controllers.get(id);
+    if (binding === undefined
+      || controller === undefined
+      || controller.generation !== binding.generation
+      || controller.token !== binding.token) {
       return;
     }
     this.#frameQueue.enqueue({
       key: id,
-      generation: binding.generation,
+      generation: binding.token,
       read: binding.read,
       write: binding.write,
       onError: binding.onError,
@@ -642,9 +650,11 @@ class SharedDocumentResources {
 
   #requireController(id) {
     this.#requireAlive();
-    if (!this.#generations.has(id)) {
+    const controller = this.#controllers.get(id);
+    if (controller === undefined) {
       throw new Error(`controller is not registered: ${String(id)}`);
     }
+    return controller;
   }
 
   static destroy(shared) {
@@ -665,7 +675,7 @@ class SharedDocumentResources {
         this.#removeIntersection(registration);
       }
     }
-    this.#generations.clear();
+    this.#controllers.clear();
     this.#intersections.clear();
     this.#resizeTargets.clear();
     this.#scrollTargets.clear();
