@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { copyFile, mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -30,10 +30,12 @@ export async function buildDistribution(root = process.cwd()) {
       minify: true,
       target: 'es2020',
     }),
-    copyFile(
-      path.join(sourceDirectory, 'hanamaru.css'),
-      path.join(distributionDirectory, 'hanamaru.css'),
-    ),
+    build({
+      entryPoints: [path.join(sourceDirectory, 'hanamaru.css')],
+      outfile: path.join(distributionDirectory, 'hanamaru.css'),
+      bundle: true,
+      minify: true,
+    }),
   ]);
 }
 

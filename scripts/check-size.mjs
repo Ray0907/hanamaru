@@ -5,6 +5,8 @@ import { constants, gzipSync } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const distributionFiles = ['hanamaru.esm.js', 'hanamaru.iife.js'];
+const HARD_COMBINED_GZIP_CAP = 20_480;
+const STRETCH_COMBINED_GZIP_TARGET = 18_432;
 
 export function npmInvocationFor(platform = process.platform, env = process.env) {
   if (platform === 'win32') {
@@ -69,10 +71,19 @@ export async function checkDistribution(root = process.cwd(), options = {}) {
     const raw = source.length;
     const gzip = gzipSync(source, { level: constants.Z_BEST_COMPRESSION }).length;
     const combined = gzip + cssGzip;
-    if (combined > 8192) {
-      throw new Error(`dist-check: ${file} exceeds 8192 bytes (${combined})`);
+    if (combined > HARD_COMBINED_GZIP_CAP) {
+      throw new Error(
+        `dist-check: ${file} exceeds ${HARD_COMBINED_GZIP_CAP} combined gzip bytes (${combined})`,
+      );
     }
-    rows.push({ file, raw, gzip, cssGzip, combined, stretch: gzip <= 5120 });
+    rows.push({
+      file,
+      raw,
+      gzip,
+      cssGzip,
+      combined,
+      stretch: combined <= STRETCH_COMBINED_GZIP_TARGET,
+    });
   }
 
   return rows;

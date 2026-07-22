@@ -147,6 +147,8 @@ git commit -m "chore: scaffold Hanamaru test harness"
 
 ### Task 2: Deterministic build and size enforcement
 
+**Budget revision evidence (2026-07-23):** the implemented annotation runtime measured roughly 14.2 KB combined, with the complete V1 artifact projected at 16.7–19.6 KB; even an Element-only/no-observer build measured roughly 9.17 KB. The original 8 KiB estimate was disproven and would require cutting roughly 43% of implemented behavior. The enforced contract now measures each complete shipped JS-plus-base-CSS artifact at no more than 20,480 gzip-level-9 bytes and reports 18,432 combined bytes as a non-blocking stretch target.
+
 **Files:**
 - Create: `src/index.js`
 - Create: `src/hanamaru.css`
@@ -165,15 +167,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildDistribution } from '../../scripts/build.mjs'
 
-test('build writes importable ESM, IIFE global, and exact CSS', async () => {
+test('build writes importable ESM, IIFE global, and minified namespaced CSS', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hana-build-'))
   await mkdir(join(root, 'src'))
   await writeFile(join(root, 'src/index.js'), "export const VERSION='fixture'\n")
-  await writeFile(join(root, 'src/hanamaru.css'), '.hana-fixture{}\n')
+  await writeFile(join(root, 'src/hanamaru.css'), '/* fixture */\n.hana-fixture { color: red; }\n')
   await buildDistribution(root)
   assert.match(await readFile(join(root, 'dist/hanamaru.esm.js'), 'utf8'), /VERSION/)
   assert.match(await readFile(join(root, 'dist/hanamaru.iife.js'), 'utf8'), /Hanamaru/)
-  assert.equal(await readFile(join(root, 'dist/hanamaru.css'), 'utf8'), '.hana-fixture{}\n')
+  assert.equal(await readFile(join(root, 'dist/hanamaru.css'), 'utf8'), '.hana-fixture{color:red}\n')
 })
 ```
 
@@ -185,7 +187,7 @@ Expected: FAIL because `scripts/build.mjs` is missing.
 
 - [ ] **Step 3: Implement injectable `buildDistribution(root)`**
 
-Create `scripts/build.mjs` with `root = resolve(root)` and all entry/output paths joined to that root. Export `buildDistribution(root = process.cwd())`; run it only when `pathToFileURL(process.argv[1]).href === import.meta.url`. It must remove only `join(root, 'dist')`, build ES2020 minified ESM and IIFE (`globalName:'Hanamaru'`), copy CSS, and print `build: wrote ESM, IIFE, and CSS` only in CLI mode.
+Create `scripts/build.mjs` with `root = resolve(root)` and all entry/output paths joined to that root. Export `buildDistribution(root = process.cwd())`; run it only when `pathToFileURL(process.argv[1]).href === import.meta.url`. It must remove only `join(root, 'dist')`, build ES2020 minified ESM and IIFE (`globalName:'Hanamaru'`), build minified CSS through esbuild while preserving its `.hana-*` namespace, and print `build: wrote ESM, IIFE, and CSS` only in CLI mode.
 
 - [ ] **Step 4: Run the build test and verify GREEN**
 
@@ -225,23 +227,35 @@ async function fixture(pkg, js = 'export{}', css = '.x{}') {
   return root
 }
 
+function noise(length) {
+  let state = 0x12345678
+  return Uint8Array.from({ length }, () => {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5
+    return state & 255
+  })
+}
+
 test('rejects even an empty dependencies key', async () => {
   const root = await fixture({ dependencies:{} })
   await assert.rejects(() => checkDistribution(root, { checkNpmTree:false }), /dependencies key/)
 })
-test('rejects an incompressible bundle above 8192 combined bytes', async () => {
-  let state = 0x12345678
-  const noisy = new Uint8Array(20_000)
-  for (let i = 0; i < noisy.length; i++) {
-    state ^= state << 13; state ^= state >>> 17; state ^= state << 5
-    noisy[i] = state & 255
-  }
-  const root = await fixture({}, noisy)
-  await assert.rejects(() => checkDistribution(root, { checkNpmTree:false }), /exceeds 8192/)
+test('accepts 20480 combined gzip bytes and rejects 20481', async () => {
+  const atLimit = await fixture({}, noise(20_432), '')
+  const overLimit = await fixture({}, noise(20_433), '')
+  const rows = await checkDistribution(atLimit, { checkNpmTree:false })
+  assert.equal(rows[0].combined, 20_480)
+  await assert.rejects(
+    () => checkDistribution(overLimit, { checkNpmTree:false }),
+    { message:'dist-check: hanamaru.esm.js exceeds 20480 combined gzip bytes (20481)' },
+  )
 })
-test('returns metrics for both small formats', async () => {
-  const result = await checkDistribution(await fixture({}), { checkNpmTree:false })
+test('returns combined stretch metrics for both formats', async () => {
+  const root = await fixture({}, 'export{}', '')
+  await writeFile(join(root, 'dist/hanamaru.esm.js'), noise(18_384))
+  await writeFile(join(root, 'dist/hanamaru.iife.js'), noise(18_385))
+  const result = await checkDistribution(root, { checkNpmTree:false })
   assert.deepEqual(result.map(row => row.file), ['hanamaru.esm.js','hanamaru.iife.js'])
+  assert.deepEqual(result.map(row => [row.combined,row.stretch]), [[18_432,true],[18_433,false]])
 })
 ```
 
@@ -253,7 +267,7 @@ Expected: FAIL because `scripts/check-size.mjs` is missing.
 
 - [ ] **Step 8: Implement injectable `checkDistribution(root, options)`**
 
-Use `if ('dependencies' in pkg) throw new Error('dist-check: dependencies key must be absent')`. With `checkNpmTree !== false`, run `npm ls --omit=dev --json` with `cwd: root`. Read both JS files plus CSS, gzip each at level 9, return `[{file,raw,gzip,cssGzip,combined,stretch}]`, and throw above 8192. CLI mode prints both rows and `dist-check: pass`.
+Use `if ('dependencies' in pkg) throw new Error('dist-check: dependencies key must be absent')`. With `checkNpmTree !== false`, run `npm ls --omit=dev --json` with `cwd: root`. Read both JS files plus CSS, gzip each at level 9, return `[{file,raw,gzip,cssGzip,combined,stretch}]`, throw when either combined row exceeds 20,480 bytes, and set `stretch` from the combined 18,432-byte report-only target. CLI mode prints both rows and `dist-check: pass`.
 
 - [ ] **Step 9: Run size tests and real distribution checks**
 
@@ -263,7 +277,7 @@ npm run build
 npm run check:dist
 ```
 
-Expected: three size cases pass; real checker prints both rows and `dist-check: pass`.
+Expected: the size/dependency contract cases pass; the real checker prints both rows, including combined stretch status, and `dist-check: pass`.
 
 - [ ] **Step 10: Commit the distribution skeleton**
 

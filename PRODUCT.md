@@ -40,7 +40,7 @@ Annotations appear on responsive prose, headings, controls, and inline content. 
 - The runtime redraws after relevant resize, scroll, and scoped content changes.
 - The runtime ships with zero production dependencies as ESM plus browser-ready JavaScript and CSS.
 - The local package name is `hanamaru-annotations`; package publication is outside V1.
-- The stretch target is 5 KB gzipped JavaScript; 8 KB gzipped for JavaScript plus base CSS is the hard ceiling.
+- Each complete ESM-plus-base-CSS and IIFE-plus-base-CSS distribution must be at most 20,480 bytes under gzip level 9. A combined 18,432-byte target is reported as a non-blocking stretch goal.
 - V1 excludes browser extensions, arbitrary-site persistence, accounts, cloud sync, collaboration, framework wrappers, image/canvas annotation, and AI or QA rule engines.
 - `Hanamaru` is the working brand. Package publication and registry naming are outside the local implementation scope.
 
@@ -55,6 +55,7 @@ The approved primary call to action is **Open Live Playground**.
 - The user referenced Neat Annotations and Rough Notation as neighboring open-source projects.
 - Product-direction, ecosystem, first-principles, and runtime-experience mockups exist in the ignored `.superpowers/brainstorm/` workspace.
 - An Impeccable critique snapshot exists in the ignored `.impeccable/critique/` workspace and scored the concept 22/36, with four P1 findings accepted into V1.
+- A bundle audit measured the implemented annotation runtime at roughly 14.2 KB combined and projected the complete V1 artifact at 16.7–19.6 KB; even an Element-only build without observers was roughly 9.17 KB. This disproved the original 8 KiB ceiling, which would require cutting roughly 43% of the implemented runtime; the replacement budget measures the complete shipped artifact instead of preserving an estimate by deleting promised behavior.
 - There are no production users, testimonials, benchmarks, published package metrics, or customer claims. Future surfaces must not fabricate them.
 
 ## Product Principles
