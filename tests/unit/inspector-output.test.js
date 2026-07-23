@@ -619,6 +619,82 @@ test('shared plain containers are reflected once before the writer uses only the
   });
 });
 
+test('unsafe own object keys are rejected before pre-proof output can be emitted', () => {
+  for (const name of ['__proto__', 'prototype', 'constructor']) {
+    const nested = {};
+    Object.defineProperty(nested, name, {
+      configurable: true,
+      enumerable: true,
+      value: { polluted: true },
+      writable: true,
+    });
+    const originalPrototype = Object.getPrototypeOf(nested);
+
+    assert.throws(
+      () => createRangeOutput({ nested }),
+      TypeError,
+      name,
+    );
+    assert.equal(Object.getPrototypeOf(nested), originalPrototype, name);
+    assert.equal(Object.hasOwn(Object.prototype, 'polluted'), false, name);
+  }
+});
+
+test('proof rejects an unsafe key before reading its value and preserves exact prior output', () => {
+  const node = { id: 'unsafe-key-boundary' };
+  const boundary = {
+    startContainer: node,
+    startOffset: 0,
+    endContainer: node,
+    endOffset: 5,
+  };
+
+  for (const name of ['__proto__', 'prototype', 'constructor']) {
+    let valueReads = 0;
+    const unreadValue = new Proxy(
+      { polluted: true },
+      {
+        getPrototypeOf(target) {
+          valueReads += 1;
+          return Reflect.getPrototypeOf(target);
+        },
+      },
+    );
+    const definition = canonicalDefinition();
+    Object.defineProperty(definition.options, name, {
+      configurable: true,
+      enumerable: true,
+      value: unreadValue,
+      writable: true,
+    });
+    const previousOutput = createRangeOutput({ seed: name });
+
+    const output = proveRangeLocator({
+      range: { cloneRange: () => ({ ...boundary }) },
+      selectedText: 'exact',
+      controller: { update() {} },
+      previousOutput,
+      resolveSerializedTarget: () => ({ ...boundary }),
+      serialize: () => definition,
+    });
+
+    assert.equal(output, previousOutput, name);
+    assert.equal(valueReads, 0, name);
+    assert.equal(Object.hasOwn(Object.prototype, 'polluted'), false, name);
+  }
+});
+
+test('unsafe-key words remain opaque and valid inside string values', () => {
+  const value = '__proto__ prototype constructor';
+  const output = createRangeOutput({
+    mark: 'underline',
+    note: value,
+  });
+
+  assert.equal(output.javascript.available, true);
+  assert.ok(output.javascript.code.includes(`"note": "${value}"`));
+});
+
 test('invalid serialized JSON data fails closed after exact locator proof', () => {
   const node = { id: 'invalid-json-boundary' };
   const boundary = {

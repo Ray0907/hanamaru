@@ -10,6 +10,7 @@ const ESCAPED_CODE_POINTS = Object.freeze({
   '\u2028': '\\u2028',
   '\u2029': '\\u2029',
 });
+const UNSAFE_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
 function invalidJson() {
   throw new TypeError('Inspector output must contain exact JSON-compatible data');
@@ -52,7 +53,11 @@ function snapshotJsonObject(value, context) {
   if (prototype !== Object.prototype && prototype !== null) invalidJson();
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const names = Reflect.ownKeys(descriptors);
-  if (names.some((name) => typeof name !== 'string' || name === 'toJSON')) {
+  if (names.some((name) => (
+    typeof name !== 'string'
+    || name === 'toJSON'
+    || UNSAFE_JSON_KEYS.has(name)
+  ))) {
     invalidJson();
   }
 
