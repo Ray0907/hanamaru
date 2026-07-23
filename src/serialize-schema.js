@@ -64,23 +64,31 @@ function denseArray(input, field, seen) {
   }
   if (seen.has(input)) invalid(field, input);
   seen.add(input);
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
+  if (lengthDescriptor === undefined
+    || !Object.hasOwn(lengthDescriptor, 'value')
+    || !Number.isSafeInteger(lengthDescriptor.value)
+    || lengthDescriptor.value < 0) {
+    invalid(`${field}.length`, input);
+  }
+  const length = lengthDescriptor.value;
   const names = Reflect.ownKeys(input);
-  const expected = Array.from({ length: input.length }, (_, index) => String(index));
+  const expected = Array.from({ length }, (_, index) => String(index));
   if (names.some((key) => typeof key !== 'string')
     || names.length !== expected.length + 1
     || names[names.length - 1] !== 'length'
     || expected.some((key) => !names.includes(key))) {
     invalid(field, input);
   }
-  const descriptors = Object.getOwnPropertyDescriptors(input);
   const output = [];
-  for (let index = 0; index < input.length; index += 1) {
-    const descriptor = descriptors[String(index)];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
     if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) {
       invalid(`${field}[${index}]`, input);
     }
     output.push(descriptor.value);
   }
+  seen.delete(input);
   return output;
 }
 
@@ -129,6 +137,7 @@ function annotationOptions(input, field, seen) {
     motion: oneOf(d.motion.value, `${field}.motion`, MOTIONS),
   };
   if (typeof output.accessible !== 'boolean') invalid(`${field}.accessible`, output.accessible);
+  seen.delete(input);
   return output;
 }
 
@@ -145,6 +154,7 @@ function memberOptions(input, field, seen) {
     duration: integer(d.duration.value, `${field}.duration`),
   };
   if (typeof output.accessible !== 'boolean') invalid(`${field}.accessible`, output.accessible);
+  seen.delete(input);
   return output;
 }
 
@@ -185,12 +195,19 @@ export function validateSerializedTarget(input, field = 'target', state = undefi
   );
   const type = base.type.value;
   if (type === 'selector') {
-    const d = ordinary(input, field, ['type', 'selector'], new WeakSet());
-    return selectorTarget(d, field);
+    if (Reflect.ownKeys(input).length !== 2
+      || !Object.hasOwn(base, 'selector')) invalid(field, input);
+    const output = selectorTarget(base, field);
+    seen.delete(input);
+    return output;
   }
   if (type === 'key') {
-    const d = ordinary(input, field, ['type', 'key', 'targetKind'], new WeakSet());
-    return keyTarget(d, field);
+    if (Reflect.ownKeys(input).length !== 3
+      || !Object.hasOwn(base, 'key')
+      || !Object.hasOwn(base, 'targetKind')) invalid(field, input);
+    const output = keyTarget(base, field);
+    seen.delete(input);
+    return output;
   }
   if (type !== 'locator') invalid(`${field}.type`, type);
 
@@ -210,6 +227,7 @@ export function validateSerializedTarget(input, field = 'target', state = undefi
   if (d.occurrence !== undefined) {
     output.occurrence = integer(d.occurrence.value, `${field}.occurrence`);
   }
+  seen.delete(input);
   return output;
 }
 
@@ -224,14 +242,18 @@ function validateTargetWithSeen(input, field, seen) {
   if (d.type.value === 'selector') {
     const names = Reflect.ownKeys(input);
     if (names.length !== 2 || !names.includes('selector')) invalid(field, input);
-    return selectorTarget(d, field);
+    const output = selectorTarget(d, field);
+    seen.delete(input);
+    return output;
   }
   if (d.type.value === 'key') {
     const names = Reflect.ownKeys(input);
     if (names.length !== 3 || !names.includes('key') || !names.includes('targetKind')) {
       invalid(field, input);
     }
-    return keyTarget(d, field);
+    const output = keyTarget(d, field);
+    seen.delete(input);
+    return output;
   }
   if (d.type.value !== 'locator') invalid(`${field}.type`, d.type.value);
   const names = Reflect.ownKeys(input);
@@ -251,15 +273,18 @@ function validateTargetWithSeen(input, field, seen) {
   if (d.occurrence !== undefined) {
     output.occurrence = integer(d.occurrence.value, `${field}.occurrence`);
   }
+  seen.delete(input);
   return output;
 }
 
 function aggregateMember(input, field, seen) {
   const d = ordinary(input, field, ['target', 'options'], seen);
-  return {
+  const output = {
     target: validateTargetWithSeen(d.target.value, `${field}.target`, seen),
     options: memberOptions(d.options.value, `${field}.options`, seen),
   };
+  seen.delete(input);
+  return output;
 }
 
 function storyOptions(input, field, seen) {
@@ -276,15 +301,18 @@ function storyOptions(input, field, seen) {
     if (typeof first.once.value !== 'boolean') invalid(`${field}.once`, first.once.value);
     output.once = first.once.value;
   }
+  seen.delete(input);
   return output;
 }
 
 function groupOptions(input, field, seen) {
   const d = ordinary(input, field, ['trigger', 'motion'], seen);
-  return {
+  const output = {
     trigger: oneOf(d.trigger.value, `${field}.trigger`, TRIGGERS),
     motion: oneOf(d.motion.value, `${field}.motion`, MOTIONS),
   };
+  seen.delete(input);
+  return output;
 }
 
 export function validateDefinition(input) {
@@ -304,12 +332,14 @@ export function validateDefinition(input) {
     if (names.length !== 4 || !names.includes('target') || !names.includes('options')) {
       invalid('definition', input);
     }
-    return {
+    const output = {
       schema: SCHEMA,
       kind: 'annotation',
       target: validateTargetWithSeen(base.target.value, 'definition.target', seen),
       options: annotationOptions(base.options.value, 'definition.options', seen),
     };
+    seen.delete(input);
+    return output;
   }
 
   if (kind === 'story') {
@@ -319,7 +349,7 @@ export function validateDefinition(input) {
     }
     const steps = denseArray(base.steps.value, 'definition.steps', seen);
     if (steps.length === 0) invalid('definition.steps', steps);
-    return {
+    const output = {
       schema: SCHEMA,
       kind: 'story',
       options: storyOptions(base.options.value, 'definition.options', seen),
@@ -327,6 +357,8 @@ export function validateDefinition(input) {
         aggregateMember(step, `definition.steps[${index}]`, seen)
       )),
     };
+    seen.delete(input);
+    return output;
   }
 
   if (kind === 'group') {
@@ -336,7 +368,7 @@ export function validateDefinition(input) {
     }
     const members = denseArray(base.members.value, 'definition.members', seen);
     if (members.length === 0) invalid('definition.members', members);
-    return {
+    const output = {
       schema: SCHEMA,
       kind: 'group',
       options: groupOptions(base.options.value, 'definition.options', seen),
@@ -344,6 +376,8 @@ export function validateDefinition(input) {
         aggregateMember(member, `definition.members[${index}]`, seen)
       )),
     };
+    seen.delete(input);
+    return output;
   }
 
   invalid('definition.kind', kind);

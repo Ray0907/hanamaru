@@ -18,6 +18,7 @@ import {
 import {
   deleteControllerMetadata,
   recordAnnotationMetadata,
+  snapshotAnnotationTarget,
 } from './controller-metadata.js';
 import { runtimeState } from './runtime-state.js';
 import { acquireDocumentResources } from './scheduler.js';
@@ -415,6 +416,7 @@ export function createAnnotation(target, rawOptions, env) {
   if (!MARKS.has(options.mark) && markPlugin === undefined) invalid('mark', options.mark);
   let currentTarget = target;
   let record = env.resolveTarget(target);
+  let currentMetadataTarget = snapshotAnnotationTarget(target);
   const lease = env.lease;
   const { shared } = lease;
   let generation;
@@ -1024,7 +1026,8 @@ export function createAnnotation(target, rawOptions, env) {
   function update(patch) {
     if (destroyed) return controller;
     const next = patch ?? {};
-    const nextTarget = Object.prototype.hasOwnProperty.call(next, 'target') ? next.target : currentTarget;
+    const replacesTarget = Object.prototype.hasOwnProperty.call(next, 'target');
+    const nextTarget = replacesTarget ? next.target : currentTarget;
     const optionPatch = { ...next };
     delete optionPatch.target;
     const nextOptions = normalizeOptions(
@@ -1041,6 +1044,9 @@ export function createAnnotation(target, rawOptions, env) {
       invalid('mark', nextOptions.mark);
     }
     const nextRecord = env.resolveTarget(nextTarget);
+    const nextMetadataTarget = replacesTarget
+      ? snapshotAnnotationTarget(nextTarget)
+      : currentMetadataTarget;
     let nextMarkPathsSnapshot = null;
     if (nextMarkPlugin !== null) {
       const geometry = snapshotRectGeometry(env.targetRects(nextRecord));
@@ -1063,11 +1069,13 @@ export function createAnnotation(target, rawOptions, env) {
     }
     const oldRenderer = renderer;
     const oldTarget = currentTarget;
+    const oldMetadataTarget = currentMetadataTarget;
     const oldOptions = options;
     const oldMarkPlugin = markPlugin;
     const oldRecord = record;
     const priorState = state;
     currentTarget = nextTarget;
+    currentMetadataTarget = nextMetadataTarget;
     options = nextOptions;
     markPlugin = nextMarkPlugin;
     record = nextRecord;
@@ -1085,6 +1093,7 @@ export function createAnnotation(target, rawOptions, env) {
       cleanupUncommittedRenderer(nextRenderer);
       renderer = oldRenderer;
       currentTarget = oldTarget;
+      currentMetadataTarget = oldMetadataTarget;
       options = oldOptions;
       markPlugin = oldMarkPlugin;
       record = oldRecord;
@@ -1099,7 +1108,7 @@ export function createAnnotation(target, rawOptions, env) {
       return controller;
     }
     try {
-      recordAnnotationMetadata(controller, currentTarget, options);
+      recordAnnotationMetadata(controller, currentMetadataTarget, options);
     } catch (error) {
       destroy();
       discardUncommittedRendererMount(nextRenderer);
@@ -1197,7 +1206,7 @@ export function createAnnotation(target, rawOptions, env) {
     }
     const metadataOperation = operationEpoch;
     const metadataRenderer = renderer;
-    recordAnnotationMetadata(controller, currentTarget, options);
+    recordAnnotationMetadata(controller, currentMetadataTarget, options);
     if (destroyed) {
       deleteControllerMetadata(controller);
       discardUncommittedRendererMount(renderer);

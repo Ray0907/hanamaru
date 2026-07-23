@@ -95,21 +95,35 @@ function resolverContext(targetKind, role, controllerKind, index) {
 }
 
 function resolveKey(target, root, resolveTargetCallback, context) {
+  const protectedContext = resolverContext(
+    context.targetKind,
+    context.role,
+    context.controllerKind,
+    context.index,
+  );
   if (typeof resolveTargetCallback !== 'function') {
     throw new HanamaruConfigError(
       'HANA_CONFIG_SERIALIZE_TARGET',
       'resolveTarget is required for serialized keys',
-      { key: target.key, context },
+      { key: target.key, context: protectedContext },
     );
   }
   let resolved;
   try {
-    resolved = resolveTargetCallback(target.key, context);
+    resolved = resolveTargetCallback(
+      target.key,
+      resolverContext(
+        protectedContext.targetKind,
+        protectedContext.role,
+        protectedContext.controllerKind,
+        protectedContext.index,
+      ),
+    );
   } catch (cause) {
     throw new HanamaruTargetError(
       'HANA_TARGET_RESOLVER',
       `Serialized target resolver failed for key: ${target.key}`,
-      { key: target.key, context, cause },
+      { key: target.key, context: protectedContext, cause },
     );
   }
   return target.targetKind === 'element'

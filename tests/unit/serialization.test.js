@@ -12,6 +12,7 @@ import { createGroup } from '../../src/group.js';
 import { registerMark } from '../../src/plugins.js';
 import { runtimeState } from '../../src/runtime-state.js';
 import { restore, resolveSerializedTarget, serialize } from '../../src/serialize.js';
+import { validateDefinition } from '../../src/serialize-schema.js';
 import { createStory } from '../../src/story.js';
 
 function annotationEnvironment({ id = 'generated-seed' } = {}) {
@@ -576,6 +577,51 @@ test('serialize contains keyForTarget failures with the stable config code and o
   controller.destroy();
 });
 
+test('serialize protects error details from keyForTarget context mutation', () => {
+  const realm = minimalNativeRealm();
+  const environment = annotationEnvironment();
+  const controller = createAnnotation(realm.element, { mark: 'underline' }, environment.env);
+  let delivered;
+
+  assert.throws(
+    () => serialize(controller, {
+      keyForTarget(target, context) {
+        delivered = { target, keys: Object.keys(context), initial: { ...context } };
+        context.role = 'corrupted';
+        context.index = 99;
+        context.extra = true;
+        return '';
+      },
+    }),
+    (error) => {
+      assert.ok(error instanceof HanamaruConfigError);
+      assert.equal(error.code, 'HANA_CONFIG_SERIALIZE_TARGET');
+      assert.deepEqual(Object.keys(error.details), [
+        'role', 'controllerKind', 'ownerElement', 'index',
+      ]);
+      assert.deepEqual(error.details, {
+        role: 'target',
+        controllerKind: 'annotation',
+        ownerElement: realm.element,
+        index: null,
+      });
+      return true;
+    },
+  );
+  assert.equal(delivered.target, realm.element);
+  assert.deepEqual(delivered.keys, [
+    'role', 'controllerKind', 'ownerElement', 'index',
+  ]);
+  assert.deepEqual(delivered.initial, {
+    role: 'target',
+    controllerKind: 'annotation',
+    ownerElement: realm.element,
+    index: null,
+  });
+
+  controller.destroy();
+});
+
 test('late malformed private aggregate metadata prevents every key callback', () => {
   const realm = minimalNativeRealm();
   const controller = {};
@@ -648,6 +694,60 @@ test('hostile serialized graphs reject accessors, symbols, cycles, sparse arrays
     );
   }
   assert.equal(getterCalls, 0);
+});
+
+test('serialized validation accepts benign shared aliases but still rejects active-path cycles', () => {
+  const sharedTarget = { type: 'selector', selector: '#target' };
+  const sharedOptions = serializedMember(sharedTarget).options;
+  const sharedMember = { target: sharedTarget, options: sharedOptions };
+  const aliased = {
+    schema: 'hanamaru/v1',
+    kind: 'story',
+    options: { trigger: 'manual', gap: 180, motion: 'system' },
+    steps: [sharedMember, sharedMember],
+  };
+
+  const canonical = validateDefinition(aliased);
+  assert.deepEqual(canonical.steps[0], canonical.steps[1]);
+  assert.notEqual(canonical.steps[0], canonical.steps[1]);
+  assert.notEqual(canonical.steps[0].target, canonical.steps[1].target);
+  assert.notEqual(canonical.steps[0].options, canonical.steps[1].options);
+
+  const cyclicTarget = { type: 'locator', text: 'text' };
+  cyclicTarget.within = cyclicTarget;
+  assert.throws(
+    () => restore(serializedAnnotation(cyclicTarget), { root: null }),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZED_DEFINITION',
+  );
+});
+
+test('serialized array validation uses its own length descriptor without reading length', () => {
+  let lengthReads = 0;
+  const steps = new Proxy([
+    serializedMember({ type: 'selector', selector: '#target' }),
+  ], {
+    get(target, key, receiver) {
+      if (key === 'length') {
+        lengthReads += 1;
+        throw new Error('length getter must not run');
+      }
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const definition = {
+    schema: 'hanamaru/v1',
+    kind: 'story',
+    options: { trigger: 'manual', gap: 180, motion: 'system' },
+    steps,
+  };
+
+  assert.throws(
+    () => restore(definition, { root: null }),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET',
+  );
+  assert.equal(lengthReads, 0);
 });
 
 test('late invalid locator text is rejected before a within-key resolver callback', () => {
@@ -758,6 +858,54 @@ test('resolveSerializedTarget preserves resolver causes and rejects ShadowRoot s
     (error) => error instanceof HanamaruTargetError
       && error.code === 'HANA_TARGET_SHADOW_UNSCOPED',
   );
+});
+
+test('resolver errors preserve an exact protected context after callback mutation', () => {
+  const realm = minimalNativeRealm();
+  const cause = new Error('mutated resolver failed');
+  let delivered;
+
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'key',
+      key: 'hero',
+      targetKind: 'element',
+    }, {
+      root: realm.document,
+      resolveTarget(key, context) {
+        delivered = { key, keys: Object.keys(context), initial: { ...context } };
+        context.targetKind = 'range';
+        context.role = 'corrupted';
+        context.extra = true;
+        throw cause;
+      },
+    }),
+    (error) => {
+      assert.ok(error instanceof HanamaruTargetError);
+      assert.equal(error.code, 'HANA_TARGET_RESOLVER');
+      assert.deepEqual(Object.keys(error.details.context), [
+        'targetKind', 'role', 'controllerKind', 'index',
+      ]);
+      assert.deepEqual(error.details.context, {
+        targetKind: 'element',
+        role: 'target',
+        controllerKind: null,
+        index: null,
+      });
+      assert.equal(error.details.cause, cause);
+      return true;
+    },
+  );
+  assert.deepEqual(delivered, {
+    key: 'hero',
+    keys: ['targetKind', 'role', 'controllerKind', 'index'],
+    initial: {
+      targetKind: 'element',
+      role: 'target',
+      controllerKind: null,
+      index: null,
+    },
+  });
 });
 
 test('restore rejects an unregistered mark before resolving any target', () => {
@@ -908,7 +1056,7 @@ test('annotation records its accepted target and canonical normalized options pr
   controller.destroy();
 });
 
-test('annotation retains selector, locator, and opaque node-like sources without freezing them', () => {
+test('annotation preserves native identities while snapshotting locators without freezing sources', () => {
   class MockElement {}
   class MockRange {}
   const sources = [
@@ -923,10 +1071,55 @@ test('annotation retains selector, locator, and opaque node-like sources without
     const controller = createAnnotation(source, { mark: 'box' }, environment.env);
     const metadata = readControllerMetadata(controller);
 
-    assert.equal(metadata.target, source);
+    if (source !== null && typeof source === 'object' && Object.hasOwn(source, 'within')) {
+      assert.notEqual(metadata.target, source);
+      assert.deepEqual(metadata.target, source);
+      assert.equal(Object.isFrozen(metadata.target), true);
+    } else {
+      assert.equal(metadata.target, source);
+    }
     if (typeof source === 'object') assert.equal(Object.isFrozen(source), false);
     controller.destroy();
   }
+});
+
+test('annotation metadata snapshots accepted locator bytes without changing runtime source identity', () => {
+  const source = {
+    within: '#original-scope',
+    text: 'Original text',
+    occurrence: 1,
+  };
+  const environment = annotationEnvironment();
+  let resolvedSource;
+  const originalResolve = environment.env.resolveTarget;
+  environment.env.resolveTarget = (target) => {
+    resolvedSource = target;
+    return originalResolve(target);
+  };
+  const controller = createAnnotation(source, { mark: 'underline' }, environment.env);
+  const metadata = readControllerMetadata(controller);
+
+  assert.equal(resolvedSource, source);
+  assert.notEqual(metadata.target, source);
+  assert.equal(Object.isFrozen(metadata.target), true);
+  assert.deepEqual(metadata.target, {
+    within: '#original-scope',
+    text: 'Original text',
+    occurrence: 1,
+  });
+
+  source.within = '#mutated-scope';
+  source.text = 'Mutated text';
+  source.occurrence = 9;
+  controller.update({ note: 'Updated without replacing target' });
+  assert.deepEqual(serialize(controller).target, {
+    type: 'locator',
+    within: { type: 'selector', selector: '#original-scope' },
+    text: 'Original text',
+    occurrence: 1,
+  });
+
+  controller.destroy();
 });
 
 test('successful updates atomically replace canonical metadata and preserve generated seed', () => {

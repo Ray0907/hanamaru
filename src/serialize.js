@@ -353,25 +353,36 @@ function assignKey(target, keyForTarget) {
   const pending = target.pending;
   if (pending === null) return;
   const destination = pending.wire ?? target.wire;
+  const protectedContext = {
+    role: pending.context.role,
+    controllerKind: pending.context.controllerKind,
+    ownerElement: pending.context.ownerElement,
+    index: pending.context.index,
+  };
   if (typeof keyForTarget !== 'function') {
     throw new HanamaruConfigError(
       'HANA_CONFIG_SERIALIZE_TARGET',
       'keyForTarget is required for native targets',
-      pending.context,
+      protectedContext,
     );
   }
   let key;
   try {
-    key = keyForTarget(pending.original, pending.context);
+    key = keyForTarget(pending.original, {
+      role: protectedContext.role,
+      controllerKind: protectedContext.controllerKind,
+      ownerElement: protectedContext.ownerElement,
+      index: protectedContext.index,
+    });
   } catch (cause) {
     throw new HanamaruConfigError(
       'HANA_CONFIG_SERIALIZE_TARGET',
       'keyForTarget failed',
       {
-        role: pending.context.role,
-        controllerKind: pending.context.controllerKind,
-        ownerElement: pending.context.ownerElement,
-        index: pending.context.index,
+        role: protectedContext.role,
+        controllerKind: protectedContext.controllerKind,
+        ownerElement: protectedContext.ownerElement,
+        index: protectedContext.index,
         cause,
       },
     );
@@ -380,7 +391,7 @@ function assignKey(target, keyForTarget) {
     throw new HanamaruConfigError(
       'HANA_CONFIG_SERIALIZE_TARGET',
       'keyForTarget must return a non-empty string',
-      pending.context,
+      protectedContext,
     );
   }
   destination.key = key;

@@ -24,6 +24,36 @@ function annotationOptions(options) {
   });
 }
 
+export function snapshotAnnotationTarget(target) {
+  if (target === null || typeof target !== 'object' || Array.isArray(target)) return target;
+  const ElementConstructor = target.ownerDocument?.defaultView?.Element;
+  if (typeof ElementConstructor === 'function' && target instanceof ElementConstructor) {
+    return target;
+  }
+  const boundary = target.startContainer;
+  const rangeDocument = boundary?.nodeType === 9 ? boundary : boundary?.ownerDocument;
+  const RangeConstructor = rangeDocument?.defaultView?.Range;
+  if (typeof RangeConstructor === 'function' && target instanceof RangeConstructor) {
+    return target;
+  }
+  const keys = Reflect.ownKeys(target);
+  if (keys.length < 2 || keys.length > 3
+    || keys.some((key) => typeof key !== 'string'
+      || !['within', 'text', 'occurrence'].includes(key))
+    || !keys.includes('within')
+    || !keys.includes('text')) return target;
+  const descriptors = Object.getOwnPropertyDescriptors(target);
+  if (keys.some((key) => !Object.hasOwn(descriptors[key], 'value'))) return target;
+  const snapshot = {
+    within: descriptors.within.value,
+    text: descriptors.text.value,
+  };
+  if (descriptors.occurrence !== undefined) {
+    snapshot.occurrence = descriptors.occurrence.value;
+  }
+  return Object.freeze(snapshot);
+}
+
 export function readControllerMetadata(controller) {
   if (!isWeakKey(controller)) return undefined;
   return runtimeState.metadata.get(controller);
@@ -33,7 +63,7 @@ export function recordAnnotationMetadata(controller, target, options) {
   assertController(controller);
   const metadata = Object.freeze({
     kind: 'annotation',
-    target,
+    target: snapshotAnnotationTarget(target),
     options: annotationOptions(options),
   });
   runtimeState.metadata.set(controller, metadata);
