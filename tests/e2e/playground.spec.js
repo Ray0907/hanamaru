@@ -3,6 +3,13 @@ import { expect, test } from '@playwright/test';
 
 const marks = ['underline', 'highlight', 'circle', 'box', 'strike', 'bracket'];
 
+function overlaps(first, second, inset = 0) {
+  return first.x < second.x + second.width - inset
+    && first.x + first.width > second.x + inset
+    && first.y < second.y + second.height - inset
+    && first.y + first.height > second.y + inset;
+}
+
 async function openPlayground(page) {
   await page.goto('/');
   const playground = page.getByRole('region', { name: 'Live playground' });
@@ -22,8 +29,13 @@ test('playground is a constrained semantic workbench with one generated definiti
   await expect(form).toHaveCount(1);
   await expect(form.locator('fieldset')).toHaveCount(3);
   for (const name of ['Specimen target', 'Annotation', 'Execution']) {
-    await expect(form.getByRole('group', { name })).toHaveCount(1);
+    await expect(form.getByRole('group', { name, exact: true })).toHaveCount(1);
   }
+  await expect(form.getByRole('group', { name: 'Trigger', exact: true })).toHaveCount(1);
+  await expect(form.getByRole('group', {
+    name: 'Output and execution mode',
+    exact: true,
+  })).toHaveCount(1);
 
   await expect(form.getByLabel('Existing phrase')).toHaveValue('#playground-target-reflow');
   await expect(form.getByLabel('Mark')).toHaveValue('underline');
@@ -206,7 +218,8 @@ test('validation associates a visible non-color error, focuses it, and then reco
 
   await playground.getByRole('radio', { name: 'Declarative HTML' }).check();
   await target.selectOption('');
-  await expect(playground.locator('[data-playground-code]')).toContainText('<span id=""');
+  await expect(playground.locator('[data-playground-code]'))
+    .toContainText('Choose one existing specimen phrase');
   await playground.getByRole('button', { name: 'Run definition' }).click();
   await expect(target).toBeFocused();
   await expect(target).toHaveAttribute('aria-invalid', 'true');
@@ -228,9 +241,154 @@ test('validation associates a visible non-color error, focuses it, and then reco
   expect(pageErrors).toEqual([]);
 });
 
-test('typed runtime target failures use the docket and leave the constrained form recoverable', async ({ page }) => {
+test('malformed and unknown injected target values stay inside validation without selector evaluation', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const playground = await openPlayground(page);
+  const target = playground.getByLabel('Existing phrase');
+  const code = playground.locator('[data-playground-code]');
+
+  await playground.getByRole('radio', { name: 'Declarative HTML' }).check();
+  await target.evaluate((control) => {
+    control.add(new Option('Injected malformed selector', '['));
+    control.value = '[';
+    control.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await expect(code).toContainText('Choose one existing specimen phrase');
+  await expect(code).not.toContainText("querySelector('[')");
+  await playground.getByRole('radio', { name: 'Imperative JavaScript' }).check();
+  await expect(code).toContainText('Choose one existing specimen phrase');
+  await expect(code).not.toContainText("annotate('['");
+  await playground.getByRole('radio', { name: 'Declarative HTML' }).check();
+  await playground.getByRole('button', { name: 'Run definition' }).click();
+  await expect(target).toBeFocused();
+  await expect(target).toHaveAttribute('aria-invalid', 'true');
+  await expect(playground.locator('[data-playground-result]')).toContainText('Needs correction');
+  await expect(playground.locator('[data-playground-owner]')).toContainText('No output');
+  expect(pageErrors).toEqual([]);
+
+  await target.evaluate((control) => {
+    control.options[control.selectedIndex].value = '#locator-proof';
+    control.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await expect(code).toContainText('Choose one existing specimen phrase');
+  await playground.getByRole('button', { name: 'Run definition' }).click();
+  await expect(target).toBeFocused();
+  await expect(page.locator('#locator-proof')).not.toHaveAttribute('data-hana');
+
+  await target.selectOption('#playground-target-proof');
+  await runDefinition(playground);
+  await expect(target).not.toHaveAttribute('aria-invalid');
+  expect(pageErrors).toEqual([]);
+});
+
+test('an allowed target moved outside its specimen is rejected without authored-attribute leakage', async ({ page }) => {
+  const playground = await openPlayground(page);
+  const control = playground.getByLabel('Existing phrase');
+  const target = page.locator('#playground-target-reflow');
+
+  await playground.getByRole('radio', { name: 'Declarative HTML' }).check();
+  await target.evaluate((node) => {
+    window.__playgroundOriginalParent = node.parentNode;
+    window.__playgroundOriginalNext = node.nextSibling;
+    document.querySelector('#limitations').append(node);
+  });
+  await playground.getByRole('button', { name: 'Run definition' }).click();
+  await expect(control).toBeFocused();
+  await expect(control).toHaveAttribute('aria-invalid', 'true');
+  await expect(target).not.toHaveAttribute('data-hana');
+  await expect(target).not.toHaveAttribute('data-playground-output-owner');
+  await expect(playground.locator('[data-playground-result]')).toContainText('Needs correction');
+
+  await target.evaluate((node) => {
+    window.__playgroundOriginalParent.insertBefore(node, window.__playgroundOriginalNext);
+  });
+  await runDefinition(playground);
+  await expect(control).not.toHaveAttribute('aria-invalid');
+});
+
+test('invalid rerun retires the prior declarative controller and owned attributes before validation', async ({ page }) => {
+  const playground = await openPlayground(page);
+  const control = playground.getByLabel('Existing phrase');
+  const target = playground.locator('#playground-target-reflow');
+
+  await playground.getByRole('radio', { name: 'Declarative HTML' }).check();
+  await runDefinition(playground);
+  await target.scrollIntoViewIfNeeded();
+  const prior = page.locator('.hana-annotation[data-hana-mark="underline"]:not([hidden])');
+  await expect(prior).toHaveCount(1);
+  const priorId = await prior.getAttribute('data-hana-id');
+  await expect(target).toHaveAttribute('data-hana', 'underline');
+
+  await control.evaluate((select) => {
+    select.add(new Option('Injected malformed selector', '['));
+    select.value = '[';
+    select.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await playground.getByRole('button', { name: 'Run definition' }).click();
+  await expect(page.locator(`.hana-annotation[data-hana-id="${priorId}"]`)).toHaveCount(0);
+  await expect(target).not.toHaveAttribute('data-hana');
+  await expect(target).not.toHaveAttribute('data-playground-output-owner');
+  await expect(playground.locator('[data-playground-owner]')).toContainText('No output');
+  await expect(control).toBeFocused();
+
+  await control.selectOption('#playground-target-reflow');
+  await runDefinition(playground);
+  await expect(target).toHaveAttribute('data-hana', 'underline');
+});
+
+test('declarative zero and thrown scans roll back the exact authored element and recover', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const playground = await openPlayground(page);
+  const specimen = playground.locator('[data-playground-specimen]');
+  const target = playground.locator('#playground-target-reflow');
+  const run = playground.locator('[data-playground-run]');
+
+  await playground.getByRole('radio', { name: 'Declarative HTML' }).check();
+  await specimen.evaluate((root) => {
+    window.__playgroundQuerySelectorAll = root.querySelectorAll;
+    root.querySelectorAll = () => {
+      const authored = document.querySelector('#playground-target-reflow');
+      window.__playgroundDetachedTarget = authored;
+      window.__playgroundDetachedParent = authored.parentNode;
+      window.__playgroundDetachedNext = authored.nextSibling;
+      authored.remove();
+      return [];
+    };
+  });
+  await run.click();
+  await expect(playground.locator('[data-playground-result]')).toContainText('HANA_TARGET_MISSING');
+  await expect(playground.getByLabel('Existing phrase')).toBeFocused();
+  const detachedState = await page.evaluate(() => ({
+    hana: window.__playgroundDetachedTarget.hasAttribute('data-hana'),
+    owner: window.__playgroundDetachedTarget.hasAttribute('data-playground-output-owner'),
+  }));
+  expect(detachedState).toEqual({ hana: false, owner: false });
+
+  await specimen.evaluate((root) => {
+    root.querySelectorAll = window.__playgroundQuerySelectorAll;
+    window.__playgroundDetachedParent.insertBefore(
+      window.__playgroundDetachedTarget,
+      window.__playgroundDetachedNext,
+    );
+    root.querySelectorAll = () => { throw new TypeError('forced scan failure'); };
+  });
+  await run.click();
+  await expect(playground.locator('[data-playground-result]')).toContainText('HANA_TARGET_MISSING');
+  await expect(target).not.toHaveAttribute('data-hana');
+  await expect(target).not.toHaveAttribute('data-playground-output-owner');
+  expect(pageErrors).toEqual([]);
+
+  await specimen.evaluate((root) => { root.querySelectorAll = window.__playgroundQuerySelectorAll; });
+  await runDefinition(playground);
+  await expect(target).toHaveAttribute('data-hana', 'underline');
+});
+
+test('a disconnected allowed target is validation-focused and leaves the constrained form recoverable', async ({ page }) => {
   const playground = await openPlayground(page);
   const target = playground.locator('#playground-target-reflow');
+  const control = playground.getByLabel('Existing phrase');
 
   await target.evaluate((node) => {
     window.__detachedPlaygroundTarget = node;
@@ -240,8 +398,9 @@ test('typed runtime target failures use the docket and leave the constrained for
   });
   await playground.getByRole('button', { name: 'Run definition' }).click();
   await expect(playground.locator('[data-playground-state]')).toHaveText('error');
-  await expect(playground.locator('[data-playground-result]')).toContainText('HANA_TARGET_MISSING');
-  await expect(playground.locator('[data-playground-docket]')).toBeFocused();
+  await expect(playground.locator('[data-playground-result]')).toContainText('Needs correction');
+  await expect(control).toBeFocused();
+  await expect(control).toHaveAttribute('aria-invalid', 'true');
 
   await page.evaluate(() => {
     window.__detachedPlaygroundParent.insertBefore(
@@ -251,6 +410,7 @@ test('typed runtime target failures use the docket and leave the constrained for
   });
   await runDefinition(playground);
   await expect(playground.locator('[data-playground-result]')).toContainText('Rendered');
+  await expect(control).not.toHaveAttribute('aria-invalid');
 });
 
 test('controls follow logical keyboard order, show focus, and pass a targeted axe scan', async ({ page }) => {
@@ -311,4 +471,27 @@ test('390px playground is contained and leaves no sticky output after scrolling 
   await page.locator('#limitations').scrollIntoViewIfNeeded();
   await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(0);
   await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
+});
+
+test('390px auto note keeps a proof lane clear of adjacent specimen copy', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const playground = await openPlayground(page);
+  await playground.getByLabel('Existing phrase').selectOption('#playground-target-proof');
+  await playground.getByLabel('Mark').selectOption('circle');
+  await playground.getByLabel('Optional note').fill('Recovered through the constrained target map.');
+  await runDefinition(playground);
+  await playground.locator('#playground-target-proof').scrollIntoViewIfNeeded();
+
+  const note = page.locator('.hana-note:not(.hana-is-hidden)', {
+    hasText: 'Recovered through the constrained target map.',
+  });
+  await expect(note).toBeVisible();
+  const paragraphs = playground.locator('.demo-playground__specimen p:not(.demo-playground__folio)');
+  const [noteBox, previousBox, nextBox] = await Promise.all([
+    note.boundingBox(),
+    paragraphs.nth(0).boundingBox(),
+    paragraphs.nth(2).boundingBox(),
+  ]);
+  expect(overlaps(noteBox, previousBox, 2)).toBe(false);
+  expect(overlaps(noteBox, nextBox, 2)).toBe(false);
 });

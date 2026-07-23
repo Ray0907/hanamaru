@@ -398,7 +398,8 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
                 V1 targets pre-authored specimen text only.
               </p>
               <p id="playground-target-error" class="demo-field-error" hidden>
-                <strong>Needs correction:</strong> Choose one existing phrase.
+                <strong>Needs correction:</strong>
+                <span data-playground-target-error-message>Choose one existing phrase.</span>
               </p>
             </fieldset>
 
@@ -437,14 +438,18 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
 
             <fieldset class="demo-playground__execution-fields">
               <legend>Execution</legend>
-              <div class="demo-choice-group">
-                <span class="demo-choice-group__label">Trigger</span>
+              <div class="demo-choice-group" role="group"
+                aria-labelledby="playground-trigger-label">
+                <span id="playground-trigger-label" class="demo-choice-group__label">Trigger</span>
                 <label><input type="radio" name="trigger" value="manual" checked> Manual</label>
                 <label><input type="radio" name="trigger" value="load"> Load</label>
                 <label><input type="radio" name="trigger" value="viewport"> Viewport</label>
               </div>
-              <div class="demo-choice-group">
-                <span class="demo-choice-group__label">Output and execution mode</span>
+              <div class="demo-choice-group" role="group"
+                aria-labelledby="playground-mode-label">
+                <span id="playground-mode-label" class="demo-choice-group__label">
+                  Output and execution mode
+                </span>
                 <label><input type="radio" name="mode" value="imperative" checked>
                   Imperative JavaScript</label>
                 <label><input type="radio" name="mode" value="declarative">

@@ -1,4 +1,4 @@
-import { VERSION, annotate, scan, story } from '/dist/hanamaru.esm.js';
+import { VERSION, HanamaruTargetError, annotate, scan, story } from '/dist/hanamaru.esm.js';
 
 const localStarter = `<link rel="stylesheet" href="./dist/hanamaru.css">
 <script type="module">
@@ -86,7 +86,21 @@ const playgroundFallback = document.querySelector('[data-playground-fallback]');
 const playgroundTargetControl = playgroundForm.elements.target;
 const playgroundNoteControl = playgroundForm.elements.note;
 const playgroundTargetError = document.querySelector('#playground-target-error');
+const playgroundTargetErrorMessage = document.querySelector('[data-playground-target-error-message]');
 const playgroundNoteError = document.querySelector('#playground-note-error');
+const playgroundTargetRecords = [
+  ['#playground-target-reflow', 'Proof survives reflow', 'the proof survives reflow'],
+  ['#playground-target-proof', 'Proof follows text', 'the proof follows text'],
+  ['#playground-target-data', 'Definitions remain data', 'definitions remain data'],
+].map(([selector, label, text]) => ({
+  element: document.getElementById(selector.slice(1)),
+  label,
+  selector,
+  text,
+}));
+const playgroundTargets = new Map(
+  playgroundTargetRecords.map((record) => [record.selector, record]),
+);
 
 version.textContent = `v${VERSION}`;
 starterFallback.value = localStarter;
@@ -682,13 +696,25 @@ const playgroundOwnedAttributes = [
   'data-hana-motion',
 ];
 
+function playgroundTargetRecord(selector) {
+  const record = playgroundTargets.get(selector);
+  if (record === undefined
+    || !(record.element instanceof Element)
+    || !record.element.isConnected
+    || record.element.ownerDocument !== document
+    || !playgroundSpecimen.contains(record.element)
+    || record.element.id !== record.selector.slice(1)
+    || record.element.textContent.trim() !== record.text) return null;
+  return record;
+}
+
 function playgroundSelection() {
   const values = new FormData(playgroundForm);
   const target = String(values.get('target') ?? '');
-  const targetOption = playgroundTargetControl.selectedOptions[0];
+  const targetRecord = playgroundTargets.get(target);
   return {
     target,
-    targetLabel: targetOption?.textContent.trim() ?? 'Unknown phrase',
+    targetLabel: targetRecord?.label ?? 'Unrecognized phrase',
     mark: String(values.get('mark') ?? ''),
     note: String(values.get('note') ?? '').trim(),
     placement: String(values.get('placement') ?? ''),
@@ -712,7 +738,14 @@ function playgroundEscapeAttribute(value) {
     .replaceAll('>', '&gt;');
 }
 
+function invalidPlaygroundDefinition(mode) {
+  const format = mode === 'declarative' ? 'HTML' : 'JavaScript';
+  return `/* Choose one existing specimen phrase to generate ${format}. */`;
+}
+
 function imperativeDefinition(selection) {
+  const targetRecord = playgroundTargetRecord(selection.target);
+  if (targetRecord === null) return invalidPlaygroundDefinition(selection.mode);
   const optionLines = [
     `  mark: ${playgroundSingleQuote(selection.mark)},`,
   ];
@@ -727,13 +760,14 @@ function imperativeDefinition(selection) {
 
   const showLine = selection.trigger === 'manual' ? '\nannotation.show()' : '';
   return `import { annotate } from '/dist/hanamaru.esm.js'\n\n`
-    + `const annotation = annotate(${playgroundSingleQuote(selection.target)}, {\n`
+    + `const annotation = annotate(${playgroundSingleQuote(targetRecord.selector)}, {\n`
     + `${optionLines.join('\n')}\n})${showLine}`;
 }
 
 function declarativeDefinition(selection) {
-  const target = selection.target === '' ? null : document.querySelector(selection.target);
-  const text = playgroundEscapeAttribute(target?.textContent.trim() ?? 'Choose a phrase');
+  const targetRecord = playgroundTargetRecord(selection.target);
+  if (targetRecord === null) return invalidPlaygroundDefinition(selection.mode);
+  const text = playgroundEscapeAttribute(targetRecord.text);
   const attributes = [
     `  data-hana="${playgroundEscapeAttribute(selection.mark)}"`,
   ];
@@ -747,7 +781,7 @@ function declarativeDefinition(selection) {
   attributes.push('  data-hana-duration="0"');
   const showLine = selection.trigger === 'manual' ? '\nannotation.show()' : '';
 
-  return `<span id="${selection.target.replace(/^#/, '')}"\n${attributes.join('\n')}>`
+  return `<span id="${targetRecord.selector.slice(1)}"\n${attributes.join('\n')}>`
     + `${text}</span>\n\n`
     + `<script type="module">\n`
     + `  import { scan } from '/dist/hanamaru.esm.js'\n\n`
@@ -773,10 +807,15 @@ function renderPlaygroundDefinition({ edited = false } = {}) {
   }
 }
 
+function clearPlaygroundElementAuthorship(target) {
+  if (!(target instanceof Element)) return;
+  for (const attribute of playgroundOwnedAttributes) target.removeAttribute(attribute);
+  target.removeAttribute('data-playground-output-owner');
+}
+
 function clearPlaygroundAuthorship() {
-  for (const target of playgroundSpecimen.querySelectorAll('span[id]')) {
-    for (const attribute of playgroundOwnedAttributes) target.removeAttribute(attribute);
-    target.removeAttribute('data-playground-output-owner');
+  for (const { element } of playgroundTargetRecords) {
+    clearPlaygroundElementAuthorship(element);
   }
 }
 
@@ -794,6 +833,11 @@ function setPlaygroundFieldError(control, error, message) {
   error.hidden = false;
 }
 
+function setPlaygroundTargetError(message) {
+  playgroundTargetErrorMessage.textContent = message;
+  setPlaygroundFieldError(playgroundTargetControl, playgroundTargetError, message);
+}
+
 function clearPlaygroundErrors() {
   for (const [control, error] of [
     [playgroundTargetControl, playgroundTargetError],
@@ -807,12 +851,12 @@ function clearPlaygroundErrors() {
 
 function validatePlayground(selection) {
   clearPlaygroundErrors();
-  if (selection.target === '') {
-    setPlaygroundFieldError(
-      playgroundTargetControl,
-      playgroundTargetError,
-      'Choose one existing phrase.',
-    );
+  if (!playgroundTargets.has(selection.target)) {
+    setPlaygroundTargetError('Choose one existing phrase.');
+    return playgroundTargetControl;
+  }
+  if (playgroundTargetRecord(selection.target) === null) {
+    setPlaygroundTargetError('The selected phrase is unavailable. Choose another existing phrase.');
     return playgroundTargetControl;
   }
   if ([...selection.note].length > 280) {
@@ -836,6 +880,15 @@ function authorPlaygroundAttributes(target, selection) {
     target.dataset.hanaNote = selection.note;
     target.setAttribute('data-hana-accessible', '');
   }
+}
+
+function playgroundTargetFailure(cause) {
+  if (cause instanceof HanamaruTargetError) return cause;
+  return new HanamaruTargetError(
+    'HANA_TARGET_MISSING',
+    'The selected playground target could not be scanned',
+    { cause },
+  );
 }
 
 function bindPlaygroundController(controller, target, selection) {
@@ -877,13 +930,19 @@ function bindPlaygroundController(controller, target, selection) {
   };
 }
 
-function createPlaygroundController(target, selection) {
+function createPlaygroundController(targetRecord, selection) {
+  const { element: target } = targetRecord;
   if (selection.mode === 'declarative') {
     authorPlaygroundAttributes(target, selection);
-    const result = scan(playgroundSpecimen);
+    let result;
+    try {
+      result = scan(playgroundSpecimen);
+    } catch (cause) {
+      throw playgroundTargetFailure(cause);
+    }
     if (result.errors.length > 0 || result.annotations.length !== 1) {
       for (const annotation of result.annotations) annotation.destroy();
-      throw result.errors[0] ?? new Error('Declarative definition did not produce one annotation');
+      throw playgroundTargetFailure(result.errors[0]);
     }
     return result.annotations[0];
   }
@@ -898,10 +957,12 @@ function createPlaygroundController(target, selection) {
     options.note = selection.note;
     options.accessible = true;
   }
-  return annotate(selection.target, options);
+  return annotate(targetRecord.selector, options);
 }
 
 function runPlayground() {
+  destroyPlaygroundController();
+  playgroundOwner.textContent = 'No output yet';
   const selection = playgroundSelection();
   const invalidControl = validatePlayground(selection);
   if (invalidControl !== null) {
@@ -913,10 +974,10 @@ function runPlayground() {
     return;
   }
 
-  destroyPlaygroundController();
-  const target = document.querySelector(selection.target);
+  const targetRecord = playgroundTargetRecord(selection.target);
+  const target = targetRecord.element;
   try {
-    playgroundController = createPlaygroundController(target, selection);
+    playgroundController = createPlaygroundController(targetRecord, selection);
     playgroundControllerCleanup = bindPlaygroundController(
       playgroundController,
       target,
@@ -938,13 +999,18 @@ function runPlayground() {
     playgroundControllerCleanup = null;
     playgroundController?.destroy();
     playgroundController = null;
-    clearPlaygroundAuthorship();
+    clearPlaygroundElementAuthorship(target);
     const code = typeof error?.code === 'string' ? error.code : 'HANA_STATE_RUNTIME';
     playgroundState.textContent = 'error';
     playgroundResult.textContent = `Runtime error · ${code}`;
     playgroundOwner.textContent = 'No output · run failed';
     status.textContent = `Playground stopped: ${code}.`;
-    playgroundDocket.focus();
+    if (error instanceof HanamaruTargetError) {
+      setPlaygroundTargetError('The selected phrase became unavailable. Choose an existing phrase.');
+      playgroundTargetControl.focus();
+    } else {
+      playgroundDocket.focus();
+    }
   }
 }
 

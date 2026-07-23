@@ -1331,7 +1331,7 @@
 }
 
 .demo-playground__specimen p:has([data-playground-output-owner]) {
-  margin-bottom: 4rem;
+  margin-block: 5rem;
 }
 
 .demo-playground__specimen span[data-playground-output-owner] {
