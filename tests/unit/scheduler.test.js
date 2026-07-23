@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { FrameQueue } from '../../src/scheduler.js';
+import {
+  acquireDocumentScheduler,
+  FrameQueue,
+} from '../../src/scheduler.js';
+import { runtimeState } from '../../src/runtime-state.js';
 
 function createHarness(callbackOverrides = {}) {
   const generations = new Map();
@@ -49,6 +53,170 @@ function job(key, generation, events, label = key, overrides = {}) {
     ...overrides,
   };
 }
+
+test('Document setup rolls back created observers when mutation observation mutates then throws', () => {
+  const cause = new Error('observe failed after its side effect');
+  const events = [];
+  class FakeResizeObserver {
+    disconnect() {
+      events.push('resize:disconnect');
+    }
+  }
+  class FakeMutationObserver {
+    observe() {
+      events.push('mutation:observe');
+      throw cause;
+    }
+
+    disconnect() {
+      events.push('mutation:disconnect');
+    }
+  }
+  const visualViewport = {
+    addEventListener() {
+      events.push('viewport:add');
+    },
+    removeEventListener() {
+      events.push('viewport:remove');
+    },
+  };
+  const view = {
+    MutationObserver: FakeMutationObserver,
+    ResizeObserver: FakeResizeObserver,
+    visualViewport,
+    requestAnimationFrame() {},
+    cancelAnimationFrame() {},
+    addEventListener() {
+      events.push('window:add');
+    },
+    removeEventListener() {
+      events.push('window:remove');
+    },
+  };
+  const document = {
+    defaultView: view,
+    nodeType: 9,
+  };
+
+  assert.throws(
+    () => acquireDocumentScheduler(document),
+    (error) => error === cause,
+  );
+  assert.deepEqual(events, [
+    'mutation:observe',
+    'resize:disconnect',
+    'mutation:disconnect',
+  ]);
+  assert.equal(runtimeState.documents.has(document), false);
+});
+
+test('Document setup preserves its original failure and attaches the first rollback failure', () => {
+  const setupCause = new Error('setup failed');
+  const rollbackCause = new Error('resize disconnect failed');
+  const events = [];
+  class FakeResizeObserver {
+    disconnect() {
+      events.push('resize:disconnect');
+      throw rollbackCause;
+    }
+  }
+  class FakeMutationObserver {
+    observe() {
+      throw setupCause;
+    }
+
+    disconnect() {
+      events.push('mutation:disconnect');
+    }
+  }
+  const view = {
+    MutationObserver: FakeMutationObserver,
+    ResizeObserver: FakeResizeObserver,
+    visualViewport: null,
+    requestAnimationFrame() {},
+    cancelAnimationFrame() {},
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const document = {
+    defaultView: view,
+    nodeType: 9,
+  };
+  let delivered;
+
+  assert.throws(
+    () => acquireDocumentScheduler(document),
+    (error) => {
+      delivered = error;
+      return error === setupCause;
+    },
+  );
+  assert.strictEqual(delivered.rollbackCause, rollbackCause);
+  assert.deepEqual(events, ['resize:disconnect', 'mutation:disconnect']);
+  assert.equal(runtimeState.documents.has(document), false);
+});
+
+test('Document setup removes every listener reserved before a visual viewport add throws', () => {
+  const cause = new Error('viewport scroll listener failed after side effect');
+  const events = [];
+  class FakeResizeObserver {
+    disconnect() {
+      events.push('resize:disconnect');
+    }
+  }
+  class FakeMutationObserver {
+    observe() {
+      events.push('mutation:observe');
+    }
+
+    disconnect() {
+      events.push('mutation:disconnect');
+    }
+  }
+  const visualViewport = {
+    addEventListener(type) {
+      events.push(`viewport:add:${type}`);
+      if (type === 'scroll') throw cause;
+    },
+    removeEventListener(type) {
+      events.push(`viewport:remove:${type}`);
+    },
+  };
+  const view = {
+    MutationObserver: FakeMutationObserver,
+    ResizeObserver: FakeResizeObserver,
+    visualViewport,
+    requestAnimationFrame() {},
+    cancelAnimationFrame() {},
+    addEventListener(type) {
+      events.push(`window:add:${type}`);
+    },
+    removeEventListener(type) {
+      events.push(`window:remove:${type}`);
+    },
+  };
+  const document = {
+    defaultView: view,
+    nodeType: 9,
+  };
+
+  assert.throws(
+    () => acquireDocumentScheduler(document),
+    (error) => error === cause,
+  );
+  assert.deepEqual(events, [
+    'mutation:observe',
+    'window:add:resize',
+    'viewport:add:resize',
+    'viewport:add:scroll',
+    'resize:disconnect',
+    'mutation:disconnect',
+    'window:remove:resize',
+    'viewport:remove:resize',
+    'viewport:remove:scroll',
+  ]);
+  assert.equal(runtimeState.documents.has(document), false);
+});
 
 test('coalesces one frame and moves a same-key replacement to the latest position', () => {
   const { generations, queue, requested, runFrame } = createHarness();

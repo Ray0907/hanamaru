@@ -215,6 +215,220 @@ for (const startingState of ['initial', 'lazy']) {
   }
 }
 
+test('Document setup disconnects a native MutationObserver whose observe mutates then throws', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { runtimeState } = await import('/src/runtime-state.js');
+    const NativeMutationObserver = window.MutationObserver;
+    const NativeResizeObserver = window.ResizeObserver;
+    const cause = new Error('observe failed after native side effect');
+    let deliveries = 0;
+    let mutationDisconnects = 0;
+    let resizeDisconnects = 0;
+    let windowAdds = 0;
+    let windowRemovals = 0;
+    const nativeWindowAdd = window.addEventListener;
+    const nativeWindowRemove = window.removeEventListener;
+
+    class ThrowingMutationObserver {
+      constructor(callback) {
+        this.native = new NativeMutationObserver((records, observer) => {
+          deliveries += 1;
+          callback(records, observer);
+        });
+      }
+
+      observe(...args) {
+        this.native.observe(...args);
+        throw cause;
+      }
+
+      disconnect() {
+        mutationDisconnects += 1;
+        this.native.disconnect();
+      }
+    }
+    class TrackingResizeObserver {
+      constructor(callback) {
+        this.native = new NativeResizeObserver(callback);
+      }
+
+      observe(...args) {
+        this.native.observe(...args);
+      }
+
+      unobserve(...args) {
+        this.native.unobserve(...args);
+      }
+
+      disconnect() {
+        resizeDisconnects += 1;
+        this.native.disconnect();
+      }
+    }
+    Object.defineProperty(window, 'MutationObserver', {
+      configurable: true,
+      value: ThrowingMutationObserver,
+    });
+    Object.defineProperty(window, 'ResizeObserver', {
+      configurable: true,
+      value: TrackingResizeObserver,
+    });
+    window.addEventListener = function addEventListener(...args) {
+      windowAdds += 1;
+      return Reflect.apply(nativeWindowAdd, this, args);
+    };
+    window.removeEventListener = function removeEventListener(...args) {
+      windowRemovals += 1;
+      return Reflect.apply(nativeWindowRemove, this, args);
+    };
+
+    let error = null;
+    try {
+      acquireDocumentResources(document);
+    } catch (caught) {
+      error = caught.message;
+    }
+    document.body.setAttribute('data-constructor-rollback-probe', '');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    window.addEventListener = nativeWindowAdd;
+    window.removeEventListener = nativeWindowRemove;
+    Object.defineProperty(window, 'MutationObserver', {
+      configurable: true,
+      value: NativeMutationObserver,
+    });
+    Object.defineProperty(window, 'ResizeObserver', {
+      configurable: true,
+      value: NativeResizeObserver,
+    });
+    return {
+      deliveries,
+      error,
+      mutationDisconnects,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      resizeDisconnects,
+      stateReserved: runtimeState.documents.has(document),
+      windowAdds,
+      windowRemovals,
+    };
+  });
+
+  expect(result).toEqual({
+    deliveries: 0,
+    error: 'observe failed after native side effect',
+    mutationDisconnects: 1,
+    overlays: 0,
+    resizeDisconnects: 1,
+    stateReserved: false,
+    windowAdds: 0,
+    windowRemovals: 0,
+  });
+});
+
+test('Document setup removes a window listener whose native add mutates then throws', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { runtimeState } = await import('/src/runtime-state.js');
+    const NativeMutationObserver = window.MutationObserver;
+    const NativeResizeObserver = window.ResizeObserver;
+    const cause = new Error('window listener failed after native side effect');
+    let mutationDisconnects = 0;
+    let resizeDisconnects = 0;
+    let windowAdds = 0;
+    let windowRemovals = 0;
+    const nativeWindowAdd = window.addEventListener;
+    const nativeWindowRemove = window.removeEventListener;
+
+    class TrackingMutationObserver {
+      constructor(callback) {
+        this.native = new NativeMutationObserver(callback);
+      }
+
+      observe(...args) {
+        this.native.observe(...args);
+      }
+
+      disconnect() {
+        mutationDisconnects += 1;
+        this.native.disconnect();
+      }
+    }
+    class TrackingResizeObserver {
+      constructor(callback) {
+        this.native = new NativeResizeObserver(callback);
+      }
+
+      observe(...args) {
+        this.native.observe(...args);
+      }
+
+      unobserve(...args) {
+        this.native.unobserve(...args);
+      }
+
+      disconnect() {
+        resizeDisconnects += 1;
+        this.native.disconnect();
+      }
+    }
+    Object.defineProperty(window, 'MutationObserver', {
+      configurable: true,
+      value: TrackingMutationObserver,
+    });
+    Object.defineProperty(window, 'ResizeObserver', {
+      configurable: true,
+      value: TrackingResizeObserver,
+    });
+    window.addEventListener = function addEventListener(...args) {
+      windowAdds += 1;
+      const result = Reflect.apply(nativeWindowAdd, this, args);
+      if (args[0] === 'resize') throw cause;
+      return result;
+    };
+    window.removeEventListener = function removeEventListener(...args) {
+      windowRemovals += 1;
+      return Reflect.apply(nativeWindowRemove, this, args);
+    };
+
+    let error = null;
+    try {
+      acquireDocumentResources(document);
+    } catch (caught) {
+      error = caught.message;
+    }
+    window.dispatchEvent(new Event('resize'));
+    window.addEventListener = nativeWindowAdd;
+    window.removeEventListener = nativeWindowRemove;
+    Object.defineProperty(window, 'MutationObserver', {
+      configurable: true,
+      value: NativeMutationObserver,
+    });
+    Object.defineProperty(window, 'ResizeObserver', {
+      configurable: true,
+      value: NativeResizeObserver,
+    });
+    return {
+      error,
+      mutationDisconnects,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      resizeDisconnects,
+      stateReserved: runtimeState.documents.has(document),
+      windowAdds,
+      windowRemovals,
+    };
+  });
+
+  expect(result).toEqual({
+    error: 'window listener failed after native side effect',
+    mutationDisconnects: 1,
+    overlays: 0,
+    resizeDisconnects: 1,
+    stateReserved: false,
+    windowAdds: 1,
+    windowRemovals: 1,
+  });
+});
+
 test('shared ownership keeps one document root and observer set until the final lease releases', async ({ page }) => {
   await installInstrumentation(page);
 

@@ -6,6 +6,23 @@ function requireFunction(name, value) {
   }
 }
 
+function attachRollbackCause(cause, rollbackCause) {
+  if (cause === null
+    || (typeof cause !== 'object' && typeof cause !== 'function')) {
+    return;
+  }
+  try {
+    if (!Object.hasOwn(cause, 'rollbackCause')) {
+      Object.defineProperty(cause, 'rollbackCause', {
+        configurable: true,
+        value: rollbackCause,
+      });
+    }
+  } catch {
+    // Preserve the original setup failure when it cannot carry metadata.
+  }
+}
+
 export class FrameQueue {
   #requestFrame;
 
@@ -271,6 +288,12 @@ class SharedDocumentResources {
 
   #visualViewport;
 
+  #windowResizeInstalled = false;
+
+  #viewportResizeInstalled = false;
+
+  #viewportScrollInstalled = false;
+
   #windowResize = () => {
     for (const id of this.#layouts.keys()) {
       this.#signal(id);
@@ -279,71 +302,98 @@ class SharedDocumentResources {
 
   constructor(doc, initialPortal = null) {
     this.#doc = doc;
-    this.#window = doc.defaultView;
-    this.#visualViewport = this.#window.visualViewport;
-    resourceInternals.set(this, {
-      defaultPortal: initialPortal,
-      ignoredPortals: new Set(
-        initialPortal === null ? [] : [initialPortal.overlay],
-      ),
-      nextId: 0,
-    });
-    if (initialPortal !== null) {
-      this.overlay = initialPortal.overlay;
-      this.svgLayer = initialPortal.svgLayer;
-      this.noteLayer = initialPortal.noteLayer;
-    }
+    try {
+      this.#window = doc.defaultView;
+      this.#visualViewport = this.#window.visualViewport;
+      resourceInternals.set(this, {
+        defaultPortal: initialPortal,
+        ignoredPortals: new Set(
+          initialPortal === null ? [] : [initialPortal.overlay],
+        ),
+        nextId: 0,
+      });
+      if (initialPortal !== null) {
+        this.overlay = initialPortal.overlay;
+        this.svgLayer = initialPortal.svgLayer;
+        this.noteLayer = initialPortal.noteLayer;
+      }
 
-    const requestFrame = this.#window.requestAnimationFrame.bind(this.#window);
-    const cancelFrame = this.#window.cancelAnimationFrame.bind(this.#window);
-    this.#frameQueue = new FrameQueue({
-      requestFrame,
-      cancelFrame,
-      generationFor: (key) => this.#controllers.get(key.id)?.token,
-      beforeFlush: () => {
-        this.#notePlacementReservations = new Map();
-      },
-      afterFlush: () => {
-        this.#notePlacementReservations = null;
-      },
-    });
+      const requestFrame = this.#window.requestAnimationFrame.bind(this.#window);
+      const cancelFrame = this.#window.cancelAnimationFrame.bind(this.#window);
+      this.#frameQueue = new FrameQueue({
+        requestFrame,
+        cancelFrame,
+        generationFor: (key) => this.#controllers.get(key.id)?.token,
+        beforeFlush: () => {
+          this.#notePlacementReservations = new Map();
+        },
+        afterFlush: () => {
+          this.#notePlacementReservations = null;
+        },
+      });
 
-    const ResizeObserverConstructor = this.#window.ResizeObserver;
-    this.#resizeObserver = typeof ResizeObserverConstructor === 'function'
-      ? new ResizeObserverConstructor((entries) => {
-        if (!this.#alive) {
-          return;
-        }
-
-        const ids = new Set();
-        for (const entry of entries) {
-          for (const id of this.#resizeTargets.get(entry.target) ?? []) {
-            ids.add(id);
+      const ResizeObserverConstructor = this.#window.ResizeObserver;
+      this.#resizeObserver = typeof ResizeObserverConstructor === 'function'
+        ? new ResizeObserverConstructor((entries) => {
+          if (!this.#alive) {
+            return;
           }
-        }
-        for (const id of ids) {
-          this.#signal(id);
-        }
-      })
-      : null;
 
-    const MutationObserverConstructor = this.#window.MutationObserver;
-    this.#mutationObserver = typeof MutationObserverConstructor === 'function'
-      ? new MutationObserverConstructor((records) => {
-        this.#signalMutations(records, this.#doc);
-      })
-      : null;
-    this.#mutationObserver?.observe(doc, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ['class', 'style', 'hidden'],
-    });
+          const ids = new Set();
+          for (const entry of entries) {
+            for (const id of this.#resizeTargets.get(entry.target) ?? []) {
+              ids.add(id);
+            }
+          }
+          for (const id of ids) {
+            this.#signal(id);
+          }
+        })
+        : null;
 
-    this.#window.addEventListener('resize', this.#windowResize);
-    this.#visualViewport?.addEventListener('resize', this.#windowResize, { passive: true });
-    this.#visualViewport?.addEventListener('scroll', this.#windowResize, { passive: true });
+      const MutationObserverConstructor = this.#window.MutationObserver;
+      this.#mutationObserver = typeof MutationObserverConstructor === 'function'
+        ? new MutationObserverConstructor((records) => {
+          this.#signalMutations(records, this.#doc);
+        })
+        : null;
+      this.#mutationObserver?.observe(doc, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['class', 'style', 'hidden'],
+      });
+
+      this.#windowResizeInstalled = true;
+      this.#window.addEventListener('resize', this.#windowResize);
+      if (this.#visualViewport !== null
+        && this.#visualViewport !== undefined) {
+        this.#viewportResizeInstalled = true;
+        this.#visualViewport.addEventListener(
+          'resize',
+          this.#windowResize,
+          { passive: true },
+        );
+        this.#viewportScrollInstalled = true;
+        this.#visualViewport.addEventListener(
+          'scroll',
+          this.#windowResize,
+          { passive: true },
+        );
+      }
+    } catch (cause) {
+      let rollbackCause;
+      try {
+        this.#destroy();
+      } catch (error) {
+        rollbackCause = error;
+      }
+      if (rollbackCause !== undefined) {
+        attachRollbackCause(cause, rollbackCause);
+      }
+      throw cause;
+    }
   }
 
   registerController(id) {
@@ -955,10 +1005,27 @@ class SharedDocumentResources {
     this.#scrollTargets.clear();
     cleanup(() => this.#resizeObserver?.disconnect());
     cleanup(() => this.#mutationObserver?.disconnect());
-    cleanup(() => this.#window.removeEventListener('resize', this.#windowResize));
-    cleanup(() => this.#visualViewport?.removeEventListener('resize', this.#windowResize));
-    cleanup(() => this.#visualViewport?.removeEventListener('scroll', this.#windowResize));
-    cleanup(() => this.#frameQueue.destroy());
+    if (this.#windowResizeInstalled) {
+      this.#windowResizeInstalled = false;
+      cleanup(() => this.#window.removeEventListener('resize', this.#windowResize));
+    }
+    if (this.#viewportResizeInstalled) {
+      this.#viewportResizeInstalled = false;
+      cleanup(() => this.#visualViewport.removeEventListener(
+        'resize',
+        this.#windowResize,
+        { passive: true },
+      ));
+    }
+    if (this.#viewportScrollInstalled) {
+      this.#viewportScrollInstalled = false;
+      cleanup(() => this.#visualViewport.removeEventListener(
+        'scroll',
+        this.#windowResize,
+        { passive: true },
+      ));
+    }
+    cleanup(() => this.#frameQueue?.destroy());
     cleanup(() => SharedDocumentResources.detachDefaultPortal(this));
     resourceInternals.delete(this);
     if (failure !== null) throw failure;
