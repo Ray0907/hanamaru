@@ -125,12 +125,13 @@ export function abortError(reason = 'Annotation run cancelled') {
   return new DOMException(reason, 'AbortError');
 }
 
-function layoutFor(record, renderer, options, markPlugin, env) {
+function layoutFor(record, renderer, options, markPlugin, env, markPathsSnapshot = null) {
   const targetRects = env.targetRects(record);
   const targetRect = unionRects(targetRects);
   const measured = renderer.measure();
   const metrics = env.readThemeMetrics(renderer.group);
-  const markPaths = buildMarkPaths(options.mark, targetRects, options.seed, 5, markPlugin);
+  const markPaths = markPathsSnapshot
+    ?? buildMarkPaths(options.mark, targetRects, options.seed, 5, markPlugin);
   const targetVisible = targetRects.some((item) => intersectsViewport(item, measured.viewport));
 
   if (measured.noteRect === null) {
@@ -381,6 +382,7 @@ export function createAnnotation(target, rawOptions, env) {
   const { shared } = lease;
   let generation;
   let renderer;
+  let pendingMarkPathsSnapshot = null;
   let stopLayout = null;
   let stopTrigger = null;
 
@@ -424,6 +426,7 @@ export function createAnnotation(target, rawOptions, env) {
 
   function acceptOperation(cleanupTrigger = true) {
     if (cleanupTrigger) stopAutomaticTrigger(true);
+    pendingMarkPathsSnapshot = null;
     operationEpoch += 1;
     return operationEpoch;
   }
@@ -524,6 +527,7 @@ export function createAnnotation(target, rawOptions, env) {
   function handleRuntimeFailure(cause) {
     const error = stateError(cause);
     if (destroyed) return error;
+    pendingMarkPathsSnapshot = null;
     requestedVisible ||= state === 'showing' || state === 'visible';
     pausedControllers.delete(controller);
     try { renderer.hide(); } catch { /* Preserve the originating runtime failure. */ }
@@ -541,8 +545,19 @@ export function createAnnotation(target, rawOptions, env) {
   }
 
   function handleScheduledFailure(error) {
+    pendingMarkPathsSnapshot = null;
     if (error instanceof HanamaruTargetError) reportTargetFailure(error);
     else handleRuntimeFailure(error);
+  }
+
+  function currentMarkPathsSnapshot(operation = operationEpoch) {
+    if (pendingMarkPathsSnapshot?.operation !== operation
+      || pendingMarkPathsSnapshot.generation !== generation) return null;
+    return pendingMarkPathsSnapshot;
+  }
+
+  function consumeMarkPathsSnapshot(snapshot) {
+    if (pendingMarkPathsSnapshot === snapshot) pendingMarkPathsSnapshot = null;
   }
 
   function layoutBinding() {
@@ -555,17 +570,20 @@ export function createAnnotation(target, rawOptions, env) {
         const previousOwner = record.ownerElement;
         resolveCurrentTarget();
         const owner = record.ownerElement;
+        const snapshot = currentMarkPathsSnapshot();
         const layout = requestedVisible
-          ? layoutFor(record, renderer, options, markPlugin, env)
+          ? layoutFor(record, renderer, options, markPlugin, env, snapshot?.paths)
           : (env.targetRects(record), null);
         renderabilityEpisode = false;
         return {
           layout,
           owner,
           ownerChanged: previousOwner !== owner,
+          snapshot,
         };
       },
       write: (result) => {
+        consumeMarkPathsSnapshot(result.snapshot);
         knownOwners.add(result.owner);
         renderer.updateOwner(result.owner);
         if (result.layout !== null) {
@@ -629,7 +647,12 @@ export function createAnnotation(target, rawOptions, env) {
   }
 
   function schedule(
-    { animate = false, finish = false, restore = false, validate = false } = {},
+    {
+      animate = false,
+      finish = false,
+      restore = false,
+      validate = false,
+    } = {},
     operation = operationEpoch,
   ) {
     const activeRun = run;
@@ -637,17 +660,20 @@ export function createAnnotation(target, rawOptions, env) {
       if (!isCurrentOperation(operation)) return null;
       resolveCurrentTarget();
       const owner = record.ownerElement;
+      const snapshot = currentMarkPathsSnapshot(operation);
       const layout = validate
         ? (env.targetRects(record), null)
-        : layoutFor(record, renderer, options, markPlugin, env);
+        : layoutFor(record, renderer, options, markPlugin, env, snapshot?.paths);
       renderabilityEpisode = false;
       return {
         layout,
         owner,
+        snapshot,
       };
     };
     const write = (result, synchronous = false) => {
       if (!isCurrentOperation(operation) || result === null) return;
+      consumeMarkPathsSnapshot(result.snapshot);
       knownOwners.add(result.owner);
       renderer.updateOwner(result.owner);
       if (result.layout === null) {
@@ -895,9 +921,12 @@ export function createAnnotation(target, rawOptions, env) {
       invalid('mark', nextOptions.mark);
     }
     const nextRecord = env.resolveTarget(nextTarget);
+    let nextMarkPathsSnapshot = null;
     if (nextMarkPlugin !== null) {
       const nextRects = env.targetRects(nextRecord);
-      buildMarkPaths(nextOptions.mark, nextRects, nextOptions.seed, 5, nextMarkPlugin);
+      nextMarkPathsSnapshot = Object.freeze([
+        ...buildMarkPaths(nextOptions.mark, nextRects, nextOptions.seed, 5, nextMarkPlugin),
+      ]);
     }
     const operation = acceptOperation();
     let nextRenderer;
@@ -945,9 +974,22 @@ export function createAnnotation(target, rawOptions, env) {
       handleRuntimeFailure(cleanupFailure);
       return controller;
     }
-    if (priorState === 'showing') schedule({ finish: true }, operation);
-    else if (priorState === 'visible') schedule({ finish: true, restore: true }, operation);
-    else if (priorState === 'suspended' && requestedVisible) {
+    if (!isCurrentOperation(operation)) return controller;
+    if (nextMarkPathsSnapshot !== null
+      && (priorState === 'showing'
+        || priorState === 'visible'
+        || (priorState === 'suspended' && requestedVisible))) {
+      pendingMarkPathsSnapshot = Object.freeze({
+        generation,
+        operation,
+        paths: nextMarkPathsSnapshot,
+      });
+    }
+    if (priorState === 'showing') {
+      schedule({ finish: true }, operation);
+    } else if (priorState === 'visible') {
+      schedule({ finish: true, restore: true }, operation);
+    } else if (priorState === 'suspended' && requestedVisible) {
       schedule({ finish: true, restore: true }, operation);
     } else if (priorState === 'suspended') schedule({ validate: true }, operation);
     return controller;

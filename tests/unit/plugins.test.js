@@ -185,6 +185,42 @@ test('helpers have exact FNV, rounding, line, and closed-path golden bytes and b
   );
 });
 
+test('line keeps extreme finite midpoints finite and hashes surrogate-pair labels by UTF-16 code unit', () => {
+  let helpers;
+  render('surrogate-jitter-golden', ({ helpers: value }) => {
+    helpers = value;
+    return { paths: ['M 0 0'] };
+  }, { seed: 'seed' });
+  assert.equal(helpers.jitter('😀', 2), 1.87);
+
+  const maximum = Number.MAX_VALUE;
+  const encoded = String(maximum);
+  const paths = render('finite-extreme-lines', ({ helpers: value }) => ({
+    paths: [
+      value.line(
+        { x: maximum, y: maximum },
+        { x: maximum, y: maximum },
+        { label: 'max', wobble: 0 },
+      ),
+      value.line(
+        { x: -maximum, y: -maximum },
+        { x: -maximum, y: -maximum },
+        { label: 'min', wobble: 0 },
+      ),
+      value.line(
+        { x: maximum, y: maximum },
+        { x: -maximum, y: -maximum },
+        { label: 'mixed', wobble: 0 },
+      ),
+    ],
+  }));
+  assert.deepEqual(paths, [
+    `M ${encoded} ${encoded} Q ${encoded} ${encoded} ${encoded} ${encoded}`,
+    `M -${encoded} -${encoded} Q -${encoded} -${encoded} -${encoded} -${encoded}`,
+    `M ${encoded} ${encoded} Q 0 0 -${encoded} -${encoded}`,
+  ]);
+});
+
 test('helpers validate finite points/options and never mutate their inputs', () => {
   let helpers;
   render('helper-validation', ({ helpers: value }) => {
@@ -234,6 +270,40 @@ test('helper options distinguish absent properties from explicit nullish values'
     assertConfigError(() => helpers.line(start, end, options));
   }
   assert.doesNotThrow(() => helpers.line(start, end, {}));
+});
+
+test('closedPath rejects sparse point arrays without filling or mutating holes', () => {
+  let helpers;
+  render('closed-sparse-points', ({ helpers: value }) => {
+    helpers = value;
+    return { paths: ['M 0 0'] };
+  });
+  const points = [{ x: 0, y: 0 }, , { x: 2, y: 2 }];
+  const keys = Reflect.ownKeys(points);
+
+  assertConfigError(() => helpers.closedPath(points));
+  assert.deepEqual(Reflect.ownKeys(points), keys);
+  assert.equal(Object.hasOwn(points, 1), false);
+});
+
+test('closedPath rejects accessor point indices without invoking their getters', () => {
+  let helpers;
+  render('closed-accessor-points', ({ helpers: value }) => {
+    helpers = value;
+    return { paths: ['M 0 0'] };
+  });
+  let getterCalls = 0;
+  const points = [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }];
+  Object.defineProperty(points, 1, {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return { x: 1, y: 1 };
+    },
+  });
+
+  assertConfigError(() => helpers.closedPath(points));
+  assert.equal(getterCalls, 0);
 });
 
 test('factory results require one own data paths property on a plain object', () => {
@@ -364,6 +434,31 @@ test('SVG arc parser rejects flags that are numerically valid but lexically inva
   }
 });
 
+test('SVG arc parser accepts non-negative absolute and relative radii in repeated groups', () => {
+  const paths = [
+    'M0 0 A0 +1e2 0 0 1 10 10',
+    'M0 0 a1 2 0 0 1 3 4 0 5e1 0 1 0 6 7',
+  ];
+  assert.deepEqual(render('valid-arc-radii', () => ({ paths })), paths);
+});
+
+test('SVG arc parser rejects negative and lexical negative-zero radii in every group', () => {
+  const paths = [
+    'M0 0 A-1 2 0 0 1 3 4',
+    'M0 0 A1 -0 0 0 1 3 4',
+    'M0 0 a1 2 0 0 1 3 4 -2 5 0 1 0 6 7',
+    'M0 0 a1 2 0 0 1 3 4 2 -0e0 0 1 0 6 7',
+  ];
+  for (const [index, path] of paths.entries()) {
+    assert.throws(
+      () => render(`invalid-arc-radius-${index}`, () => ({ paths: [path] })),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_MARK_PLUGIN'
+        && error.details.cause instanceof HanamaruConfigError,
+    );
+  }
+});
+
 test('factory throws and invalid results preserve cause under the plugin state error', () => {
   const cause = new RangeError('factory exploded');
   assert.throws(
@@ -375,9 +470,10 @@ test('factory throws and invalid results preserve cause under the plugin state e
   );
 });
 
-function annotationHarness() {
+function annotationHarness({ deferEnqueue = false } = {}) {
   const calls = [];
   const events = [];
+  const jobs = [];
   const owner = { ownerDocument: { readyState: 'complete' } };
   const record = {
     element: owner,
@@ -387,14 +483,39 @@ function annotationHarness() {
     refresh() { return this; },
   };
   let generation = 0;
+  let layoutBinding = null;
+  function execute(entries) {
+    const reads = [];
+    for (const entry of entries) {
+      try {
+        reads.push({ entry, value: entry.read() });
+      } catch (error) {
+        entry.onError?.(error);
+      }
+    }
+    for (const { entry, value } of reads) {
+      try {
+        entry.write(value);
+      } catch (error) {
+        entry.onError?.(error);
+      }
+    }
+  }
   const shared = {
     registerController() { return generation; },
     releaseController() {},
     bumpGeneration() { generation += 1; return generation; },
-    observeLayout() { return () => {}; },
-    rebindLayout() { return () => {}; },
-    enqueue({ read, write, onError }) {
-      try { write(read()); } catch (error) { onError(error); }
+    observeLayout(binding) {
+      layoutBinding = binding;
+      return () => { if (layoutBinding === binding) layoutBinding = null; };
+    },
+    rebindLayout(_id, binding) {
+      layoutBinding = binding;
+      return () => { if (layoutBinding === binding) layoutBinding = null; };
+    },
+    enqueue(entry) {
+      if (deferEnqueue) jobs.push(entry);
+      else execute([entry]);
     },
   };
   const env = {
@@ -422,7 +543,18 @@ function annotationHarness() {
       };
     },
   };
-  return { calls, env, events, owner, record };
+  return {
+    calls,
+    env,
+    events,
+    flush({ includeLayout = false } = {}) {
+      const entries = jobs.splice(0);
+      if (includeLayout && layoutBinding !== null) entries.push(layoutBinding);
+      execute(entries);
+    },
+    owner,
+    record,
+  };
 }
 
 test('annotations capture custom factories across unregister, refresh, replay, and same-mark update', () => {
@@ -435,12 +567,17 @@ test('annotations capture custom factories across unregister, refresh, replay, a
   const controller = createAnnotation(harness.owner, { mark: 'captured-mark' }, harness.env);
   unregister();
 
+  assert.equal(factoryCalls, 0);
   controller.show();
+  assert.equal(factoryCalls, 1);
   controller.refresh();
+  assert.equal(factoryCalls, 2);
   controller.replay();
+  assert.equal(factoryCalls, 3);
   controller.update({ mark: 'captured-mark' });
+  assert.equal(factoryCalls, 4);
   controller.refresh();
-  assert.ok(factoryCalls >= 4);
+  assert.equal(factoryCalls, 5);
   assert.equal(controller.state, 'visible');
   controller.destroy();
   assertConfigError(() => createAnnotation(
@@ -448,6 +585,116 @@ test('annotations capture custom factories across unregister, refresh, replay, a
     { mark: 'captured-mark' },
     annotationHarness().env,
   ));
+});
+
+test('visible custom update redraws its validated snapshot once before later refresh invokes again', () => {
+  let factoryCalls = 0;
+  const laterCause = new Error('only a later refresh may fail');
+  const unregister = registerMark('single-update-snapshot', () => {
+    factoryCalls += 1;
+    if (factoryCalls === 3) throw laterCause;
+    return { paths: [`M ${factoryCalls} 0 L ${factoryCalls} 1`] };
+  });
+  const harness = annotationHarness();
+  const controller = createAnnotation(
+    harness.owner,
+    { mark: 'single-update-snapshot', seed: 'before' },
+    harness.env,
+  );
+  controller.show();
+  const finished = controller.finished;
+  assert.equal(factoryCalls, 1);
+  assert.deepEqual(harness.calls.at(-1)[2], ['M 1 0 L 1 1']);
+
+  controller.update({ seed: 'after' });
+
+  assert.equal(factoryCalls, 2);
+  assert.equal(controller.state, 'visible');
+  assert.equal(controller.finished, finished);
+  assert.deepEqual(harness.calls.at(-1)[2], ['M 2 0 L 2 1']);
+  assert.equal(Object.isFrozen(harness.calls.at(-1)[2]), true);
+
+  controller.refresh();
+
+  assert.equal(factoryCalls, 3);
+  assert.equal(controller.state, 'suspended');
+  assert.equal(harness.events.at(-1).type, 'hana:error');
+  assert.equal(harness.events.at(-1).detail.error.code, 'HANA_STATE_MARK_PLUGIN');
+  assert.equal(harness.events.at(-1).detail.error.details.cause, laterCause);
+  controller.destroy();
+  unregister();
+});
+
+test('update lifecycle and layout reads in one frame share one validated snapshot', () => {
+  let factoryCalls = 0;
+  const unregister = registerMark('shared-frame-snapshot', () => {
+    factoryCalls += 1;
+    return { paths: [`M ${factoryCalls} 0 L ${factoryCalls} 1`] };
+  });
+  const harness = annotationHarness({ deferEnqueue: true });
+  const controller = createAnnotation(
+    harness.owner,
+    { mark: 'shared-frame-snapshot', seed: 'before' },
+    harness.env,
+  );
+  controller.show();
+  harness.flush();
+  assert.equal(factoryCalls, 1);
+
+  controller.update({ seed: 'after' });
+  assert.equal(factoryCalls, 2);
+  harness.flush({ includeLayout: true });
+
+  assert.equal(factoryCalls, 2);
+  assert.equal(controller.state, 'visible');
+  assert.deepEqual(harness.calls.at(-1)[2], ['M 2 0 L 2 1']);
+  controller.destroy();
+  unregister();
+});
+
+test('idle custom update validates once but discards its snapshot before a later show', () => {
+  let factoryCalls = 0;
+  const unregister = registerMark('idle-update-snapshot', () => {
+    factoryCalls += 1;
+    return { paths: [`M ${factoryCalls} 0 L ${factoryCalls} 1`] };
+  });
+  const harness = annotationHarness();
+  const controller = createAnnotation(
+    harness.owner,
+    { mark: 'idle-update-snapshot', seed: 'before' },
+    harness.env,
+  );
+
+  controller.update({ seed: 'after' });
+  assert.equal(factoryCalls, 1);
+  assert.equal(controller.state, 'idle');
+
+  controller.show();
+  assert.equal(factoryCalls, 2);
+  assert.deepEqual(harness.calls.at(-1)[2], ['M 2 0 L 2 1']);
+  controller.destroy();
+  unregister();
+});
+
+test('visible change from built-in to custom draws the one validated factory snapshot', () => {
+  let factoryCalls = 0;
+  const duplicateCause = new Error('factory invoked twice for one update');
+  const unregister = registerMark('change-update-snapshot', () => {
+    factoryCalls += 1;
+    if (factoryCalls > 1) throw duplicateCause;
+    return { paths: ['M 7 0 L 7 1'] };
+  });
+  const harness = annotationHarness();
+  const controller = createAnnotation(harness.owner, { mark: 'box' }, harness.env);
+  controller.show();
+
+  controller.update({ mark: 'change-update-snapshot' });
+
+  assert.equal(factoryCalls, 1);
+  assert.equal(controller.state, 'visible');
+  assert.deepEqual(harness.calls.at(-1)[2], ['M 7 0 L 7 1']);
+  controller.destroy();
+  unregister();
 });
 
 test('changing away releases capture and changing back requires a fresh registration', () => {

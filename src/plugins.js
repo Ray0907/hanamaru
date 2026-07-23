@@ -104,14 +104,21 @@ function createHelpers(seed) {
     const sy = start.y + jitter(`${label}:start:y`, wobble);
     const ex = end.x + jitter(`${label}:end:x`, wobble);
     const ey = end.y + jitter(`${label}:end:y`, wobble);
-    const cx = ((sx + ex) / 2) + jitter(`${label}:control:x`, wobble);
-    const cy = ((sy + ey) / 2) + jitter(`${label}:control:y`, wobble);
+    const cx = (sx / 2) + (ex / 2) + jitter(`${label}:control:x`, wobble);
+    const cy = (sy / 2) + (ey / 2) + jitter(`${label}:control:y`, wobble);
     return `M ${format(sx)} ${format(sy)} Q ${format(cx)} ${format(cy)} ${format(ex)} ${format(ey)}`;
   }
 
   function closedPath(pointsInput, optionsInput = undefined) {
     if (!Array.isArray(pointsInput) || pointsInput.length < 3) invalid('points', pointsInput);
-    const points = pointsInput.map((value, index) => point(value, `points[${index}]`));
+    const points = [];
+    for (let index = 0; index < pointsInput.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(pointsInput, String(index));
+      if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) {
+        invalid(`points[${index}]`, pointsInput);
+      }
+      points.push(point(descriptor.value, `points[${index}]`));
+    }
     const { label, wobble } = helperOptions(
       optionsInput,
       { label: 'closed', wobble: 1 },
@@ -143,7 +150,7 @@ function validPath(path) {
   const whitespace = () => {
     while (index < path.length && /[\t\n\f\r ]/.test(path[index])) index += 1;
   };
-  const value = (flag, mayFollowValue) => {
+  const value = (kind, mayFollowValue) => {
     whitespace();
     if (path[index] === ',') {
       if (!mayFollowValue) return false;
@@ -152,7 +159,7 @@ function validPath(path) {
       if (index === path.length || path[index] === ','
         || /[A-Za-z]/.test(path[index])) return false;
     }
-    if (flag) {
+    if (kind === 'flag') {
       if (path[index] !== '0' && path[index] !== '1') return false;
       index += 1;
       return true;
@@ -161,6 +168,7 @@ function validPath(path) {
       path.slice(index),
     );
     if (match === null || !Number.isFinite(Number(match[0]))) return false;
+    if (kind === 'radius' && match[0][0] === '-') return false;
     index += match[0].length;
     return true;
   };
@@ -183,8 +191,10 @@ function validPath(path) {
     let groups = 0;
     while (true) {
       for (let parameter = 0; parameter < arity; parameter += 1) {
-        const flag = upper === 'A' && (parameter === 3 || parameter === 4);
-        if (!value(flag, parameter > 0 || groups > 0)) return false;
+        let kind = 'number';
+        if (upper === 'A' && (parameter === 0 || parameter === 1)) kind = 'radius';
+        else if (upper === 'A' && (parameter === 3 || parameter === 4)) kind = 'flag';
+        if (!value(kind, parameter > 0 || groups > 0)) return false;
       }
       groups += 1;
       const next = index;
