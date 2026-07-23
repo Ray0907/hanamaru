@@ -143,6 +143,109 @@ test('meaningful scoped notes own one in-root mirror and hide the ordinary visua
   });
 });
 
+test('owned scoped descriptions self-heal author token replacement and removed mirrors', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const fixture = window.__shadowAccessibility.first;
+    const frames = (count) => new Promise((resolve) => {
+      const next = () => {
+        if (count === 0) {
+          resolve();
+          return;
+        }
+        count -= 1;
+        requestAnimationFrame(next);
+      };
+      next();
+    });
+    let mutations = 0;
+    const observer = new MutationObserver((records) => {
+      mutations += records.length;
+    });
+    observer.observe(fixture.root, {
+      attributes: true,
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    const scope = createShadowScope(fixture.root);
+    const controller = scope.annotate(fixture.target, {
+      mark: 'circle',
+      note: 'Self-healing accessible description',
+      accessible: true,
+      duration: 0,
+    });
+    controller.show();
+    await controller.finished;
+
+    fixture.target.setAttribute('aria-describedby', 'author-alpha author-beta');
+    await frames(4);
+    const afterTokenReplacement = {
+      mirrors: fixture.root.querySelectorAll('[data-hana-shadow-mirror]').length,
+      tokens: fixture.target.getAttribute('aria-describedby')?.split(/\s+/u),
+    };
+
+    const removedMirror = fixture.root.querySelector('[data-hana-shadow-mirror]');
+    removedMirror.textContent = 'author-tampered text';
+    removedMirror.remove();
+    fixture.target.style.marginLeft = '1px';
+    await frames(4);
+    const currentMirror = fixture.root.querySelector('[data-hana-shadow-mirror]');
+    const afterMirrorRemoval = {
+      connected: currentMirror?.isConnected,
+      inRoot: currentMirror?.getRootNode() === fixture.root,
+      mirrors: fixture.root.querySelectorAll('[data-hana-shadow-mirror]').length,
+      text: currentMirror?.textContent,
+      tokens: fixture.target.getAttribute('aria-describedby')?.split(/\s+/u),
+    };
+
+    const settledMutations = mutations;
+    await frames(4);
+    const laterMutations = mutations;
+    controller.destroy();
+    const afterDestroy = {
+      mirrors: fixture.root.querySelectorAll('[data-hana-shadow-mirror]').length,
+      tokens: fixture.target.getAttribute('aria-describedby'),
+    };
+    observer.disconnect();
+    scope.destroy();
+    return {
+      afterDestroy,
+      afterMirrorRemoval,
+      afterTokenReplacement,
+      laterMutations,
+      settledMutations,
+    };
+  });
+
+  expect(result.afterTokenReplacement).toMatchObject({
+    mirrors: 1,
+    tokens: [
+      'author-alpha',
+      'author-beta',
+      expect.stringMatching(/^hana-shadow-root-\d+-mirror-\d+$/u),
+    ],
+  });
+  expect(result.afterMirrorRemoval).toMatchObject({
+    connected: true,
+    inRoot: true,
+    mirrors: 1,
+    text: 'Self-healing accessible description',
+    tokens: [
+      'author-alpha',
+      'author-beta',
+      expect.stringMatching(/^hana-shadow-root-\d+-mirror-\d+$/u),
+    ],
+  });
+  expect(result.laterMutations).toBe(result.settledMutations);
+  expect(result.afterDestroy).toEqual({
+    mirrors: 0,
+    tokens: 'author-alpha author-beta',
+  });
+});
+
 test('mirrors stay unique across roots and updates preserve author description tokens', async ({
   page,
 }) => {
@@ -1005,6 +1108,77 @@ test('transformed contained clipped host keeps viewport geometry outside its cli
   expect(result.pageOverflow.height).toBeLessThanOrEqual(0);
 });
 
+test('Document-side host dependencies reflow one root for preceding flow and inherited theme changes', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const { first, second } = window.__shadowAccessibility;
+    const wrapper = document.createElement('div');
+    const preceding = document.createElement('div');
+    preceding.style.height = '20px';
+    first.host.before(wrapper);
+    wrapper.append(preceding, first.host);
+    first.host.style.display = 'block';
+    wrapper.before(second.host);
+    second.host.style.cssText = 'position:absolute;left:620px;top:80px';
+    document.body.style.setProperty('--hana-color', 'rgb(18 52 86)');
+
+    const firstScope = createShadowScope(first.root);
+    const secondScope = createShadowScope(second.root);
+    const firstController = firstScope.annotate(first.target, {
+      mark: 'box', note: 'Document dependency', accessible: true, duration: 0,
+    });
+    const secondController = secondScope.annotate(second.target, {
+      mark: 'box', note: null, duration: 0,
+    });
+    firstController.show();
+    secondController.show();
+    await Promise.all([firstController.finished, secondController.finished]);
+    const frames = () => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    await frames();
+    const [firstPortal, secondPortal] = [
+      ...document.querySelectorAll('[data-hana-shadow-overlay]'),
+    ];
+    const firstGroup = firstPortal.querySelector('.hana-annotation');
+    const secondGroup = secondPortal.querySelector('.hana-annotation');
+    const nativeSecondRect = second.target.getBoundingClientRect.bind(second.target);
+    let unrelatedReads = 0;
+    second.target.getBoundingClientRect = () => {
+      unrelatedReads += 1;
+      return nativeSecondRect();
+    };
+    const before = {
+      firstY: firstGroup.getBBox().y,
+      secondY: secondGroup.getBBox().y,
+      color: firstGroup.style.getPropertyValue('--hana-color'),
+    };
+
+    preceding.style.height = '120px';
+    await frames();
+    const afterFlow = {
+      firstY: firstGroup.getBBox().y,
+      secondY: secondGroup.getBBox().y,
+      unrelatedReads,
+    };
+
+    document.body.style.setProperty('--hana-color', 'rgb(120 40 90)');
+    await frames();
+    const afterTheme = firstGroup.style.getPropertyValue('--hana-color');
+    firstScope.destroy();
+    secondScope.destroy();
+    return { afterFlow, afterTheme, before };
+  });
+
+  expect(result.before.color).toBe('rgb(18 52 86)');
+  expect(result.afterFlow.firstY).toBeCloseTo(result.before.firstY + 100, 1);
+  expect(result.afterFlow.secondY).toBeCloseTo(result.before.secondY, 4);
+  expect(result.afterFlow.unrelatedReads).toBe(0);
+  expect(result.afterTheme).toBe('rgb(120 40 90)');
+});
+
 test('root mutations, host scrolling, resize, and visual viewport signals reflow only affected roots', async ({
   page,
 }) => {
@@ -1296,6 +1470,224 @@ test('scoped layout observes the shadow host as a scroll and resize dependency',
     hostScroll: true,
     hostResize: true,
     targetResize: true,
+  });
+});
+
+test('deep nested scopes follow every composed scroll resize and mutation dependency', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const { second } = window.__shadowAccessibility;
+    second.host.style.cssText = 'position:absolute;left:700px;top:80px';
+    const outerScroller = document.createElement('div');
+    outerScroller.style.cssText = [
+      'position:absolute',
+      'left:80px',
+      'top:160px',
+      'width:420px',
+      'height:140px',
+      'overflow:auto',
+      'overflow-anchor:none',
+    ].join(';');
+    const documentSibling = document.createElement('div');
+    documentSibling.style.height = '20px';
+    const outerHost = document.createElement('div');
+    outerHost.style.height = '360px';
+    outerScroller.append(documentSibling, outerHost);
+    document.body.append(outerScroller);
+
+    const outerRoot = outerHost.attachShadow({ mode: 'open' });
+    outerRoot.innerHTML = `
+      <div id="outer-sibling" style="height:18px"></div>
+      <div id="middle-host"></div>
+    `;
+    const outerSibling = outerRoot.querySelector('#outer-sibling');
+    const middleHost = outerRoot.querySelector('#middle-host');
+    const middleRoot = middleHost.attachShadow({ mode: 'open' });
+    middleRoot.innerHTML = `
+      <div style="height:12px"></div>
+      <div id="inner-host"></div>
+    `;
+    const innerHost = middleRoot.querySelector('#inner-host');
+    const innerRoot = innerHost.attachShadow({ mode: 'open' });
+    innerRoot.innerHTML = '<button id="nested-target">Nested target</button>';
+    const nestedTarget = innerRoot.querySelector('#nested-target');
+
+    const nativeAdd = EventTarget.prototype.addEventListener;
+    const nativeRemove = EventTarget.prototype.removeEventListener;
+    const NativeResizeObserver = ResizeObserver;
+    let scrollAdds = 0;
+    let scrollRemoves = 0;
+    const resizeObserved = [];
+    const resizeUnobserved = [];
+    EventTarget.prototype.addEventListener = function addEventListener(type, listener, options) {
+      if (this === outerScroller && type === 'scroll') scrollAdds += 1;
+      return nativeAdd.call(this, type, listener, options);
+    };
+    EventTarget.prototype.removeEventListener = function removeEventListener(
+      type,
+      listener,
+      options,
+    ) {
+      if (this === outerScroller && type === 'scroll') scrollRemoves += 1;
+      return nativeRemove.call(this, type, listener, options);
+    };
+    window.ResizeObserver = class TrackingResizeObserver {
+      constructor(callback) {
+        this.native = new NativeResizeObserver(callback);
+      }
+
+      observe(target) {
+        resizeObserved.push(target);
+        this.native.observe(target);
+      }
+
+      unobserve(target) {
+        resizeUnobserved.push(target);
+        this.native.unobserve(target);
+      }
+
+      disconnect() {
+        this.native.disconnect();
+      }
+    };
+
+    let nestedScope;
+    let secondScope;
+    try {
+      const { createShadowScope } = await import('/src/shadow.js');
+      nestedScope = createShadowScope(innerRoot);
+      secondScope = createShadowScope(second.root);
+      const nestedController = nestedScope.annotate(nestedTarget, {
+        mark: 'box',
+        note: 'Deep composed dependency',
+        placement: 'right',
+        accessible: true,
+        duration: 0,
+      });
+      const secondController = secondScope.annotate(second.target, {
+        mark: 'box', note: null, duration: 0,
+      });
+      nestedController.show();
+      secondController.show();
+      await Promise.all([nestedController.finished, secondController.finished]);
+      const frames = () => new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
+      await frames();
+      const [nestedPortal, secondPortal] = [
+        ...document.querySelectorAll('[data-hana-shadow-overlay]'),
+      ];
+      const nestedGroup = nestedPortal.querySelector('.hana-annotation');
+      const nestedNote = nestedPortal.querySelector('.hana-note');
+      const secondGroup = secondPortal.querySelector('.hana-annotation');
+      const nativeSecondRect = second.target.getBoundingClientRect.bind(second.target);
+      let unrelatedReads = 0;
+      second.target.getBoundingClientRect = () => {
+        unrelatedReads += 1;
+        return nativeSecondRect();
+      };
+      const snapshot = () => ({
+        groupY: nestedGroup.getBBox().y,
+        middleY: middleHost.getBoundingClientRect().top,
+        noteY: nestedNote.getBoundingClientRect().top,
+        outerSiblingHeight: outerSibling.getBoundingClientRect().height,
+        secondY: secondGroup.getBBox().y,
+        targetY: nestedTarget.getBoundingClientRect().top,
+      });
+      const before = snapshot();
+
+      outerScroller.scrollTop = 40;
+      outerScroller.dispatchEvent(new Event('scroll'));
+      await frames();
+      const afterScroll = snapshot();
+
+      outerSibling.style.height = '48px';
+      await frames();
+      const afterOuterSibling = snapshot();
+
+      documentSibling.style.height = '40px';
+      await frames();
+      const afterDocumentSibling = snapshot();
+
+      outerHost.style.setProperty('--hana-color', 'rgb(24 96 72)');
+      await frames();
+      const afterTheme = nestedGroup.style.getPropertyValue('--hana-color');
+      const dependencies = {
+        outerScrollerResize: resizeObserved.includes(outerScroller),
+        outerHostResize: resizeObserved.includes(outerHost),
+        middleHostResize: resizeObserved.includes(middleHost),
+        innerHostResize: resizeObserved.includes(innerHost),
+        scrollAdds,
+      };
+
+      nestedController.destroy();
+      const cleanup = {
+        outerScrollerResize: resizeUnobserved.includes(outerScroller),
+        outerHostResize: resizeUnobserved.includes(outerHost),
+        middleHostResize: resizeUnobserved.includes(middleHost),
+        innerHostResize: resizeUnobserved.includes(innerHost),
+        scrollRemoves,
+      };
+      secondController.destroy();
+      nestedScope.destroy();
+      secondScope.destroy();
+      nestedScope = null;
+      secondScope = null;
+      return {
+        afterDocumentSibling,
+        afterOuterSibling,
+        afterScroll,
+        afterTheme,
+        before,
+        cleanup,
+        dependencies,
+        unrelatedReads,
+      };
+    } finally {
+      nestedScope?.destroy();
+      secondScope?.destroy();
+      EventTarget.prototype.addEventListener = nativeAdd;
+      EventTarget.prototype.removeEventListener = nativeRemove;
+      window.ResizeObserver = NativeResizeObserver;
+    }
+  });
+
+  expect(result.dependencies).toEqual({
+    outerScrollerResize: true,
+    outerHostResize: true,
+    middleHostResize: true,
+    innerHostResize: true,
+    scrollAdds: 1,
+  });
+  expect(result.afterScroll.groupY).toBeCloseTo(result.before.groupY - 40, 1);
+  expect(result.afterScroll.noteY).toBeCloseTo(result.before.noteY - 40, 1);
+  expect(result.afterScroll.targetY).toBeCloseTo(result.before.targetY - 40, 1);
+  expect(result.afterOuterSibling.outerSiblingHeight).toBeCloseTo(
+    result.afterScroll.outerSiblingHeight + 30,
+    1,
+  );
+  expect(result.afterOuterSibling.middleY).toBeCloseTo(result.afterScroll.middleY + 30, 1);
+  expect(result.afterOuterSibling.targetY).toBeCloseTo(result.afterScroll.targetY + 30, 1);
+  expect(result.afterOuterSibling.groupY).toBeCloseTo(result.afterScroll.groupY + 30, 1);
+  expect(result.afterOuterSibling.noteY).toBeCloseTo(result.afterScroll.noteY + 30, 1);
+  expect(result.afterDocumentSibling.groupY).toBeCloseTo(
+    result.afterOuterSibling.groupY + 20,
+    1,
+  );
+  expect(result.afterDocumentSibling.noteY).toBeCloseTo(
+    result.afterOuterSibling.noteY + 20,
+    1,
+  );
+  expect(result.afterDocumentSibling.secondY).toBeCloseTo(result.before.secondY, 4);
+  expect(result.afterTheme).toBe('rgb(24 96 72)');
+  expect(result.unrelatedReads).toBe(0);
+  expect(result.cleanup).toEqual({
+    outerScrollerResize: true,
+    outerHostResize: true,
+    middleHostResize: true,
+    innerHostResize: true,
+    scrollRemoves: 1,
   });
 });
 

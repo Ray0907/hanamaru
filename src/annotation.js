@@ -493,6 +493,9 @@ export function createAnnotationEnvironmentWithResources({
       create(owner, text) {
         return resources.createMirror(owner, text);
       },
+      ensure(mirror, text) {
+        return resources.ensureMirror(mirror, text);
+      },
       update(mirror, text) {
         return resources.updateMirror(mirror, text);
       },

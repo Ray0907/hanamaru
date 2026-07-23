@@ -154,6 +154,15 @@ function resourceHarness(options = {}) {
       mirror.text = text;
       options.onUpdateMirror?.(mirror);
     },
+    ensureMirror(root, mirror, id, text) {
+      calls.push(['ensureMirror', root, mirror, id, text]);
+      if (options.ensureMirrorError !== undefined) throw options.ensureMirrorError;
+      mirror.id = id;
+      mirror.removed = false;
+      mirror.root = root;
+      mirror.text = text;
+      options.onEnsureMirror?.(mirror);
+    },
     removeMirror(mirror) {
       calls.push(['removeMirror', mirror]);
       mirror.removed = true;
@@ -428,6 +437,63 @@ test('mirror IDs are unique across roots and only owned aria tokens are removed'
   second.release();
   assert.equal(mirrorC.removed, true);
   assert.equal(secondOwner.attributes.get('aria-describedby'), 'author-second');
+});
+
+test('owned mirror ensure repairs adapter state and owner token without stable rewrites', () => {
+  const document = {};
+  const shadow = root(document, 'ensure');
+  const harness = resourceHarness();
+  const lease = acquire(shadow, styleLease(), harness);
+  const target = owner(shadow, 'author-before');
+  const mirror = lease.environment.createMirror(target, 'Initial');
+  const ownedId = mirror.id;
+
+  target.attributes.set('aria-describedby', 'author-late');
+  mirror.id = 'author-tampered';
+  mirror.removed = true;
+  mirror.text = 'author-tampered';
+  assert.strictEqual(
+    lease.environment.ensureMirror(mirror, 'Restored'),
+    mirror,
+  );
+  assert.equal(mirror.id, ownedId);
+  assert.equal(mirror.removed, false);
+  assert.equal(mirror.text, 'Restored');
+  assert.equal(
+    target.attributes.get('aria-describedby'),
+    `author-late ${mirror.id}`,
+  );
+
+  const writes = harness.calls.filter(([name]) => name === 'setDescription').length;
+  lease.environment.ensureMirror(mirror, 'Restored');
+  assert.equal(
+    harness.calls.filter(([name]) => name === 'setDescription').length,
+    writes,
+  );
+  lease.release();
+  assert.equal(target.attributes.get('aria-describedby'), 'author-late');
+});
+
+test('owned mirror ensure failure transactionally removes its node and token', () => {
+  const document = {};
+  const shadow = root(document, 'ensure-failure');
+  const cause = new Error('mirror ensure failed');
+  const harness = resourceHarness({ ensureMirrorError: cause });
+  const lease = acquire(shadow, styleLease(), harness);
+  const target = owner(shadow, 'author-token');
+  const mirror = lease.environment.createMirror(target, 'Initial');
+
+  assert.throws(
+    () => lease.environment.ensureMirror(mirror, 'Restored'),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_RESOURCES'
+      && error.details.cause === cause
+      && error.details.operation === 'ensure mirror',
+  );
+  assert.equal(mirror.removed, true);
+  assert.equal(target.attributes.get('aria-describedby'), 'author-token');
+  lease.environment.removeMirror(mirror);
+  lease.release();
 });
 
 test('mirror registry rejects cross-root owners and foreign mirror updates without residue', () => {

@@ -380,6 +380,8 @@ export function createRenderer({
     if (description !== null) {
       if (descriptionMirror === null) {
         descriptionMirror = description.create(owner, options.note);
+      } else if (typeof description.ensure === 'function') {
+        descriptionMirror = description.ensure(descriptionMirror, options.note);
       }
       descriptionAssociated = true;
       return;

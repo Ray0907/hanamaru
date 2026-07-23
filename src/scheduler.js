@@ -742,9 +742,13 @@ class SharedDocumentResources {
     const token = renewToken ? {} : controller.token;
     const mutationRoot = options.mutationRoot ?? this.#doc;
     const mutationHost = options.mutationHost ?? null;
+    const layoutDependencies = this.#discoverLayoutDependencies(
+      options.layoutDependencies,
+    );
     const binding = {
       generation,
       id,
+      layoutDependencies,
       mutationRoot,
       mutationHost,
       mutationScope: this.#discoverMutationScope(record, mutationRoot),
@@ -754,8 +758,8 @@ class SharedDocumentResources {
       apply,
       read,
       record,
-      resizeTargets: this.#discoverResizeTargets(record, note, mutationHost),
-      scrollTargets: this.#discoverScrollTargets(record, mutationHost),
+      resizeTargets: this.#discoverResizeTargets(record, note, layoutDependencies),
+      scrollTargets: this.#discoverScrollTargets(record, layoutDependencies),
       token,
       write,
     };
@@ -779,38 +783,57 @@ class SharedDocumentResources {
     };
   }
 
-  #discoverScrollTargets(record, mutationHost) {
+  #discoverLayoutDependencies(input) {
+    const elements = (key) => new Set(
+      [...(input?.[key] ?? [])].filter((value) => this.#isElement(value)),
+    );
+    const ancestors = elements('ancestors');
+    const hosts = elements('hosts');
+    const preceding = elements('preceding');
+    const outerRoots = new Set(
+      [...(input?.roots ?? [])].slice(1).filter((value) => (
+        value !== null
+        && typeof value === 'object'
+        && value.nodeType === 11
+        && value.ownerDocument === this.#doc
+      )),
+    );
+    return {
+      ancestors,
+      exactMutations: new Set([...ancestors, ...outerRoots]),
+      hosts,
+      preceding,
+      subtreeMutations: new Set([...hosts, ...preceding]),
+    };
+  }
+
+  #discoverScrollTargets(record, layoutDependencies) {
     const targets = new Set();
     let current = this.#isElement(record.ownerElement)
       ? record.ownerElement
       : this.#isElement(record.element) ? record.element : null;
     const scrollingElement = this.#doc.scrollingElement;
-    let crossedShadowBoundary = false;
-
-    while (current !== null) {
-      const style = this.#window.getComputedStyle(current);
+    const addTarget = (target) => {
+      const style = this.#window.getComputedStyle(target);
       if (/^(auto|scroll|overlay)$/u.test(style.overflowX)
         || /^(auto|scroll|overlay)$/u.test(style.overflowY)) {
-        targets.add(current);
+        targets.add(target);
       }
+    };
+
+    while (current !== null) {
+      addTarget(current);
       if (current === scrollingElement) {
         break;
       }
-      const parent = current.parentElement;
-      if (parent === null
-        && !crossedShadowBoundary
-        && this.#isElement(mutationHost)) {
-        current = mutationHost;
-        crossedShadowBoundary = true;
-      } else {
-        current = parent;
-      }
+      current = current.parentElement;
     }
+    for (const ancestor of layoutDependencies.ancestors) addTarget(ancestor);
     targets.add(this.#window);
     return targets;
   }
 
-  #discoverResizeTargets(record, note, mutationHost) {
+  #discoverResizeTargets(record, note, layoutDependencies) {
     const targets = new Set();
     if (this.#isElement(record.element)) {
       targets.add(record.element);
@@ -820,9 +843,12 @@ class SharedDocumentResources {
     if (this.#isElement(note)) {
       targets.add(note);
     }
-    if (this.#isElement(mutationHost)) {
-      targets.add(mutationHost);
-    }
+    layoutDependencies.ancestors.forEach((target) => {
+      if (target !== this.#doc.body && target !== this.#doc.documentElement) {
+        targets.add(target);
+      }
+    });
+    layoutDependencies.preceding.forEach((target) => targets.add(target));
     return targets;
   }
 
@@ -859,13 +885,19 @@ class SharedDocumentResources {
       if (ignored) continue;
 
       for (const binding of this.#layouts.values()) {
-        if (binding.mutationRoot !== mutationRoot) continue;
-        if (record.target === mutationHost
-          || binding.mutationScope === mutationRoot
-          || record.target === binding.mutationScope
-          || binding.mutationScope.contains?.(record.target)
-          || (mutationRoot !== this.#doc
-            && record.target.contains?.(binding.mutationScope))) {
+        const internal = binding.mutationRoot === mutationRoot
+          && (record.target === mutationHost
+            || binding.mutationScope === mutationRoot
+            || record.target === binding.mutationScope
+            || binding.mutationScope.contains?.(record.target)
+            || (mutationRoot !== this.#doc
+              && record.target.contains?.(binding.mutationScope)));
+        const external = binding.mutationRoot !== this.#doc
+          && (binding.layoutDependencies.exactMutations.has(record.target)
+            || [...binding.layoutDependencies.subtreeMutations].some((dependency) => (
+              dependency === record.target || dependency.contains?.(record.target)
+            )));
+        if (internal || external) {
           ids.add(binding.id);
         }
       }

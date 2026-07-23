@@ -63,23 +63,25 @@ function createPortal(document, root, rootId) {
   };
 }
 
-function createMutationObserver(root, host, notify) {
+function createMutationObserver(root, host, notify, roots = [root]) {
   const Observer = root.ownerDocument.defaultView.MutationObserver;
   if (typeof Observer !== 'function') {
     throw new TypeError('Shadow resources require MutationObserver');
   }
   const observer = new Observer(notify);
   try {
-    observer.observe(root, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ['class', 'style', 'hidden'],
-    });
+    for (const observedRoot of roots) {
+      observer.observe(observedRoot, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['class', 'style', 'hidden', 'aria-describedby'],
+      });
+    }
     observer.observe(host, {
       attributes: true,
-      attributeFilter: ['class', 'style', 'hidden'],
+      attributeFilter: ['class', 'style', 'hidden', 'aria-describedby'],
     });
   } catch (error) {
     try { observer.disconnect(); } catch {}
@@ -138,6 +140,9 @@ function browserAdapter() {
     hostForRoot(root) {
       return contextFor(root).host;
     },
+    layoutDependenciesForRoot(root) {
+      return contextFor(root).layoutDependencies;
+    },
     viewForRoot(root) {
       return contextFor(root).view;
     },
@@ -150,8 +155,13 @@ function browserAdapter() {
     rollbackPortal(_root, raw) {
       releaseRawRecord(raw);
     },
-    createMutationObserver(root, notify) {
-      return createMutationObserver(root, contextFor(root).host, notify);
+    createMutationObserver(root, notify, layoutDependencies) {
+      return createMutationObserver(
+        root,
+        contextFor(root).host,
+        notify,
+        layoutDependencies.roots,
+      );
     },
     rollbackObserver(_root, raw) {
       releaseRawRecord(raw);
@@ -159,6 +169,17 @@ function browserAdapter() {
     createMirror,
     updateMirror(mirror, text) {
       mirror.textContent = text;
+    },
+    ensureMirror(root, mirror, id, text) {
+      if (mirror.getRootNode() !== root) root.append(mirror);
+      if (mirror.className !== 'hana-shadow-mirror') {
+        mirror.className = 'hana-shadow-mirror';
+      }
+      if (!mirror.hasAttribute('data-hana-shadow-mirror')) {
+        mirror.setAttribute('data-hana-shadow-mirror', '');
+      }
+      if (mirror.id !== id) mirror.id = id;
+      if (mirror.textContent !== text) mirror.textContent = text;
     },
     removeMirror(mirror) {
       mirror.remove();
@@ -257,7 +278,7 @@ function rollbackRaw(activeAdapter, method, context, raw, install) {
   return releaseRawRecord(raw);
 }
 
-function createScopedShared(documentShared, root, host, portal) {
+function createScopedShared(documentShared, root, host, portal, layoutDependencies) {
   const methodCache = new Map();
   const local = {
     noteLayer: portal.noteLayer,
@@ -273,6 +294,7 @@ function createScopedShared(documentShared, root, host, portal) {
         if (!methodCache.has(key)) {
           methodCache.set(key, (options) => documentShared.observeLayout({
             ...options,
+            layoutDependencies,
             mutationHost: host,
             mutationRoot: root,
           }));
@@ -283,6 +305,7 @@ function createScopedShared(documentShared, root, host, portal) {
         if (!methodCache.has(key)) {
           methodCache.set(key, (id, options) => documentShared.rebindLayout(id, {
             ...options,
+            layoutDependencies,
             mutationHost: host,
             mutationRoot: root,
           }));
@@ -400,8 +423,10 @@ function environmentFor(record) {
     const next = add
       ? addDescriptionToken(current, id)
       : removeDescriptionToken(current, id);
-    if (next === null) adapter.removeDescription(owner, root);
-    else adapter.setDescription(owner, next, root);
+    if (next !== current) {
+      if (next === null) adapter.removeDescription(owner, root);
+      else adapter.setDescription(owner, next, root);
+    }
     assertOperation(token, operation);
   }
 
@@ -486,6 +511,41 @@ function environmentFor(record) {
     }
   }
 
+  function ensureOwnedMirror(mirror, text) {
+    const operation = 'ensure mirror';
+    const token = beginOperation(operation);
+    const entry = mirrors.get(mirror);
+    if (entry === undefined) {
+      endOperation(token);
+      throw new TypeError('mirror must be an active owned mirror');
+    }
+    if (typeof text !== 'string') {
+      endOperation(token);
+      throw new TypeError('mirror text must be a string');
+    }
+    try {
+      if (typeof adapter.ensureMirror === 'function') {
+        adapter.ensureMirror(root, entry.mirror, entry.id, text);
+      } else {
+        adapter.updateMirror(entry.mirror, text);
+      }
+      assertOperation(token, operation);
+      writeDescriptionDuringOperation(
+        entry.owner,
+        entry.id,
+        true,
+        token,
+        operation,
+      );
+      return entry.mirror;
+    } catch (error) {
+      try { removeEntry(entry); } catch {}
+      throw operationError(error, operation);
+    } finally {
+      endOperation(token);
+    }
+  }
+
   function removeEntry(entry) {
     mirrors.delete(entry.mirror);
     pendingMirrors.delete(entry);
@@ -561,6 +621,7 @@ function environmentFor(record) {
     observerTarget: root,
     allocateId,
     createMirror: createOwnedMirror,
+    ensureMirror: ensureOwnedMirror,
     updateMirror: updateOwnedMirror,
     removeMirror: removeOwnedMirror,
     createEvent(type, detail, owner) {
@@ -652,6 +713,14 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
   const host = typeof activeAdapter.hostForRoot === 'function'
     ? activeAdapter.hostForRoot(root)
     : null;
+  const layoutDependencies = typeof activeAdapter.layoutDependenciesForRoot === 'function'
+    ? activeAdapter.layoutDependenciesForRoot(root)
+    : Object.freeze({
+      ancestors: Object.freeze(host === null ? [] : [host]),
+      hosts: Object.freeze(host === null ? [] : [host]),
+      preceding: Object.freeze([]),
+      roots: Object.freeze([root]),
+    });
   let rawDocumentLease;
   let rawPortalInstall;
   let rawObserverInstall;
@@ -697,7 +766,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
         portalInstall.overlay,
         ...(host === null ? [] : [host]),
       );
-    });
+    }, layoutDependencies);
     hasRawObserverInstall = true;
     observerInstall = validateInstall(
       rawObserverInstall,
@@ -709,6 +778,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
       root,
       host,
       portalInstall,
+      layoutDependencies,
     );
     record = {
       adapter: activeAdapter,
@@ -718,6 +788,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
       environment: null,
       host,
       knownMirrors: new WeakSet(),
+      layoutDependencies,
       mirrors: new Map(),
       observerInstall,
       operation: null,

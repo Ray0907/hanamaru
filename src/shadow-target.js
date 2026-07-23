@@ -215,12 +215,14 @@ function shadowContext(root) {
     }
 
     const nodePrototype = realm.Node.prototype;
+    const elementPrototype = realm.Element.prototype;
     const shadowPrototype = realm.ShadowRoot.prototype;
     const readers = {
       ownerDocument: propertyReader(nodePrototype, 'ownerDocument'),
       isConnected: propertyReader(nodePrototype, 'isConnected'),
       getRootNode: methodReader(nodePrototype, 'getRootNode'),
       parentElement: propertyReader(nodePrototype, 'parentElement'),
+      previousElementSibling: propertyReader(elementPrototype, 'previousElementSibling'),
       host: propertyReader(shadowPrototype, 'host'),
     };
     const host = readers.host(root);
@@ -251,6 +253,52 @@ function shadowContext(root) {
   }
 }
 
+function shadowLayoutDependencies(context) {
+  const ancestors = [];
+  const hosts = [];
+  const preceding = [];
+  const roots = [context.root];
+  const seenRoots = new Set(roots);
+  let current = context.readers.host(context.root);
+  let boundaryHost = current;
+
+  while (current !== null) {
+    ancestors.push(current);
+    if (current === boundaryHost) hosts.push(current);
+    for (
+      let sibling = context.readers.previousElementSibling(current);
+      sibling !== null;
+      sibling = context.readers.previousElementSibling(sibling)
+    ) {
+      preceding.push(sibling);
+    }
+
+    const parent = context.readers.parentElement(current);
+    if (parent !== null) {
+      current = parent;
+      continue;
+    }
+
+    const containingRoot = context.readers.getRootNode(current);
+    if (containingRoot === context.document) break;
+    if (seenRoots.has(containingRoot)) {
+      throw new TypeError('ShadowRoot composed ancestor cycle');
+    }
+    const host = context.readers.host(containingRoot);
+    seenRoots.add(containingRoot);
+    roots.push(containingRoot);
+    boundaryHost = host;
+    current = host;
+  }
+
+  return Object.freeze({
+    ancestors: Object.freeze(ancestors),
+    hosts: Object.freeze(hosts),
+    preceding: Object.freeze(preceding),
+    roots: Object.freeze(roots),
+  });
+}
+
 export function assertShadowRoot(root) {
   shadowContext(root);
   return root;
@@ -267,6 +315,7 @@ export function shadowDomIntrinsics(root) {
   return Object.freeze({
     document: context.document,
     host: context.readers.host(context.root),
+    layoutDependencies: shadowLayoutDependencies(context),
     view: context.realm,
     assertElement(element) {
       assertExactElement(element, context);
