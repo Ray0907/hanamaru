@@ -44,6 +44,8 @@ The user selection is never cleared, collapsed, rewritten, or retained. Once clo
 
 Multiple ranges are rejected as ambiguous rather than silently choosing the first. Whitespace-only text is accepted when the native range is non-collapsed because Range annotation is geometric; serialization remains subject to its separate target-key rules.
 
+A standalone `annotateSelection()` accepts Document-rooted selections, including an explicit Selection from an iframe document. A ShadowRoot-rooted selection must use `scope.annotateSelection(options, selection?)` from an active `createShadowScope(root)` facade. Standalone Shadow selection throws `HANA_TARGET_SHADOW_UNSCOPED`; it never guesses style or resource ownership.
+
 ## Errors
 
 All validation failures throw `HanamaruTargetError`:
@@ -51,14 +53,17 @@ All validation failures throw `HanamaruTargetError`:
 - `HANA_TARGET_SELECTION_UNAVAILABLE` for no usable selection;
 - `HANA_TARGET_SELECTION_EMPTY` for zero ranges or a collapsed range;
 - `HANA_TARGET_SELECTION_AMBIGUOUS` for more than one range;
+- `HANA_TARGET_SHADOW_UNSCOPED` for a ShadowRoot selection passed to the standalone helper;
 - existing `HANA_TARGET_INVALID` semantics for disconnected, cross-document, or cross-root boundaries.
 
 Details include only safe diagnostic primitives such as `rangeCount`, `collapsed`, and root kinds; no live Selection is retained in error details.
 
 ## Integration
 
-The helper delegates range ownership, observation, layout, animation, events, and teardown to the existing annotation runtime. It contains no renderer or scheduler fork. Shadow-root selections work when their root has been prepared by the Shadow subpath; the Selection helper itself does not install styles.
+The helper delegates range ownership, observation, layout, animation, events, and teardown to the existing annotation runtime. It contains no renderer or scheduler fork.
+
+`scope.annotateSelection()` verifies that the cloned Range belongs to that exact scope root, creates the controller through the root-scoped environment, and adds it to the scope's ownership set. Destroying the scope destroys that controller. A Selection controller cannot outlive or transfer away from its creating Shadow scope.
 
 ## Verification
 
-Unit and browser tests cover omitted and explicit Selection, one valid range, post-call selection changes, collapsed ranges, multiple ranges, disconnected boundaries, cross-document boundaries, ShadowRoot boundaries, reduced motion, abort semantics, and unchanged host selection. Package tests prove the subpath declaration and export resolve without adding the helper to the main entry or IIFE.
+Unit and browser tests cover omitted and explicit Selection, one valid range, post-call selection changes, collapsed ranges, multiple ranges, disconnected boundaries, cross-document boundaries, iframe Document selection, standalone Shadow rejection, scoped open and retained-closed Shadow selection, scope destruction, reduced motion, abort semantics, and unchanged host selection. Package tests prove the subpath declaration and export resolve without adding the helper to the main entry or IIFE.

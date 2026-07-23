@@ -30,7 +30,7 @@ const restored = restore(definition, {
 
 ## Schema
 
-Every definition begins with:
+The exported declaration types are `SerializedDefinition`, `SerializedAnnotation`, `SerializedStory`, `SerializedGroup`, and `SerializedTarget`. Every top-level definition begins with:
 
 ```json
 {
@@ -39,23 +39,104 @@ Every definition begins with:
 }
 ```
 
-`kind` is `annotation`, `story`, or `group`. Object keys are emitted in canonical order so repeated serialization produces byte-stable `JSON.stringify()` output for the same canonical options.
+`kind` is `annotation`, `story`, or `group`. Object keys are emitted in the exact order shown below, recursively, so repeated serialization produces byte-stable `JSON.stringify()` output for the same canonical options.
 
 Serializable targets are:
 
 ```json
 { "type": "selector", "selector": "#claim" }
-{ "type": "locator", "within": "#proof", "text": "exact phrase", "occurrence": 0 }
-{ "type": "key", "key": "review-17" }
+{
+  "type": "locator",
+  "within": { "type": "selector", "selector": "#proof" },
+  "text": "exact phrase",
+  "occurrence": 0
+}
+{
+  "type": "locator",
+  "within": { "type": "key", "key": "proof-container", "targetKind": "element" },
+  "text": "exact phrase"
+}
+{ "type": "key", "key": "review-17", "targetKind": "range" }
 ```
 
-String selectors and selector-scoped text locators serialize directly. A locator whose `within` is an Element, a direct Element target, and a native Range target require `keyForTarget`. The callback receives the original accepted target plus `{ kind, ownerElement, index? }` and must return a non-empty string. Hanamaru does not generate CSS paths.
+`targetKind` is `element` or `range`. A locator's `within` accepts only a serialized selector or an element key. String selectors and selector-scoped text locators serialize directly. A locator whose `within` is an Element, a direct Element target, and a native Range target require `keyForTarget`. The callback receives the original accepted target plus `{ role: 'target' | 'within', controllerKind, ownerElement, index? }` and must return a non-empty string. Direct keys preserve whether the resolver must return an Element or Range. Locator `within` keys always require an Element. Hanamaru does not generate CSS paths.
 
-Annotation definitions contain canonical annotation options. Story definitions contain canonical story options and ordered step definitions. Group definitions contain canonical group options and member definitions. Generated fallback seeds are serialized so restored geometry is deterministic.
+The complete canonical shapes are:
+
+```json
+{
+  "schema": "hanamaru/v1",
+  "kind": "annotation",
+  "target": { "type": "selector", "selector": "#claim" },
+  "options": {
+    "mark": "underline",
+    "note": null,
+    "placement": "auto",
+    "trigger": "manual",
+    "accessible": false,
+    "seed": "hana-annotation-1",
+    "duration": 650,
+    "motion": "system"
+  }
+}
+```
+
+```json
+{
+  "schema": "hanamaru/v1",
+  "kind": "story",
+  "options": {
+    "trigger": "manual",
+    "gap": 180,
+    "motion": "system"
+  },
+  "steps": [
+    {
+      "target": { "type": "selector", "selector": "#claim" },
+      "options": {
+        "mark": "underline",
+        "note": null,
+        "placement": "auto",
+        "accessible": false,
+        "seed": "hana-annotation-2",
+        "duration": 650
+      }
+    }
+  ]
+}
+```
+
+```json
+{
+  "schema": "hanamaru/v1",
+  "kind": "group",
+  "options": {
+    "trigger": "manual",
+    "motion": "system"
+  },
+  "members": [
+    {
+      "target": { "type": "selector", "selector": "#claim" },
+      "options": {
+        "mark": "underline",
+        "note": null,
+        "placement": "auto",
+        "accessible": false,
+        "seed": "hana-annotation-3",
+        "duration": 650
+      }
+    }
+  ]
+}
+```
+
+`once` is emitted immediately after `motion` only for a viewport Story that defines it. `occurrence` is omitted when absent. Annotation options always emit all eight canonical keys. Story and Group member options omit the aggregate-owned `trigger` and `motion` keys and emit the remaining six in the shown order. Generated fallback seeds are always emitted.
 
 ## Controller Metadata
 
-Core construction records an immutable, package-private canonical source definition for each controller. It must not expose live DOM nodes through a public field and must update atomically after a successful annotation `update()`. Story and Group metadata own frozen copies of their input definitions. Serialization reads this metadata through an internal symbol shared at source-build time; the symbol is not exported by the package.
+Core construction records immutable, package-private canonical metadata for each controller. It must not expose live DOM nodes through a public field and must update atomically after a successful annotation `update()`.
+
+Story and Group metadata is assembled from the successfully constructed member Annotation metadata, not raw input copies. It therefore captures every member's generated seed and normalized option defaults. Aggregate metadata stores the ordered member metadata references plus frozen aggregate options. Serialization reads this metadata through the one emitted shared ESM singleton symbol; the symbol is not exported by the package.
 
 ## Restore Rules
 
@@ -64,16 +145,17 @@ Core construction records an immutable, package-private canonical source definit
 - validates plain own-data objects and rejects accessors, unexpected prototypes, unknown keys, and cyclic input;
 - rejects unknown schema versions and kinds;
 - resolves selectors and locators only inside `root`;
-- requires `resolveTarget` for `key` targets;
+- calls `resolveTarget(key, { targetKind, role, controllerKind, index? })` for `key` targets;
 - validates the resolver result through normal target resolution;
+- requires an Element result for locator `within` keys and the declared Element or Range kind for direct keys;
 - preflights every Story or Group member before mounting any output;
 - never partially restores an aggregate.
 
-Resolver exceptions become `HanamaruTargetError` with the original cause in details. No callback is invoked before structural schema validation succeeds.
+Resolver exceptions become `HanamaruTargetError` code `HANA_TARGET_RESOLVER` with key, context, and original cause in details. A missing resolver is `HanamaruConfigError`. No callback is invoked before structural schema validation succeeds.
 
 ## Errors
 
-Malformed data, unsupported versions, unknown keys, non-finite numbers, and a missing `keyForTarget` callback are `HanamaruConfigError`. Missing, ambiguous, disconnected, or invalid restored targets are `HanamaruTargetError`. Serialization of a destroyed or foreign controller is `HanamaruStateError`.
+Malformed data, unsupported versions, unknown keys, non-finite numbers, and a missing `keyForTarget` callback are `HanamaruConfigError`. A thrown `keyForTarget`, non-string key, or empty key becomes `HanamaruConfigError` code `HANA_CONFIG_SERIALIZE_TARGET` with role and index context. Missing, ambiguous, disconnected, or invalid restored targets are `HanamaruTargetError`. Serialization of a destroyed or foreign controller is `HanamaruStateError`.
 
 ## Verification
 

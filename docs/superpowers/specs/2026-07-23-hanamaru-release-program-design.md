@@ -1,4 +1,4 @@
-# Hanamaru Six-Feature Release Program
+# Hanamaru Public Release Program
 
 **Date:** 2026-07-23  
 **Status:** User-approved design; pending independent spec review  
@@ -18,6 +18,17 @@ This document owns cross-cutting constraints and release sequencing. The bounded
 - `2026-07-23-hanamaru-shadow-design.md`
 - `2026-07-23-hanamaru-framework-adapters-design.md`
 - `2026-07-23-hanamaru-inspector-design.md`
+
+The user's six requested stages map to the bounded specs as follows:
+
+| Requested stage | Bounded specification |
+| --- | --- |
+| TypeScript plus public release | this program specification |
+| Selection API | Selection |
+| JSON serialization | Serialization |
+| Annotation Inspector | Inspector |
+| Group API | Group |
+| Plugin API, Shadow DOM, and framework wrappers | Plugins, Shadow, and Framework Adapters |
 
 The earlier `2026-07-22-hanamaru-runtime-design.md` remains authoritative for existing runtime behavior. This program intentionally supersedes its exclusions for framework adapters, Shadow DOM, package publication, and production deployment. It does not change the existing exclusions for accounts, collaboration, AI, image/canvas annotation, freehand drawing, or arbitrary drag positioning.
 
@@ -41,7 +52,9 @@ hanamaru-annotations
 
 The main entry retains exactly `VERSION`, `annotate`, `story`, `scan`, and the four typed error classes. Optional features do not become implicit globals or automatic startup work. The existing IIFE remains core-only. Optional features ship as ESM subpaths with declarations.
 
-Shared source modules may expose package-private hooks to sibling entry points, but those hooks must not appear in the package `exports` map or declaration surface. A subpath must never import another built bundle in a way that creates a second runtime registry. Build entry points share source, and esbuild must externalize framework peers.
+Shared source modules may expose package-private hooks to sibling entry points, but those hooks must not appear in the package `exports` map or declaration surface. A subpath must never import another independently bundled copy of runtime state.
+
+All ESM entries are built in one esbuild graph with `format: 'esm'`, `splitting: true`, and one `outdir`. The graph emits one shared singleton chunk that owns the custom-mark registry, controller-metadata symbol and WeakMaps, and root-resource registries. Every core and optional ESM entry imports that emitted chunk. The core IIFE is a separate core-only graph and has its own browser-global realm by design. A cross-subpath browser test imports core, Plugins, Serialization, Group, and Shadow together and proves registry, metadata, and root-resource identity.
 
 ## Distribution
 
@@ -71,7 +84,7 @@ dist/
   svelte/index.d.ts
 ```
 
-`package.json` must include `repository`, `homepage`, `bugs`, `keywords`, `types`, explicit conditional `exports`, and `sideEffects`. CSS is the only unconditional side effect and remains opt-in through `./style.css`. The package `files` list remains an allowlist. Published tarballs contain only `dist`, `README.md`, and `LICENSE`.
+`package.json` must include `repository`, `homepage`, `bugs`, `keywords`, `types`, explicit conditional `exports`, and `sideEffects`. CSS is the only declared side effect and remains opt-in through `./style.css`. The package `files` list remains an allowlist. Published tarballs contain only npm's mandatory `package.json` plus `dist`, `README.md`, and `LICENSE`.
 
 React, Vue, and Svelte are optional peer dependencies:
 
@@ -99,7 +112,17 @@ Optional entry points are measured with their peer and core imports externalized
 | `shadow` JavaScript plus shadow stylesheet payload | 12,288 bytes |
 | each framework adapter | 4,096 bytes |
 
-Every hard cap is enforced by `npm run check:dist`. Size reports must distinguish bundled bytes from external imports and may add report-only stretch targets without weakening hard checks.
+Size accounting uses gzip level 9 over file bytes:
+
+- a main ESM closure is the ESM entry plus every transitive local chunk it imports, counted once, plus `hanamaru.css`;
+- the IIFE closure is the IIFE plus `hanamaru.css`;
+- an optional closure is the optional entry plus every transitive local chunk not already in the main ESM closure;
+- a chunk shared by two optional entries is conservatively charged in full to each optional closure;
+- bare framework peer imports are external and contribute zero package bytes;
+- Shadow's budget is its optional JavaScript closure plus the separately gzipped UTF-8 bytes of `shadow/hanamaru-shadow.css`;
+- gzip members are measured independently and their byte counts summed, matching the existing JavaScript-plus-CSS methodology.
+
+Every hard cap is enforced by `npm run check:dist`. The report records entry files, charged chunks, raw bytes, individual gzip bytes, and summed closure bytes so two implementations cannot account for the same artifact differently.
 
 ## TypeScript Contract
 
@@ -132,21 +155,25 @@ Because Inspector acceptance includes visual layout and motion, Computer Use is 
 
 ## CI and Release
 
-`.github/workflows/ci.yml` runs the fixed verification on pushes and pull requests. `.github/workflows/release.yml` validates a pushed semver tag and prepares release artifacts, but it must not contain a repository token or npm credential. Future trusted publishing can be configured outside this source change.
+.github/workflows/ci.yml runs the fixed verification on pushes and pull requests with `permissions: { contents: read }`. On `main`, it runs `npm pack --json`, records the tarball SHA-512, and uploads the exact `.tgz` plus digest as a workflow artifact.
+
+`.github/workflows/release.yml` runs on `v*` tags with `permissions: { contents: read }`, checks out the tagged commit, repeats the full verification, creates the exact pack tarball once, records its SHA-512, and uploads both as a workflow artifact. It has no `id-token: write`, `packages: write`, npm token, persisted npm configuration, or release-write permission. Future trusted publishing may be configured as a separate reviewed change.
 
 The first public release is executed in this order:
 
-1. local Verify, pack inspection, and Computer Use verdict are `Correct`;
+1. local Verify, local pack inspection, and Computer Use verdict are `Correct` on a clean commit;
 2. create public `Ray0907/hanamaru`;
-3. push the verified branch as `main`;
-4. observe the GitHub CI run complete successfully;
-5. user completes npm authentication and any 2FA handoff;
-6. publish `hanamaru-annotations@0.1.0` with public access;
-7. create and push annotated tag `v0.1.0`;
-8. create the GitHub Release from that tag with installation, features, size, and verification notes;
-9. install the registry version into a fresh temporary project and run a core plus one-subpath smoke test.
+3. push that commit as `main`;
+4. observe the `main` CI run complete successfully for the exact commit SHA;
+5. create and push annotated tag `v0.1.0` pointing to that SHA;
+6. observe the tag release workflow complete successfully;
+7. download the tag workflow's `.tgz` and SHA-512 artifact and verify its digest locally without rebuilding;
+8. user completes npm authentication and any 2FA handoff;
+9. publish that exact downloaded tarball with `npm publish <artifact.tgz> --access public`;
+10. create the GitHub Release from `v0.1.0`, attach the same tarball and digest, and include installation, features, size, and verification notes;
+11. install the registry version into a fresh temporary project and run a core plus one-subpath smoke test.
 
-No tag or npm publish occurs before the exact commit has passed every local acceptance check. npm versions are immutable release records; a failed later GitHub step is repaired forward and never hidden by rewriting the published version.
+No tag or npm publish occurs before the exact commit has passed every local acceptance check. The release artifact is built once by the tag workflow and identified by commit, filename, npm pack metadata, and SHA-512. A dirty worktree, mismatched HEAD, mismatched digest, failed workflow, or rebuilt tarball stops publication. npm authentication remains in the user's local npm client and is never written to the repository or workflow. npm versions are immutable release records; a failed later GitHub step is repaired forward and never hidden by rewriting the published version.
 
 ## Program Stop Condition
 

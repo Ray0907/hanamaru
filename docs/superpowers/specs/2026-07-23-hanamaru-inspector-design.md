@@ -22,6 +22,23 @@ States are:
 
 Leaving Inspector mode destroys its owned preview/controller, clears Inspector UI, and leaves document content and the user's current native selection untouched. Existing demo annotations are not adopted or destroyed.
 
+Inspector owns at most one controller. The complete transition table is:
+
+| From | Input | To | Action |
+| --- | --- | --- | --- |
+| `idle` | valid settled selection | `selected` | clone Range and enable toolbar |
+| `selected` | choose a mark | `editing` | create/show preview controller with current mark |
+| `selected` | Escape or invalidated selection | `idle` | clear Inspector selection state |
+| `editing` | change mark or advanced option | `editing` | atomic controller update and output refresh |
+| `editing` | Add Note | `editing` | open and focus the note field |
+| `editing` | Apply | `applied` | commit preview as the owned applied controller |
+| `editing` | Cancel | `selected` | destroy preview, retain cloned Range |
+| `applied` | edit current annotation | `editing` | reuse the same controller |
+| `applied` | new valid selection | `selected` | validate and clone new Range, then destroy prior owned controller |
+| any | close Inspector | `idle` | destroy owned controller, close layers, return focus |
+
+Selection invalidation before a preview returns to `idle`. Once cloned into a preview or applied controller, native selection changes do not invalidate it. Repeated input for the current state is idempotent.
+
 ## Desktop Layout
 
 At wide viewports:
@@ -30,7 +47,7 @@ At wide viewports:
 - a compact mark toolbar is placed beside the Range and clamped to the visual viewport;
 - controls are underline, highlight, circle, box, strike, bracket, registered demo plugin mark, and Add Note;
 - a fixed right output rail shows HTML, JavaScript, and JSON tabs;
-- advanced options are progressively disclosed in the rail;
+- an **Options** disclosure in the rail exposes placement, meaningful-note accessibility, duration, motion, and seed; trigger is fixed to manual;
 - the selected output is readonly, selectable, and copyable.
 
 The toolbar does not cover the selection. If no adjacent placement fits, it docks to the nearest safe viewport edge.
@@ -60,19 +77,33 @@ The output sheet is not sticky after Inspector mode ends or the user navigates t
 - Toolbar, rail, sheets, focus rings, and disabled states meet tested contrast.
 - Reduced motion applies the final mark and output without interpolated drawing.
 
+The command palette is bounded to: the seven available demo marks, Add/Edit Note, Apply, Cancel Preview, Copy Current Output, and Close Inspector. It has one text filter, arrow-key navigation, Enter activation, Escape dismissal, and no arbitrary command registration.
+
+The advanced Options disclosure uses the public option domains: placement (`auto`, `top`, `right`, `bottom`, `left`), accessible boolean, non-negative integer duration, motion (`system`, `never`), and string seed. Invalid numeric or note input remains in `editing`, associates a visible error with its field, and does not update the controller.
+
 ## Output
 
 The rail is derived from one canonical definition:
 
 - HTML emits declarative markup only when the target can be represented by an existing element; Range selections explain why HTML output is unavailable instead of injecting a wrapper;
-- JavaScript emits `annotateSelection()` for the active native selection during editing and a stable `restore()` recipe after a serializable definition is applied;
-- JSON emits `hanamaru/v1`;
+- JavaScript emits `annotateSelection()` while editing. After Apply, it emits `restore()` only when a stable locator definition is proven; otherwise it retains an explicit Range/Selection recipe;
+- JSON emits `hanamaru/v1` only after the selected Range is converted to and verified against a scoped exact-text locator;
 - copy failure reveals a selected readonly fallback.
+
+The demo's authorable article has one stable scope selector, `#inspector-document`. To produce stable JSON without wrappers or DOM mutation, Inspector:
+
+1. reads the selected text and normalized occurrence inside that scope;
+2. constructs a locator `{ within: '#inspector-document', text, occurrence }`;
+3. resolves it through the public runtime;
+4. compares its cloned boundaries with the active selected Range;
+5. enables JSON and the `restore()` recipe only when the boundaries match exactly.
+
+If the selection cannot round-trip exactly—for example, a partial boundary that normalization cannot reproduce—the JSON tab remains present but shows an accessible “Unavailable for this Range” explanation. It never emits an ephemeral target key or claims persistence. HTML follows the same honesty rule and is available only for an existing element target.
 
 The Inspector registers one `hanamaru` flower-style custom mark through the public plugin API and visibly labels it as an example plugin.
 
 ## Verification
 
-Playwright covers every state transition, pointer and keyboard selection, all marks, note validation, output equivalence, copy fallback, repeated entry/exit, cleanup, existing-story coexistence, mobile dock/sheet containment, focus return, reduced motion, and targeted axe checks.
+Playwright covers every row in the transition table, pointer and keyboard selection, all marks, the bounded command palette, every advanced option, note and numeric validation, successful locator boundary round-trip, unavailable JSON/HTML explanations, output equivalence, copy fallback, repeated entry/exit, cleanup, existing-story coexistence, mobile dock/sheet containment, focus return, reduced motion, and targeted axe checks.
 
 Computer Use is authoritative for desktop Idle/Selected/Editing/Applied, 390px selected/editing/applied, keyboard-only use, reduced motion, toolbar and note bounds, and page overflow. Evidence includes screenshots and accessibility-tree state excerpts.
