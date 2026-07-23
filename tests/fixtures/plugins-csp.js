@@ -2,9 +2,10 @@ import { annotate } from '/src/index.js';
 import { registerMark } from '/src/plugins.js';
 
 const unhandledRejections = [];
-window.addEventListener('unhandledrejection', (event) => {
+const onUnhandledRejection = (event) => {
   unhandledRejections.push(String(event.reason?.message ?? event.reason));
-});
+};
+window.addEventListener('unhandledrejection', onUnhandledRejection);
 
 function resourceInventory() {
   return {
@@ -21,23 +22,38 @@ function resourceInventory() {
   };
 }
 
+function cleanupAll(cleanups) {
+  const errors = [];
+  for (let index = cleanups.length - 1; index >= 0; index -= 1) {
+    try { cleanups[index](); } catch (error) { errors.push(error); }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, 'Plugin CSP cleanup failed');
+}
+
 const initialInventory = resourceInventory();
 
 window.__pluginCsp = Object.freeze({
   initialInventory,
   unhandledRejections,
   async run() {
-    const unregister = registerMark('csp-hanamaru', ({ rects }) => ({
-      paths: rects.map((rect) => (
-        `M ${rect.left} ${rect.top} L ${rect.right} ${rect.bottom}`
-      )),
-    }));
-    const controller = annotate(document.querySelector('#csp-plugin-target'), {
-      mark: 'csp-hanamaru',
-      motion: 'never',
-    });
+    const cleanups = [];
     let visible;
     try {
+      cleanups.push(
+        () => window.removeEventListener('unhandledrejection', onUnhandledRejection),
+      );
+      const unregister = registerMark('csp-hanamaru', ({ rects }) => ({
+        paths: rects.map((rect) => (
+          `M ${rect.left} ${rect.top} L ${rect.right} ${rect.bottom}`
+        )),
+      }));
+      cleanups.push(unregister);
+      const controller = annotate(document.querySelector('#csp-plugin-target'), {
+        mark: 'csp-hanamaru',
+        motion: 'never',
+      });
+      cleanups.push(() => controller.destroy());
       controller.show();
       await controller.finished;
       visible = {
@@ -46,9 +62,10 @@ window.__pluginCsp = Object.freeze({
           .map((path) => path.getAttribute('d')),
         state: controller.state,
       };
+      await Promise.resolve();
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     } finally {
-      controller.destroy();
-      unregister();
+      cleanupAll(cleanups);
     }
     return {
       after: resourceInventory(),

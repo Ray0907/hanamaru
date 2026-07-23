@@ -17,16 +17,21 @@ async function openPluginFixture(page) {
   expect(response?.headers()['content-security-policy']).toBeUndefined();
   await page.evaluate(() => {
     window.__pluginUnhandledRejections = [];
-    window.addEventListener('unhandledrejection', (event) => {
+    window.__pluginUnhandledHandler = (event) => {
       window.__pluginUnhandledRejections.push(String(event.reason?.message ?? event.reason));
-    });
+    };
+    window.addEventListener('unhandledrejection', window.__pluginUnhandledHandler);
   });
   return failures;
 }
 
 async function expectNoBrowserFailures(page, failures) {
   await page.evaluate(() => Promise.resolve());
-  expect(await page.evaluate(() => window.__pluginUnhandledRejections)).toEqual([]);
+  const rejections = await page.evaluate(() => {
+    window.removeEventListener('unhandledrejection', window.__pluginUnhandledHandler);
+    return window.__pluginUnhandledRejections;
+  });
+  expect(rejections).toEqual([]);
   expect(failures).toEqual([]);
 }
 
@@ -35,7 +40,15 @@ test('renders deterministic flower paths for Element and Range targets through t
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');
     const { registerMark } = await import('/src/plugins.js');
-    const controllers = [];
+    const cleanups = [];
+    const cleanupAll = () => {
+      const errors = [];
+      for (let index = cleanups.length - 1; index >= 0; index -= 1) {
+        try { cleanups[index](); } catch (error) { errors.push(error); }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'Plugin browser cleanup failed');
+    };
     let unregister = () => {};
     let unregisterReplacement = () => {};
     let contextProof;
@@ -90,6 +103,7 @@ test('renders deterministic flower paths for Element and Range targets through t
           )),
         };
       });
+      cleanups.push(unregister);
 
       const element = document.querySelector('#element-target');
       const rangeOwner = document.querySelector('#range-target');
@@ -98,10 +112,11 @@ test('renders deterministic flower paths for Element and Range targets through t
       const elementController = annotate(element, {
         mark: 'hanamaru', seed: 'flower-seed', duration: 120,
       });
+      cleanups.push(() => elementController.destroy());
       const rangeController = annotate(range, {
         mark: 'hanamaru', seed: 'range-seed', motion: 'never',
       });
-      controllers.push(elementController, rangeController);
+      cleanups.push(() => rangeController.destroy());
       elementController.show();
       rangeController.show();
       await nextFrame();
@@ -183,6 +198,7 @@ test('renders deterministic flower paths for Element and Range targets through t
         replacementCalls += 1;
         return { paths: ['M 3 4 L 50 60'] };
       });
+      cleanups.push(unregisterReplacement);
       elementController.update({ mark: 'hanamaru' });
       await nextFrame();
       const replacementGroup = document.querySelector(
@@ -210,9 +226,7 @@ test('renders deterministic flower paths for Element and Range targets through t
         stable,
       };
     } finally {
-      controllers.reverse().forEach((controller) => controller.destroy());
-      unregisterReplacement();
-      unregister();
+      cleanupAll();
     }
   });
 
@@ -260,7 +274,15 @@ test('declarative scans capture a registered mark and reject new scans after unr
   const result = await page.evaluate(async () => {
     const { scan } = await import('/src/index.js');
     const { registerMark } = await import('/src/plugins.js');
-    const controllers = [];
+    const cleanups = [];
+    const cleanupAll = () => {
+      const errors = [];
+      for (let index = cleanups.length - 1; index >= 0; index -= 1) {
+        try { cleanups[index](); } catch (error) { errors.push(error); }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'Plugin browser cleanup failed');
+    };
     let unregister = () => {};
     const inventory = (fresh) => ({
       annotationIds: [...document.querySelectorAll('.hana-annotation')]
@@ -288,8 +310,11 @@ test('declarative scans capture a registered mark and reject new scans after unr
           { label: `declarative-${index}`, wobble: 0 },
         )),
       }));
+      cleanups.push(unregister);
       const first = scan(document);
-      controllers.push(...first.annotations);
+      for (const annotation of first.annotations) {
+        cleanups.push(() => annotation.destroy());
+      }
       first.annotations[0].show();
       await first.annotations[0].finished;
       const captured = {
@@ -312,7 +337,9 @@ test('declarative scans capture a registered mark and reject new scans after unr
       document.querySelector('#declarative-scan-root').append(fresh);
       const beforeFreshScan = inventory(fresh);
       const second = scan(document.querySelector('#declarative-scan-root'));
-      controllers.push(...second.annotations);
+      for (const annotation of second.annotations) {
+        cleanups.push(() => annotation.destroy());
+      }
       const afterFreshScan = inventory(fresh);
       return {
         afterUnregister,
@@ -328,8 +355,7 @@ test('declarative scans capture a registered mark and reject new scans after unr
         },
       };
     } finally {
-      controllers.reverse().forEach((controller) => controller.destroy());
-      unregister();
+      cleanupAll();
     }
   });
 
@@ -358,7 +384,15 @@ test('one realm registry renders into two Documents without sharing document res
       createAnnotationEnvironment,
     } = await import('/src/annotation.js');
     const { registerMark } = await import('/src/plugins.js');
-    const controllers = [];
+    const cleanups = [];
+    const cleanupAll = () => {
+      const errors = [];
+      for (let index = cleanups.length - 1; index >= 0; index -= 1) {
+        try { cleanups[index](); } catch (error) { errors.push(error); }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'Plugin browser cleanup failed');
+    };
     let unregister = () => {};
     let frame;
     try {
@@ -368,30 +402,35 @@ test('one realm registry renders into two Documents without sharing document res
           `M ${unionRect.right} ${unionRect.top} L ${unionRect.left} ${unionRect.bottom}`,
         ],
       }));
+      cleanups.push(unregister);
       frame = document.createElement('iframe');
       document.body.append(frame);
+      cleanups.push(() => frame.remove());
       const frameDocument = frame.contentDocument;
       const frameTarget = frameDocument.createElement('p');
       frameTarget.textContent = 'Same-origin iframe plugin target';
       frameDocument.body.append(frameTarget);
       const topTarget = document.querySelector('#element-target');
       const events = [];
-      frameTarget.addEventListener('hana:complete', (event) => events.push({
+      const onComplete = (event) => events.push({
         frameRealmEvent: event instanceof frame.contentWindow.CustomEvent,
         ownerDocument: event.target.ownerDocument === frameDocument,
-      }));
+      });
+      frameTarget.addEventListener('hana:complete', onComplete);
+      cleanups.push(() => frameTarget.removeEventListener('hana:complete', onComplete));
 
       const topController = createAnnotation(
         topTarget,
         { mark: 'hanamaru', motion: 'never' },
         createAnnotationEnvironment(topTarget, document),
       );
+      cleanups.push(() => topController.destroy());
       const frameController = createAnnotation(
         frameTarget,
         { mark: 'hanamaru', motion: 'never' },
         createAnnotationEnvironment(frameTarget, frameDocument),
       );
-      controllers.push(topController, frameController);
+      cleanups.push(() => frameController.destroy());
       topController.show();
       frameController.show();
       await Promise.all([topController.finished, frameController.finished]);
@@ -403,7 +442,6 @@ test('one realm registry renders into two Documents without sharing document res
         topPaths: document.querySelectorAll('.hana-mark-path').length,
       };
       topController.destroy();
-      controllers.splice(controllers.indexOf(topController), 1);
       const independent = {
         frameOverlays: frameDocument.querySelectorAll('[data-hana-overlay]').length,
         framePaths: frameDocument.querySelectorAll('.hana-mark-path').length,
@@ -411,7 +449,6 @@ test('one realm registry renders into two Documents without sharing document res
         topPaths: document.querySelectorAll('.hana-mark-path').length,
       };
       frameController.destroy();
-      controllers.splice(controllers.indexOf(frameController), 1);
       return {
         independent,
         tornDown: {
@@ -423,9 +460,7 @@ test('one realm registry renders into two Documents without sharing document res
         visible,
       };
     } finally {
-      controllers.reverse().forEach((controller) => controller.destroy());
-      unregister();
-      frame?.remove();
+      cleanupAll();
     }
   });
 
@@ -491,6 +526,14 @@ test('contains factory throws and invalid or cost-bounded output without partial
     const { annotate } = await import('/src/index.js');
     const { registerMark } = await import('/src/plugins.js');
     const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    const cleanupAll = (cleanups) => {
+      const errors = [];
+      for (let index = cleanups.length - 1; index >= 0; index -= 1) {
+        try { cleanups[index](); } catch (error) { errors.push(error); }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'Plugin browser cleanup failed');
+    };
     const throwCause = new Error('browser factory boom');
     const cases = [
       ['throw-case', () => { throw throwCause; }],
@@ -505,20 +548,24 @@ test('contains factory throws and invalid or cost-bounded output without partial
     ];
     const outputs = [];
     for (const [name, factory] of cases) {
-      const unregister = registerMark(name, factory);
+      const cleanups = [];
       const target = document.querySelector('#element-target');
-      const controller = annotate(target, {
-        mark: name,
-        note: 'Must not leak',
-        accessible: true,
-        motion: 'never',
-      });
       const events = [];
-      const onError = (event) => {
-        if (event.detail.controller === controller) events.push(event.detail.error);
-      };
-      target.addEventListener('hana:error', onError);
       try {
+        const unregister = registerMark(name, factory);
+        cleanups.push(unregister);
+        const controller = annotate(target, {
+          mark: name,
+          note: 'Must not leak',
+          accessible: true,
+          motion: 'never',
+        });
+        cleanups.push(() => controller.destroy());
+        const onError = (event) => {
+          if (event.detail.controller === controller) events.push(event.detail.error);
+        };
+        target.addEventListener('hana:error', onError);
+        cleanups.push(() => target.removeEventListener('hana:error', onError));
         controller.show();
         const finished = controller.finished?.catch((error) => error);
         const rejected = await finished;
@@ -544,9 +591,7 @@ test('contains factory throws and invalid or cost-bounded output without partial
         });
         controller.hide();
       } finally {
-        target.removeEventListener('hana:error', onError);
-        controller.destroy();
-        unregister();
+        cleanupAll(cleanups);
       }
       outputs.at(-1).afterDestroy = {
         overlays: document.querySelectorAll('[data-hana-overlay]').length,
@@ -555,25 +600,35 @@ test('contains factory throws and invalid or cost-bounded output without partial
       };
     }
 
-    const unregisterStable = registerMark('stable-browser-mark', () => ({
-      paths: ['M 1 1 L 10 10'],
-    }));
+    const transactionCleanups = [];
     const updateCause = new Error('update factory boom');
-    const unregisterBroken = registerMark('broken-browser-mark', () => { throw updateCause; });
     const target = document.querySelector('#element-target');
-    const stable = annotate(target, {
-      mark: 'stable-browser-mark',
-      note: 'Retained accessible note',
-      accessible: true,
-      motion: 'never',
-    });
     const transactionEvents = [];
-    const onTransactionError = (event) => {
-      if (event.detail.controller === stable) transactionEvents.push(event.detail.error);
-    };
-    target.addEventListener('hana:error', onTransactionError);
     let transaction;
     try {
+      const unregisterStable = registerMark('stable-browser-mark', () => ({
+        paths: ['M 1 1 L 10 10'],
+      }));
+      transactionCleanups.push(unregisterStable);
+      const unregisterBroken = registerMark(
+        'broken-browser-mark',
+        () => { throw updateCause; },
+      );
+      transactionCleanups.push(unregisterBroken);
+      const stable = annotate(target, {
+        mark: 'stable-browser-mark',
+        note: 'Retained accessible note',
+        accessible: true,
+        motion: 'never',
+      });
+      transactionCleanups.push(() => stable.destroy());
+      const onTransactionError = (event) => {
+        if (event.detail.controller === stable) transactionEvents.push(event.detail.error);
+      };
+      target.addEventListener('hana:error', onTransactionError);
+      transactionCleanups.push(
+        () => target.removeEventListener('hana:error', onTransactionError),
+      );
       stable.show();
       await stable.finished;
       const id = document.querySelector('.hana-annotation').getAttribute('data-hana-id');
@@ -629,10 +684,7 @@ test('contains factory throws and invalid or cost-bounded output without partial
         eventCount: transactionEvents.length,
       };
     } finally {
-      target.removeEventListener('hana:error', onTransactionError);
-      stable.destroy();
-      unregisterStable();
-      unregisterBroken();
+      cleanupAll(transactionCleanups);
     }
     transaction.afterDestroy = {
       overlays: document.querySelectorAll('[data-hana-overlay]').length,

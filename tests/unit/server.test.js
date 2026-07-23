@@ -91,15 +91,33 @@ test('createStaticServer applies strict CSP only to the plugin browser fixture',
   const { server, url } = await createStaticServer({ root, port: 0 });
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const port = new URL(url).port;
-  const plugin = await request('/tests/fixtures/plugins-csp.html', port);
+  const pluginAliases = [
+    '/tests/fixtures/plugins-csp.html',
+    '/tests/fixtures/plugins-csp.html?cache=proof',
+    '/tests//fixtures/plugins-csp.html',
+    '/tests/fixtures/./plugins-csp.html',
+    '/tests/fixtures/x%2f..%2fplugins-csp.html',
+    '/tests/fixtures/x/%2e%2e/plugins-csp.html',
+    '/tests/%66ixtures/%70lugins-csp.html',
+  ];
   const ordinaryPlugin = await request('/tests/fixtures/plugins.html', port);
   const ordinary = await request('/tests/fixtures/ordinary.html', port);
 
-  assert.equal(
-    plugin.headers['content-security-policy'],
-    "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'",
-  );
+  for (const alias of pluginAliases) {
+    const plugin = await request(alias, port);
+    assert.equal(plugin.statusCode, 200, alias);
+    assert.equal(plugin.body, '<h1>CSP plugin fixture</h1>', alias);
+    assert.equal(
+      plugin.headers['content-security-policy'],
+      "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'",
+      alias,
+    );
+  }
+  assert.equal(ordinaryPlugin.statusCode, 200);
+  assert.equal(ordinaryPlugin.body, '<h1>ordinary plugin fixture</h1>');
   assert.equal(ordinaryPlugin.headers['content-security-policy'], undefined);
+  assert.equal(ordinary.statusCode, 200);
+  assert.equal(ordinary.body, '<h1>ordinary fixture</h1>');
   assert.equal(ordinary.headers['content-security-policy'], undefined);
 });
 

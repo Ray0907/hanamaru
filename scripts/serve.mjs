@@ -21,6 +21,7 @@ export async function createStaticServer({ root = process.cwd(), port = 4173 } =
   const rootPrefix = `${resolvedRoot}${path.sep}`;
   const realRoot = await realpath(resolvedRoot);
   const realRootPrefix = `${realRoot}${path.sep}`;
+  const pluginCspFixture = path.join(realRoot, 'tests', 'fixtures', 'plugins-csp.html');
 
   const server = createServer(async (request, response) => {
     let pathname;
@@ -54,7 +55,7 @@ export async function createStaticServer({ root = process.cwd(), port = 4173 } =
       }
       const type = MIME_TYPES[path.extname(realFilePath)] ?? 'application/octet-stream';
       const headers = { 'content-type': type };
-      if (pathname === '/tests/fixtures/plugins-csp.html') {
+      if (realFilePath === pluginCspFixture) {
         headers['content-security-policy'] = PLUGIN_FIXTURE_CSP;
       }
       response.writeHead(200, headers);
