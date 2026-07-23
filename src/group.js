@@ -185,6 +185,7 @@ export function createGroupEnvironment(root) {
           memberErrorObserver?.(detail.controller, detail.error);
         }
       };
+      annotationEnvironment.createErrorEvent = annotationEnvironment.createEvent;
       return createAnnotation(target, options, annotationEnvironment);
     },
     createEvent(type, detail, owner) {
@@ -253,10 +254,16 @@ export function createGroupEnvironmentWithResources({
           memberErrorObserver?.(detail.controller, detail.error);
         }
       };
+      annotationEnvironment.createErrorEvent = annotationEnvironment.createEvent;
       return createAnnotation(target, options, annotationEnvironment);
     },
     createEvent(type, detail, owner) {
       return resources.createEvent(type, detail, owner);
+    },
+    createErrorEvent(type, detail, owner) {
+      return typeof resources.createErrorEvent === 'function'
+        ? resources.createErrorEvent(type, detail, owner)
+        : resources.createEvent(type, detail, owner);
     },
     eventOwner(record) {
       try { record.refresh(); } catch { /* Retain the last valid owner for error delivery. */ }
@@ -387,6 +394,10 @@ export function createGroup(members, rawOptions = {}, env) {
     const owner = typeof env.eventOwner === 'function'
       ? env.eventOwner(prepared[0].record)
       : prepared[0].record.ownerElement;
+    if (type === 'hana:error' && typeof env.createErrorEvent === 'function') {
+      env.createErrorEvent(type, detail, owner);
+      return;
+    }
     env.createEvent(type, detail, owner);
   }
 

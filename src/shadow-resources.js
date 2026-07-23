@@ -171,6 +171,9 @@ function browserAdapter() {
     dispatch(owner, type, detail, root) {
       return contextFor(root).dispatch(owner, type, detail);
     },
+    dispatchFromHost(type, detail, root) {
+      return contextFor(root).dispatchFromHost(type, detail);
+    },
     registerPortal: registerDocumentResourcePortal,
     signalMutations: signalDocumentResourceMutations,
   };
@@ -543,6 +546,23 @@ function environmentFor(record) {
     createEvent(type, detail, owner) {
       requireActive('dispatch event');
       return adapter.dispatch(owner, type, detail, root);
+    },
+    createErrorEvent(type, detail, owner) {
+      try {
+        requireActive('dispatch error event');
+      } catch {
+        return false;
+      }
+      try {
+        return adapter.dispatch(owner, type, detail, root);
+      } catch {
+        try {
+          return adapter.dispatchFromHost?.(type, detail, root) ?? false;
+        } catch {
+          // Lifecycle error reporting must never replace the original failure.
+          return false;
+        }
+      }
     },
   });
 }

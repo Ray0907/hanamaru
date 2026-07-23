@@ -911,6 +911,63 @@ test('scope scan stays in the exact root and owns every returned annotation once
   });
 });
 
+test('standalone scan rejects empty open and retained closed ShadowRoots upfront', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { scan } = await import('/src/declarative.js');
+    const { createShadowScope } = await import('/src/shadow.js');
+    const { runtimeState } = await import('/src/runtime-state.js');
+    const state = window.__shadowRuntime;
+    const failures = [];
+    for (const root of [state.openRoot, state.closedRoot]) {
+      try {
+        scan(root);
+      } catch (error) {
+        failures.push({
+          name: error.name,
+          code: error.code,
+        });
+      }
+    }
+    const resourcesAfterStandalone = [
+      runtimeState.shadows.has(state.openRoot),
+      runtimeState.shadows.has(state.closedRoot),
+    ];
+    const openScope = createShadowScope(state.openRoot);
+    const closedScope = createShadowScope(state.closedRoot);
+    const scoped = [openScope.scan(), closedScope.scan()].map((value) => ({
+      annotations: value.annotations.length,
+      errors: value.errors.length,
+    }));
+    closedScope.destroy();
+    openScope.destroy();
+    return {
+      failures,
+      resourcesAfterStandalone,
+      scoped,
+      portals: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    failures: [
+      {
+        name: 'HanamaruTargetError',
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+      {
+        name: 'HanamaruTargetError',
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+    ],
+    resourcesAfterStandalone: [false, false],
+    scoped: [
+      { annotations: 0, errors: 0 },
+      { annotations: 0, errors: 0 },
+    ],
+    portals: 0,
+  });
+});
+
 test('scope Story and Group preflight exact roots and dispatch composed events outside the host', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { story: standaloneStory } = await import('/src/story.js');
@@ -1549,6 +1606,253 @@ test('scope option reflection failures stay typed and allocate no root resources
       cause: 'scope ownKeys failed',
     },
     rootState: false,
+    portals: 0,
+  });
+});
+
+test('standalone Element Range and locator refresh reject targets moved into a ShadowRoot', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/annotation.js');
+    const state = window.__shadowRuntime;
+    const element = document.body.appendChild(document.createElement('button'));
+    element.textContent = 'Direct document target';
+    const rangeOwner = document.body.appendChild(document.createElement('p'));
+    rangeOwner.textContent = 'Range document target';
+    const locatorOwner = document.body.appendChild(document.createElement('p'));
+    locatorOwner.textContent = 'Locator document target';
+    const selector = document.body.appendChild(document.createElement('button'));
+    selector.id = 'selector-root-guard';
+    selector.textContent = 'Initial selector target';
+    const range = document.createRange();
+    range.selectNodeContents(rangeOwner);
+    const controllers = [
+      annotate(element, { mark: 'underline', duration: 0, motion: 'never' }),
+      annotate(range, { mark: 'highlight', duration: 0, motion: 'never' }),
+      annotate({
+        within: locatorOwner,
+        text: 'Locator document target',
+      }, { mark: 'box', duration: 0, motion: 'never' }),
+    ];
+    const selectorController = annotate('#selector-root-guard', {
+      mark: 'circle',
+      duration: 0,
+      motion: 'never',
+    });
+    state.openRoot.append(element, rangeOwner, locatorOwner, selector);
+    const selectorReplacement = document.body.appendChild(document.createElement('button'));
+    selectorReplacement.id = 'selector-root-guard';
+    selectorReplacement.textContent = 'Replacement selector target';
+
+    const moved = [];
+    for (const controller of controllers) {
+      let threw = false;
+      try { controller.show(); } catch { threw = true; }
+      const error = await controller.finished.catch((cause) => cause);
+      moved.push({
+        threw,
+        state: controller.state,
+        code: error?.code,
+      });
+    }
+    selectorController.show();
+    await selectorController.finished;
+    const visibleGroups = [...document.querySelectorAll(
+      '[data-hana-overlay]:not([data-hana-shadow-overlay]) .hana-annotation',
+    )].filter((group) => !group.hasAttribute('hidden')).length;
+    const selectorState = selectorController.state;
+    for (const controller of [...controllers, selectorController]) {
+      controller.destroy();
+    }
+    element.remove();
+    rangeOwner.remove();
+    locatorOwner.remove();
+    selector.remove();
+    selectorReplacement.remove();
+    return {
+      moved,
+      selectorState,
+      visibleGroups,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    moved: [
+      { threw: false, state: 'suspended', code: 'HANA_TARGET_SHADOW_UNSCOPED' },
+      { threw: false, state: 'suspended', code: 'HANA_TARGET_SHADOW_UNSCOPED' },
+      { threw: false, state: 'suspended', code: 'HANA_TARGET_SHADOW_UNSCOPED' },
+    ],
+    selectorState: 'visible',
+    visibleGroups: 1,
+    overlays: 0,
+  });
+});
+
+test('standalone Story and restored controllers keep the live ShadowRoot refresh guard', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/annotation.js');
+    const { story } = await import('/src/story.js');
+    const { restore, serialize } = await import('/src/serialize.js');
+    const state = window.__shadowRuntime;
+    const storyTarget = document.body.appendChild(document.createElement('button'));
+    storyTarget.textContent = 'Story document target';
+    const restoreTarget = document.body.appendChild(document.createElement('button'));
+    restoreTarget.textContent = 'Restored document target';
+    const walkthrough = story([{
+      target: storyTarget,
+      mark: 'underline',
+      duration: 0,
+    }], { gap: 0, motion: 'never' });
+    const source = annotate(restoreTarget, {
+      mark: 'box',
+      duration: 0,
+      motion: 'never',
+    });
+    const definition = serialize(source, {
+      keyForTarget() { return 'restored-target'; },
+    });
+    source.destroy();
+    const restored = restore(definition, {
+      root: document,
+      resolveTarget(key) {
+        return key === 'restored-target' ? restoreTarget : null;
+      },
+    });
+    state.openRoot.append(storyTarget, restoreTarget);
+
+    let storyThrew = false;
+    try { walkthrough.play(); } catch { storyThrew = true; }
+    const storyError = await walkthrough.finished.catch((error) => error);
+    let restoredThrew = false;
+    try { restored.show(); } catch { restoredThrew = true; }
+    const restoredError = await restored.finished.catch((error) => error);
+    const beforeDestroy = {
+      story: {
+        threw: storyThrew,
+        state: walkthrough.state,
+        code: storyError?.code,
+      },
+      restored: {
+        threw: restoredThrew,
+        state: restored.state,
+        code: restoredError?.code,
+      },
+    };
+    restored.destroy();
+    walkthrough.destroy();
+    storyTarget.remove();
+    restoreTarget.remove();
+    return {
+      beforeDestroy,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    beforeDestroy: {
+      story: {
+        threw: false,
+        state: 'cancelled',
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+      restored: {
+        threw: false,
+        state: 'suspended',
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+    },
+    overlays: 0,
+  });
+});
+
+test('scoped lifecycle errors escape through the host after targets leave their root', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const state = window.__shadowRuntime;
+    const scope = createShadowScope(state.openRoot);
+    const observed = [];
+    const onError = (event) => {
+      observed.push({
+        bubbles: event.bubbles,
+        composed: event.composed,
+        targetIsHost: event.target === state.openHost,
+        controller: event.detail.controller,
+        code: event.detail.error?.code,
+      });
+    };
+    document.addEventListener('hana:error', onError);
+
+    const cases = [];
+    for (const mode of ['remove', 'move']) {
+      const target = state.openRoot.appendChild(document.createElement('button'));
+      target.textContent = `${mode} scoped target`;
+      const controller = scope.annotate(target, {
+        mark: 'underline',
+        duration: 0,
+        motion: 'never',
+      });
+      if (mode === 'remove') target.remove();
+      else document.body.append(target);
+      let threw = false;
+      try { controller.show(); } catch { threw = true; }
+      const firstError = await controller.finished.catch((error) => error);
+      try { controller.show(); } catch { threw = true; }
+      const secondError = await controller.finished.catch((error) => error);
+      cases.push({
+        mode,
+        threw,
+        state: controller.state,
+        firstCode: firstError?.code,
+        secondCode: secondError?.code,
+        matchingEvents: observed.filter(
+          (event) => event.controller === controller,
+        ).length,
+      });
+      controller.destroy();
+      target.remove();
+    }
+    document.removeEventListener('hana:error', onError);
+    scope.destroy();
+    return {
+      cases,
+      observed: observed.map(({ controller, ...event }) => event),
+      portals: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    cases: [
+      {
+        mode: 'remove',
+        threw: false,
+        state: 'suspended',
+        firstCode: 'HANA_TARGET_INVALID',
+        secondCode: 'HANA_TARGET_INVALID',
+        matchingEvents: 1,
+      },
+      {
+        mode: 'move',
+        threw: false,
+        state: 'suspended',
+        firstCode: 'HANA_TARGET_INVALID',
+        secondCode: 'HANA_TARGET_INVALID',
+        matchingEvents: 1,
+      },
+    ],
+    observed: [
+      {
+        bubbles: true,
+        composed: true,
+        targetIsHost: true,
+        code: 'HANA_TARGET_INVALID',
+      },
+      {
+        bubbles: true,
+        composed: true,
+        targetIsHost: true,
+        code: 'HANA_TARGET_INVALID',
+      },
+    ],
     portals: 0,
   });
 });

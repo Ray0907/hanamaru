@@ -1,5 +1,9 @@
 import { annotate } from './annotation.js';
-import { HanamaruConfigError, HanamaruError } from './errors.js';
+import {
+  HanamaruConfigError,
+  HanamaruError,
+  HanamaruTargetError,
+} from './errors.js';
 
 const ATTRIBUTES = [
   ['hanaNote', 'note'],
@@ -62,5 +66,14 @@ export function scanDeclarative(root, createAnnotation = annotate) {
 }
 
 export function scan(root = document) {
+  const ShadowRootConstructor = root?.ownerDocument?.defaultView?.ShadowRoot;
+  if (typeof ShadowRootConstructor === 'function'
+    && root instanceof ShadowRootConstructor) {
+    throw new HanamaruTargetError(
+      'HANA_TARGET_SHADOW_UNSCOPED',
+      'Scanning a ShadowRoot requires an explicit Shadow scope',
+      { root },
+    );
+  }
   return scanDeclarative(root);
 }

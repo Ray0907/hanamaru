@@ -191,6 +191,10 @@ function layoutFor(
 }
 
 function dispatch(env, owner, type, detail) {
+  if (type === 'hana:error' && typeof env.createErrorEvent === 'function') {
+    env.createErrorEvent(type, detail, owner);
+    return;
+  }
   env.createEvent(type, detail, owner);
 }
 
@@ -334,14 +338,26 @@ function intrinsicRoot(node, doc) {
 
 export function resolveStandaloneTarget(target, doc) {
   const record = resolveTarget(target, doc);
-  const actualRoot = intrinsicRoot(record.ownerElement, doc);
-  if (rootKind(actualRoot) === 'shadow-root') {
+  const assertStandaloneRoot = () => {
+    const actualRoot = intrinsicRoot(record.ownerElement, doc);
+    if (rootKind(actualRoot) !== 'shadow-root') return;
     throw new HanamaruTargetError(
       'HANA_TARGET_SHADOW_UNSCOPED',
       'ShadowRoot targets require an explicit Shadow scope',
       { target, root: actualRoot },
     );
-  }
+  };
+  const refresh = record.refresh;
+  record.refresh = () => {
+    // Selector records must be allowed to re-resolve to a replacement in the
+    // Document. Direct records retain their identity, so guard their current
+    // owner before their resolver can collapse a root change into INVALID.
+    if (record.kind !== 'selector') assertStandaloneRoot();
+    const resolved = refresh();
+    assertStandaloneRoot();
+    return resolved;
+  };
+  assertStandaloneRoot();
   return record;
 }
 
@@ -362,6 +378,7 @@ function createDomAnnotationEnvironment({
   id,
   lease,
   createEvent,
+  createErrorEvent,
   resolveCandidate,
 }) {
   if (doc === null || typeof doc !== 'object'
@@ -374,6 +391,7 @@ function createDomAnnotationEnvironment({
     id,
     get lease() { return lease(); },
     createEvent,
+    createErrorEvent,
     createRenderer: createDomRenderer,
     direction(owner) { return win.getComputedStyle(owner).direction; },
     microtask(callback) { win.queueMicrotask(callback); },
@@ -452,6 +470,11 @@ export function createAnnotationEnvironmentWithResources({
     lease() { return resources.lease; },
     createEvent(type, detail, owner) {
       return resources.createEvent(type, detail, owner);
+    },
+    createErrorEvent(type, detail, owner) {
+      return typeof resources.createErrorEvent === 'function'
+        ? resources.createErrorEvent(type, detail, owner)
+        : resources.createEvent(type, detail, owner);
     },
     resolveCandidate,
   });

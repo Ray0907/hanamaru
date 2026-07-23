@@ -129,6 +129,16 @@ export function shadowDomIntrinsics(root) {
         composed: true,
       }));
     },
+    dispatchFromHost(type, detail) {
+      return dispatchEvent(
+        context.readers.host(context.root),
+        new context.realm.CustomEvent(type, {
+          detail,
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    },
   });
 }
 

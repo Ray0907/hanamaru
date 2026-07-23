@@ -103,6 +103,11 @@ export function createStoryEnvironmentWithResources({
     createEvent(type, detail, owner) {
       return resources.createEvent(type, detail, owner);
     },
+    createErrorEvent(type, detail, owner) {
+      return typeof resources.createErrorEvent === 'function'
+        ? resources.createErrorEvent(type, detail, owner)
+        : resources.createEvent(type, detail, owner);
+    },
     document: doc,
     eventOwner(record) {
       try { record.refresh(); } catch { /* Retain the last valid owner for error delivery. */ }
@@ -266,6 +271,10 @@ export function createStory(steps, rawOptions = {}, env) {
     const owner = typeof env.eventOwner === 'function'
       ? env.eventOwner(prepared[0].record)
       : prepared[0].record.ownerElement;
+    if (type === 'hana:error' && typeof env.createErrorEvent === 'function') {
+      env.createErrorEvent(type, detail, owner);
+      return;
+    }
     env.createEvent(type, detail, owner);
   }
 
