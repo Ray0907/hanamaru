@@ -160,7 +160,7 @@ test('mobile story suppresses offscreen target output without changing its compl
         .map((line) => ({ line, note }))),
       notes,
       overflowingStages: [...document.querySelectorAll('[data-demo-sequence-stage]')]
-        .filter((node) => node.scrollWidth > node.clientWidth + 1)
+        .filter((node) => node.scrollWidth > node.clientWidth)
         .map((node) => node.dataset.demoSequenceStage),
       pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     };

@@ -1634,7 +1634,7 @@
 
   .demo-sequence li {
     overflow: hidden;
-    font-size: 0.64rem;
+    font-size: 0.6rem;
     text-overflow: ellipsis;
   }
 
