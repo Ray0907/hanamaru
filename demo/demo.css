@@ -504,8 +504,10 @@
 }
 
 .demo-story-controls button:disabled {
-  color: rgb(189 202 228 / 58%);
+  color: var(--demo-indigo-quiet);
   cursor: not-allowed;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
 }
 
 .demo-story-controls [data-demo-copy-code],
@@ -1383,6 +1385,11 @@
   font: 0.74rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
   tab-size: 2;
   white-space: pre;
+}
+
+.demo-playground:focus-visible,
+.demo-playground__output :focus-visible {
+  outline-color: var(--demo-yellow);
 }
 
 .demo-playground__output code {

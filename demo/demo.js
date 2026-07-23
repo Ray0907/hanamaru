@@ -49,6 +49,8 @@ const starterFallbackWrap = document.querySelector('[data-demo-starter-fallback-
 const starterFallback = document.querySelector('[data-demo-copy-fallback]');
 const playgroundLink = document.querySelector('a[href="#playground"].demo-stamp--primary');
 const playground = document.querySelector('#playground');
+const skipLink = document.querySelector('.demo-skip-link');
+const mainContent = document.querySelector('#main-content');
 const reflowControl = document.querySelector('[data-demo-reflow-control]');
 const reflowValue = document.querySelector('[data-demo-reflow-value]');
 const reflowSpecimen = document.querySelector('[data-demo-reflow-specimen]');
@@ -347,6 +349,13 @@ starterButton.addEventListener('click', () => {
 
 playgroundLink.addEventListener('click', () => {
   requestAnimationFrame(() => playground.focus({ preventScroll: true }));
+});
+
+skipLink.addEventListener('click', () => {
+  requestAnimationFrame(() => {
+    mainContent.tabIndex = -1;
+    mainContent.focus({ preventScroll: true });
+  });
 });
 
 function createReflowProof() {
