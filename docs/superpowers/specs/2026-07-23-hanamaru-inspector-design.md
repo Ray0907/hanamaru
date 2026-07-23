@@ -15,27 +15,30 @@ The existing Living Redline demo gains an explicit **Open Annotation Inspector**
 
 States are:
 
-1. `idle` — normal document behavior;
-2. `selected` — exactly one valid cloned Range and visible mark controls;
-3. `editing` — live mark preview and optional note editing;
-4. `applied` — owned controller visible and generated outputs current.
+1. `closed` — normal document behavior with no Inspector listeners or UI;
+2. `idle` — Inspector mode is open and waiting for a valid selection;
+3. `selected` — exactly one valid cloned Range and visible mark controls;
+4. `editing` — live mark preview and optional note editing;
+5. `applied` — owned controller visible and generated outputs current.
 
-Leaving Inspector mode destroys its owned preview/controller, clears Inspector UI, and leaves document content and the user's current native selection untouched. Existing demo annotations are not adopted or destroyed.
+Opening Inspector captures the invoking control, mounts its layers and selection listeners, and moves focus to its labeled Exit Inspector control. Leaving Inspector mode destroys its owned preview/controller, removes all Inspector listeners and UI, returns focus to that captured invoking control when it is still connected, and leaves document content and the user's current native selection untouched. Existing demo annotations are not adopted or destroyed.
 
 Inspector owns at most one controller. The complete transition table is:
 
 | From | Input | To | Action |
 | --- | --- | --- | --- |
+| `closed` | Open Annotation Inspector | `idle` | capture invoker, mount mode, attach selection listeners, focus exit |
 | `idle` | valid settled selection | `selected` | clone Range and enable toolbar |
 | `selected` | choose a mark | `editing` | create/show preview controller with current mark |
-| `selected` | Escape or invalidated selection | `idle` | clear Inspector selection state |
+| `selected` | invalidated selection | `idle` | clear Inspector selection state |
 | `editing` | change mark or advanced option | `editing` | atomic controller update and output refresh |
 | `editing` | Add Note | `editing` | open and focus the note field |
 | `editing` | Apply | `applied` | commit preview as the owned applied controller |
 | `editing` | Cancel | `selected` | destroy preview, retain cloned Range |
 | `applied` | edit current annotation | `editing` | reuse the same controller |
 | `applied` | new valid selection | `selected` | validate and clone new Range, then destroy prior owned controller |
-| any | close Inspector | `idle` | destroy owned controller, close layers, return focus |
+| any open state | Escape with note editor or palette open | same state | close only the topmost transient layer and return focus to its opener |
+| any open state | Escape with no transient layer, Close, or page navigation | `closed` | destroy owned controller, remove mode UI/listeners, return focus when applicable |
 
 Selection invalidation before a preview returns to `idle`. Once cloned into a preview or applied controller, native selection changes do not invalidate it. Repeated input for the current state is idempotent.
 
@@ -70,7 +73,7 @@ The output sheet is not sticky after Inspector mode ends or the user navigates t
 - Toolbar uses a roving tab stop; arrow keys move between marks.
 - Enter or Space applies a mark.
 - `Cmd/Ctrl+K` opens the command palette.
-- Escape closes the note editor, then command palette, then Inspector mode in that order.
+- Escape closes the topmost note editor or command palette first; with neither transient layer open, it closes Inspector mode from `idle`, `selected`, `editing`, or `applied`.
 - Tab order reaches exit, mark toolbar, note editor, output tabs, copy, and advanced options.
 - Focus is returned to the invoking control when Inspector closes.
 - Status changes use an existing polite live-region pattern.
@@ -105,6 +108,6 @@ The Inspector registers one `hanamaru` flower-style custom mark through the publ
 
 ## Verification
 
-Playwright covers every row in the transition table, pointer and keyboard selection, all marks, the bounded command palette, every advanced option, note and numeric validation, successful locator boundary round-trip, unavailable JSON/HTML explanations, output equivalence, copy fallback, repeated entry/exit, cleanup, existing-story coexistence, mobile dock/sheet containment, focus return, reduced motion, and targeted axe checks.
+Playwright covers every row in the transition table, closed-versus-open-idle behavior, pointer and keyboard selection, all marks, the bounded command palette, every advanced option, note and numeric validation, successful locator boundary round-trip, unavailable JSON/HTML explanations, output equivalence, copy fallback, repeated entry/exit, listener cleanup, navigation cleanup, existing-story coexistence, mobile dock/sheet containment, focus return, reduced motion, and targeted axe checks.
 
 Computer Use is authoritative for desktop Idle/Selected/Editing/Applied, 390px selected/editing/applied, keyboard-only use, reduced motion, toolbar and note bounds, and page overflow. Evidence includes screenshots and accessibility-tree state excerpts.
