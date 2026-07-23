@@ -5,34 +5,51 @@ import {
 import { validateSerializedTarget } from './serialize-schema.js';
 import { resolveTarget } from './target.js';
 
+const INTERNAL_ERRORS = new WeakMap();
+let activeReflectionToken = null;
+
+function reflectionBoundary(action, normalize) {
+  const previousToken = activeReflectionToken;
+  const token = {};
+  activeReflectionToken = token;
+  try {
+    return action();
+  } catch (cause) {
+    if (INTERNAL_ERRORS.get(cause) === token) throw cause;
+    return normalize(cause);
+  } finally {
+    activeReflectionToken = previousToken;
+  }
+}
+
 function configError(field, value, cause = undefined) {
   const details = cause === undefined ? { field, value } : { field, value, cause };
-  throw new HanamaruConfigError(
+  const error = new HanamaruConfigError(
     'HANA_CONFIG_SERIALIZE_TARGET',
     `Invalid serialization target configuration: ${field}`,
     details,
   );
-}
-
-function targetError(message, details) {
-  throw new HanamaruTargetError('HANA_TARGET_INVALID', message, details);
-}
-
-function isErrorType(cause, Constructor) {
-  try {
-    return cause instanceof Constructor;
-  } catch {
-    return false;
+  if (activeReflectionToken !== null) {
+    INTERNAL_ERRORS.set(error, activeReflectionToken);
   }
+  throw error;
+}
+
+function targetError(message, details, code = 'HANA_TARGET_INVALID') {
+  const error = new HanamaruTargetError(code, message, details);
+  if (activeReflectionToken !== null) {
+    INTERNAL_ERRORS.set(error, activeReflectionToken);
+  }
+  throw error;
 }
 
 function activeDocument(root) {
-  try {
+  return reflectionBoundary(() => {
     if (root?.nodeType === 11 && root?.host !== undefined) {
-      throw new HanamaruTargetError(
-        'HANA_TARGET_SHADOW_UNSCOPED',
+      targetError(
         'Serialized targets require an explicit Shadow scope',
         { root },
+        'HANA_TARGET_SHADOW_UNSCOPED',
       );
     }
     const DocumentConstructor = root?.defaultView?.Document;
@@ -43,18 +60,12 @@ function activeDocument(root) {
       configError('root', root);
     }
     return root;
-  } catch (cause) {
-    if (isErrorType(cause, HanamaruConfigError)
-      || isErrorType(cause, HanamaruTargetError)) {
-      throw cause;
-    }
-    configError('root', root, cause);
-  }
+  }, (cause) => configError('root', root, cause));
 }
 
 function executionContext(input, allowed) {
   if (input === undefined) return {};
-  try {
+  return reflectionBoundary(() => {
     if (input === null || typeof input !== 'object' || Array.isArray(input)
       || Object.getPrototypeOf(input) !== Object.prototype) configError('context', input);
     const keys = Reflect.ownKeys(input);
@@ -68,15 +79,12 @@ function executionContext(input, allowed) {
       output[key] = descriptors[key].value;
     }
     return output;
-  } catch (cause) {
-    if (isErrorType(cause, HanamaruConfigError)) throw cause;
-    configError('context', input, cause);
-  }
+  }, (cause) => configError('context', input, cause));
 }
 
 function connectedElement(value, root) {
   const message = 'Resolved key must be a connected Element in the target Document';
-  try {
+  return reflectionBoundary(() => {
     const ElementConstructor = root.defaultView.Element;
     if (!(value instanceof ElementConstructor)
       || value.ownerDocument !== root
@@ -85,15 +93,12 @@ function connectedElement(value, root) {
       targetError(message, { target: value });
     }
     return value;
-  } catch (cause) {
-    if (isErrorType(cause, HanamaruTargetError)) throw cause;
-    targetError(message, { target: value, cause });
-  }
+  }, (cause) => targetError(message, { target: value, cause }));
 }
 
 function connectedRange(value, root) {
   const message = 'Resolved key must be a connected Range in the target Document';
-  try {
+  return reflectionBoundary(() => {
     const RangeConstructor = root.defaultView.Range;
     if (!(value instanceof RangeConstructor)) {
       targetError(message, { target: value });
@@ -107,11 +112,8 @@ function connectedRange(value, root) {
     ))) {
       targetError(message, { target: value });
     }
-    return resolveTarget(value, root).range.cloneRange();
-  } catch (cause) {
-    if (isErrorType(cause, HanamaruTargetError)) throw cause;
-    targetError(message, { target: value, cause });
-  }
+    return value.cloneRange();
+  }, (cause) => targetError(message, { target: value, cause }));
 }
 
 function resolverContext(targetKind, role, controllerKind, index) {

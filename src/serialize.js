@@ -19,21 +19,45 @@ import {
 import { createStory, createStoryEnvironment } from './story.js';
 
 const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const INTERNAL_ERRORS = new WeakMap();
+let activeReflectionToken = null;
 
-function isErrorType(cause, Constructor) {
+function reflectionBoundary(action, normalize) {
+  const previousToken = activeReflectionToken;
+  const token = {};
+  activeReflectionToken = token;
   try {
-    return cause instanceof Constructor;
-  } catch {
-    return false;
+    return action();
+  } catch (cause) {
+    if (INTERNAL_ERRORS.get(cause) === token) throw cause;
+    return normalize(cause);
+  } finally {
+    activeReflectionToken = previousToken;
   }
 }
 
 function stateError(reason) {
-  return new HanamaruStateError(
+  const error = new HanamaruStateError(
     'HANA_STATE_SERIALIZE_CONTROLLER',
     'Controller cannot be serialized',
     { reason },
   );
+  if (activeReflectionToken !== null) {
+    INTERNAL_ERRORS.set(error, activeReflectionToken);
+  }
+  return error;
+}
+
+function internalConfigError(message, details) {
+  const error = new HanamaruConfigError(
+    'HANA_CONFIG_SERIALIZE_TARGET',
+    message,
+    details,
+  );
+  if (activeReflectionToken !== null) {
+    INTERNAL_ERRORS.set(error, activeReflectionToken);
+  }
+  return error;
 }
 
 function privateObject(input, keys, field) {
@@ -330,40 +354,35 @@ function prepareController(controller) {
 
 function serializeOptions(input) {
   if (input === undefined) return {};
-  try {
+  return reflectionBoundary(() => {
     if (input === null || typeof input !== 'object' || Array.isArray(input)
       || Object.getPrototypeOf(input) !== Object.prototype) {
-      throw new HanamaruConfigError(
-        'HANA_CONFIG_SERIALIZE_TARGET',
+      throw internalConfigError(
         'serialize options must be an ordinary object',
         { options: input },
       );
     }
     const names = Reflect.ownKeys(input);
     if (names.some((key) => key !== 'keyForTarget')) {
-      throw new HanamaruConfigError(
-        'HANA_CONFIG_SERIALIZE_TARGET',
+      throw internalConfigError(
         'serialize options contain an unknown key',
         { options: input },
       );
     }
     const descriptor = Object.getOwnPropertyDescriptor(input, 'keyForTarget');
     if (descriptor !== undefined && !Object.hasOwn(descriptor, 'value')) {
-      throw new HanamaruConfigError(
-        'HANA_CONFIG_SERIALIZE_TARGET',
+      throw internalConfigError(
         'keyForTarget must be a data property',
         { options: input },
       );
     }
     return { keyForTarget: descriptor?.value };
-  } catch (cause) {
-    if (isErrorType(cause, HanamaruConfigError)) throw cause;
-    throw new HanamaruConfigError(
-      'HANA_CONFIG_SERIALIZE_TARGET',
+  }, (cause) => {
+    throw internalConfigError(
       'serialize options could not be inspected',
       { options: input, cause },
     );
-  }
+  });
 }
 
 function assignKey(target, keyForTarget) {
@@ -415,14 +434,13 @@ function assignKey(target, keyForTarget) {
 }
 
 export function serialize(controller, optionsInput = undefined) {
-  let prepared;
-  try {
-    prepared = prepareController(controller);
-    validateDefinition(prepared.definition);
-  } catch (cause) {
-    if (isErrorType(cause, HanamaruStateError)) throw cause;
+  const prepared = reflectionBoundary(() => {
+    const candidate = prepareController(controller);
+    validateDefinition(candidate.definition);
+    return candidate;
+  }, () => {
     throw stateError('malformed');
-  }
+  });
   const options = serializeOptions(optionsInput);
   for (const target of prepared.targets) assignKey(target, options.keyForTarget);
   return validateDefinition(prepared.definition);

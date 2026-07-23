@@ -796,6 +796,52 @@ test('public serialization validation normalizes reflection trap failures as con
   );
 });
 
+test('schema reflection boundaries do not trust trap-thrown Hanamaru error codes', () => {
+  const forgedDefinition = new HanamaruConfigError(
+    'FORGED_DEFINITION',
+    'forged definition error',
+  );
+  const definition = new Proxy({}, {
+    getPrototypeOf() { throw forgedDefinition; },
+  });
+  assert.throws(
+    () => validateDefinition(definition),
+    (error) => error instanceof HanamaruConfigError
+      && error !== forgedDefinition
+      && error.code === 'HANA_CONFIG_SERIALIZED_DEFINITION'
+      && error.details.cause === forgedDefinition,
+  );
+
+  const forgedTarget = new HanamaruTargetError('FORGED_TARGET', 'forged target error');
+  const target = new Proxy(
+    { type: 'selector', selector: '#target' },
+    { ownKeys() { throw forgedTarget; } },
+  );
+  assert.throws(
+    () => resolveSerializedTarget(target, { root: null }),
+    (error) => error instanceof HanamaruConfigError
+      && error !== forgedTarget
+      && error.code === 'HANA_CONFIG_SERIALIZED_DEFINITION'
+      && error.details.cause === forgedTarget,
+  );
+
+  let replayed;
+  assert.throws(() => validateDefinition({}), (error) => {
+    replayed = error;
+    return error instanceof HanamaruConfigError;
+  });
+  const replay = new Proxy({}, {
+    getPrototypeOf() { throw replayed; },
+  });
+  assert.throws(
+    () => validateDefinition(replay),
+    (error) => error instanceof HanamaruConfigError
+      && error !== replayed
+      && error.code === 'HANA_CONFIG_SERIALIZED_DEFINITION'
+      && error.details.cause === replayed,
+  );
+});
+
 test('public serialization contexts normalize reflection and root trap failures', () => {
   const realm = minimalNativeRealm();
   const contextCause = new Error('context ownKeys trap');
@@ -847,6 +893,66 @@ test('public serialization contexts normalize reflection and root trap failures'
   );
 });
 
+test('context and root reflection boundaries normalize forged typed errors', () => {
+  const forgedContext = new HanamaruConfigError('FORGED_CONTEXT', 'forged context error');
+  const context = new Proxy({}, {
+    ownKeys() { throw forgedContext; },
+  });
+  assert.throws(
+    () => resolveSerializedTarget(
+      { type: 'selector', selector: '#target' },
+      context,
+    ),
+    (error) => error instanceof HanamaruConfigError
+      && error !== forgedContext
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.cause === forgedContext,
+  );
+
+  const forgedRoot = new HanamaruTargetError('FORGED_ROOT', 'forged root error');
+  const root = new Proxy({}, {
+    get(target, key) {
+      if (key === 'nodeType') throw forgedRoot;
+      return Reflect.get(target, key);
+    },
+  });
+  assert.throws(
+    () => restore(
+      serializedAnnotation({ type: 'selector', selector: '#target' }),
+      { root },
+    ),
+    (error) => error instanceof HanamaruConfigError
+      && error !== forgedRoot
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.cause === forgedRoot,
+  );
+
+  let replayed;
+  assert.throws(
+    () => resolveSerializedTarget(
+      { type: 'selector', selector: '#target' },
+      null,
+    ),
+    (error) => {
+      replayed = error;
+      return error instanceof HanamaruConfigError;
+    },
+  );
+  const replayContext = new Proxy({}, {
+    ownKeys() { throw replayed; },
+  });
+  assert.throws(
+    () => resolveSerializedTarget(
+      { type: 'selector', selector: '#target' },
+      replayContext,
+    ),
+    (error) => error instanceof HanamaruConfigError
+      && error !== replayed
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.cause === replayed,
+  );
+});
+
 test('resolver return-value reflection traps become target errors without wrapping callbacks', () => {
   const realm = minimalNativeRealm();
   const resultCause = new Error('resolver result prototype trap');
@@ -869,6 +975,49 @@ test('resolver return-value reflection traps become target errors without wrappi
   );
 });
 
+test('resolver result inspection normalizes forged typed errors but callback throws remain resolver errors', () => {
+  const realm = minimalNativeRealm();
+  const forgedResult = new HanamaruTargetError(
+    'HANA_TARGET_RESOLVER',
+    'forged result error',
+  );
+  const result = new Proxy({}, {
+    getPrototypeOf() { throw forgedResult; },
+  });
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'key',
+      key: 'forged-result',
+      targetKind: 'element',
+    }, {
+      root: realm.document,
+      resolveTarget() { return result; },
+    }),
+    (error) => error instanceof HanamaruTargetError
+      && error !== forgedResult
+      && error.code === 'HANA_TARGET_INVALID'
+      && error.details.cause === forgedResult,
+  );
+
+  const callbackCause = new HanamaruConfigError(
+    'CALLBACK_TYPED_CAUSE',
+    'typed resolver callback cause',
+  );
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'key',
+      key: 'callback',
+      targetKind: 'element',
+    }, {
+      root: realm.document,
+      resolveTarget() { throw callbackCause; },
+    }),
+    (error) => error instanceof HanamaruTargetError
+      && error.code === 'HANA_TARGET_RESOLVER'
+      && error.details.cause === callbackCause,
+  );
+});
+
 test('serialize options normalize reflection traps without changing callback error contracts', () => {
   const environment = annotationEnvironment();
   const controller = createAnnotation('#target', { mark: 'underline' }, environment.env);
@@ -885,6 +1034,70 @@ test('serialize options normalize reflection traps without changing callback err
   );
 
   controller.destroy();
+});
+
+test('serialize options normalize forged typed traps while key callbacks retain typed causes', () => {
+  const selectorEnvironment = annotationEnvironment();
+  const selectorController = createAnnotation(
+    '#target',
+    { mark: 'underline' },
+    selectorEnvironment.env,
+  );
+  const forgedOptions = new HanamaruConfigError(
+    'FORGED_OPTIONS',
+    'forged serialize options error',
+  );
+  const options = new Proxy({}, {
+    getPrototypeOf() { throw forgedOptions; },
+  });
+  assert.throws(
+    () => serialize(selectorController, options),
+    (error) => error instanceof HanamaruConfigError
+      && error !== forgedOptions
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.cause === forgedOptions,
+  );
+
+  let replayed;
+  assert.throws(
+    () => serialize(selectorController, { unknown: true }),
+    (error) => {
+      replayed = error;
+      return error instanceof HanamaruConfigError;
+    },
+  );
+  const replayOptions = new Proxy({}, {
+    getPrototypeOf() { throw replayed; },
+  });
+  assert.throws(
+    () => serialize(selectorController, replayOptions),
+    (error) => error instanceof HanamaruConfigError
+      && error !== replayed
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.cause === replayed,
+  );
+  selectorController.destroy();
+
+  const realm = minimalNativeRealm();
+  const nativeEnvironment = annotationEnvironment();
+  const nativeController = createAnnotation(
+    realm.element,
+    { mark: 'underline' },
+    nativeEnvironment.env,
+  );
+  const callbackCause = new HanamaruTargetError(
+    'CALLBACK_TYPED_CAUSE',
+    'typed key callback cause',
+  );
+  assert.throws(
+    () => serialize(nativeController, {
+      keyForTarget() { throw callbackCause; },
+    }),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.cause === callbackCause,
+  );
+  nativeController.destroy();
 });
 
 test('late invalid locator text is rejected before a within-key resolver callback', () => {

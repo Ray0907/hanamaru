@@ -5,13 +5,19 @@ const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const PLACEMENTS = new Set(['auto', 'top', 'right', 'bottom', 'left']);
 const TRIGGERS = new Set(['manual', 'load', 'viewport']);
 const MOTIONS = new Set(['system', 'never']);
+const INTERNAL_ERRORS = new WeakMap();
+let activeValidationToken = null;
 
 function invalid(field, value) {
-  throw new HanamaruConfigError(
+  const error = new HanamaruConfigError(
     'HANA_CONFIG_SERIALIZED_DEFINITION',
     `Invalid serialized definition: ${field}`,
     { field, value },
   );
+  if (activeValidationToken !== null) {
+    INTERNAL_ERRORS.set(error, activeValidationToken);
+  }
+  throw error;
 }
 
 function reflectionFailure(field, cause) {
@@ -20,14 +26,6 @@ function reflectionFailure(field, cause) {
     `Invalid serialized definition: ${field}`,
     { field, cause },
   );
-}
-
-function isConfigError(cause) {
-  try {
-    return cause instanceof HanamaruConfigError;
-  } catch {
-    return false;
-  }
 }
 
 function ordinary(input, field, keys, seen) {
@@ -271,11 +269,16 @@ function validateSerializedTargetUnsafe(input, field = 'target', state = undefin
 }
 
 export function validateSerializedTarget(input, field = 'target') {
+  const previousToken = activeValidationToken;
+  const token = {};
+  activeValidationToken = token;
   try {
     return validateSerializedTargetUnsafe(input, field);
   } catch (cause) {
-    if (isConfigError(cause)) throw cause;
+    if (INTERNAL_ERRORS.get(cause) === token) throw cause;
     reflectionFailure(field, cause);
+  } finally {
+    activeValidationToken = previousToken;
   }
 }
 
@@ -428,11 +431,16 @@ function validateDefinitionUnsafe(input) {
 }
 
 export function validateDefinition(input) {
+  const previousToken = activeValidationToken;
+  const token = {};
+  activeValidationToken = token;
   try {
     return validateDefinitionUnsafe(input);
   } catch (cause) {
-    if (isConfigError(cause)) throw cause;
+    if (INTERNAL_ERRORS.get(cause) === token) throw cause;
     reflectionFailure('definition', cause);
+  } finally {
+    activeValidationToken = previousToken;
   }
 }
 
