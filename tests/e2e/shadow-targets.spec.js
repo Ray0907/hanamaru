@@ -1310,6 +1310,100 @@ test('inherited marker cannot combine with markerless mirror CSS in sheet or pre
   });
 });
 
+test('style verification requires the complete canonical accessibility signature in both modes', async ({ page }) => {
+  const result = await evaluateStyles(page, `(async () => {
+    const root = window.__shadowFixture.openRoot;
+    const incomplete = new CSSStyleSheet();
+    incomplete.replaceSync(\`
+      .hana-shadow-mirror {
+        --hana-shadow-style: 1;
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        overflow: hidden !important;
+      }
+    \`);
+    const canonical = new CSSStyleSheet();
+    canonical.replaceSync(
+      await (await fetch('/src/hanamaru-shadow.css')).text(),
+    );
+    const attempt = (mode, sheet) => {
+      try {
+        const lease = acquireShadowStyles(root, mode === 'sheet'
+          ? { mode, sheet }
+          : { mode });
+        lease.release();
+        return 'ok';
+      } catch (error) {
+        return {
+          typed: error instanceof HanamaruStateError,
+          code: error.code,
+        };
+      }
+    };
+
+    const incompleteSheet = attempt('sheet', incomplete);
+    const incompleteSheetRolledBack = !root.adoptedStyleSheets.includes(incomplete)
+      && !runtimeState.shadows.has(root);
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, incomplete];
+    const incompletePreinstalled = attempt('preinstalled');
+    const incompleteAuthorRetained = root.adoptedStyleSheets.includes(incomplete)
+      && !runtimeState.shadows.has(root);
+    root.adoptedStyleSheets = root.adoptedStyleSheets
+      .filter((sheet) => sheet !== incomplete);
+
+    const canonicalSheet = attempt('sheet', canonical);
+    const canonicalSheetReleased = !root.adoptedStyleSheets.includes(canonical)
+      && !runtimeState.shadows.has(root);
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, canonical];
+    const canonicalPreinstalled = attempt('preinstalled');
+    const canonicalAuthorRetained = root.adoptedStyleSheets.includes(canonical)
+      && !runtimeState.shadows.has(root);
+    const cleanup = {
+      temporaryHosts: document.querySelectorAll('[data-hana-shadow-probe-host]').length,
+      wrappers: root.querySelectorAll('[data-hana-shadow-probe]').length,
+      probes: root.querySelectorAll('.hana-shadow-mirror').length,
+      exactAuthorCount: root.adoptedStyleSheets
+        .filter((sheet) => sheet === canonical).length,
+    };
+    root.adoptedStyleSheets = [];
+    return {
+      incompleteSheet,
+      incompleteSheetRolledBack,
+      incompletePreinstalled,
+      incompleteAuthorRetained,
+      canonicalSheet,
+      canonicalSheetReleased,
+      canonicalPreinstalled,
+      canonicalAuthorRetained,
+      cleanup,
+    };
+  })()`);
+
+  expect(result).toEqual({
+    incompleteSheet: {
+      typed: true,
+      code: 'HANA_STATE_SHADOW_STYLES',
+    },
+    incompleteSheetRolledBack: true,
+    incompletePreinstalled: {
+      typed: true,
+      code: 'HANA_STATE_SHADOW_STYLES',
+    },
+    incompleteAuthorRetained: true,
+    canonicalSheet: 'ok',
+    canonicalSheetReleased: true,
+    canonicalPreinstalled: 'ok',
+    canonicalAuthorRetained: true,
+    cleanup: {
+      temporaryHosts: 0,
+      wrappers: 0,
+      probes: 0,
+      exactAuthorCount: 1,
+    },
+  });
+});
+
 test('sheet configuration rejects forged and wrong-realm identities before adoption', async ({ page }) => {
   const result = await evaluateStyles(page, `(() => {
     const fixture = window.__shadowFixture;

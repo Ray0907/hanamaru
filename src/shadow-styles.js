@@ -72,7 +72,7 @@ function exactKeys(keys, allowed) {
 
 export function normalizeShadowStyles(value = undefined) {
   if (value === undefined) {
-    return { mode: 'auto', nonce: undefined };
+    return Object.freeze({ mode: 'auto', nonce: undefined });
   }
 
   const { keys, descriptors } = reflectStyles(value);
@@ -85,7 +85,7 @@ export function normalizeShadowStyles(value = undefined) {
     if (nonce !== undefined && typeof nonce !== 'string') {
       invalid('nonce', nonce);
     }
-    return { mode: 'auto', nonce };
+    return Object.freeze({ mode: 'auto', nonce });
   }
 
   if (mode === 'sheet') {
@@ -95,12 +95,12 @@ export function normalizeShadowStyles(value = undefined) {
     if (sheet === null || typeof sheet !== 'object' || Array.isArray(sheet)) {
       invalid('sheet', sheet);
     }
-    return { mode: 'sheet', sheet };
+    return Object.freeze({ mode: 'sheet', sheet });
   }
 
   if (mode === 'preinstalled') {
     if (keys.length !== 1 || keys[0] !== 'mode') invalid('configuration', value);
-    return { mode: 'preinstalled' };
+    return Object.freeze({ mode: 'preinstalled' });
   }
 
   invalid('mode', mode);
@@ -179,11 +179,40 @@ function removeAdoption(root, sheet) {
   ];
 }
 
+function allSides(style, prefix, suffix, expected) {
+  return ['Top', 'Right', 'Bottom', 'Left']
+    .every((side) => style[`${prefix}${side}${suffix}`] === expected);
+}
+
+function zeroClip(value) {
+  const normalized = value
+    .replaceAll(',', ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return /^rect\((?:0|0px)(?: (?:0|0px)){3}\)$/u.test(normalized);
+}
+
+function halfInset(value) {
+  const match = /^inset\(([^)]+)\)$/u.exec(value.trim());
+  if (match === null) return false;
+  const values = match[1].trim().split(/\s+/u);
+  return values.length >= 1
+    && values.length <= 4
+    && values.every((entry) => entry === '50%');
+}
+
 function mirrorSignature(style) {
   return style.position === 'absolute'
     && style.width === '1px'
     && style.height === '1px'
-    && style.overflow === 'hidden';
+    && allSides(style, 'padding', '', '0px')
+    && allSides(style, 'margin', '', '-1px')
+    && style.overflowX === 'hidden'
+    && style.overflowY === 'hidden'
+    && zeroClip(style.clip)
+    && halfInset(style.clipPath)
+    && style.whiteSpace === 'nowrap'
+    && allSides(style, 'border', 'Width', '0px');
 }
 
 function verifyRootMarker(root) {
@@ -347,13 +376,27 @@ function browserAdapter() {
   };
 }
 
-function validateInstall(install, mode) {
-  if (install === null || typeof install !== 'object'
-    || typeof install.owned !== 'boolean'
-    || typeof install.release !== 'function') {
+function validateInstall(raw, mode) {
+  if (raw === null || typeof raw !== 'object') {
     throw new TypeError(`${mode} style installation returned an invalid record`);
   }
-  return install;
+  const owned = Object.getOwnPropertyDescriptor(raw, 'owned');
+  const release = Object.getOwnPropertyDescriptor(raw, 'release');
+  if (owned === undefined
+    || release === undefined
+    || !Object.hasOwn(owned, 'value')
+    || !Object.hasOwn(release, 'value')
+    || typeof owned.value !== 'boolean'
+    || typeof release.value !== 'function') {
+    throw new TypeError(`${mode} style installation returned an invalid record`);
+  }
+  const releaseMethod = release.value;
+  return Object.freeze({
+    owned: owned.value,
+    release() {
+      return Reflect.apply(releaseMethod, raw, []);
+    },
+  });
 }
 
 function leaseFor(root, record) {
@@ -366,12 +409,14 @@ function leaseFor(root, record) {
       released = true;
       record.count -= 1;
       if (record.count !== 0) return;
+      record.phase = 'releasing';
       let cause;
       try {
         record.install.release();
       } catch (error) {
         cause = error;
       } finally {
+        record.phase = 'released';
         releaseShadowRootSlot(root, 'styles', record);
       }
       if (cause !== undefined) {
@@ -386,6 +431,12 @@ export function acquireShadowStyles(root, value = undefined, adapter = undefined
   if (adapter === undefined) assertBrowserSheet(root, config);
   const existing = runtimeState.shadows.get(root)?.styles ?? null;
   if (existing !== null) {
+    if (existing.phase !== 'active') {
+      throw stateError(
+        new TypeError('Shadow root styles are being released'),
+        { operation: 'acquire', phase: existing.phase },
+      );
+    }
     if (!compatible(existing.config, config)) {
       throw configError(
         'Shadow root already uses an incompatible style configuration',
@@ -397,32 +448,35 @@ export function acquireShadowStyles(root, value = undefined, adapter = undefined
   }
 
   const activeAdapter = adapter ?? browserAdapter();
+  let rawInstall = null;
   let install = null;
   try {
     if (config.mode === 'auto') {
-      install = validateInstall(
-        activeAdapter.installAuto(root, config, SHADOW_CSS),
-        config.mode,
-      );
+      rawInstall = activeAdapter.installAuto(root, config, SHADOW_CSS);
+      install = validateInstall(rawInstall, config.mode);
     } else if (config.mode === 'sheet') {
-      install = validateInstall(
-        activeAdapter.adoptSheet(root, config, SHADOW_CSS),
-        config.mode,
-      );
+      rawInstall = activeAdapter.adoptSheet(root, config, SHADOW_CSS);
+      install = validateInstall(rawInstall, config.mode);
     } else {
-      install = {
+      rawInstall = {
         owned: false,
         release() {},
       };
+      install = validateInstall(rawInstall, config.mode);
     }
-    activeAdapter.verifyMarker(root, config, install);
-    const record = { config, count: 1, install };
+    activeAdapter.verifyMarker(root, config, rawInstall);
+    const record = {
+      config,
+      count: 1,
+      install,
+      phase: 'active',
+    };
     claimShadowRootSlot(root, 'styles', record);
     return leaseFor(root, record);
   } catch (cause) {
     let rollbackCause;
     try {
-      activeAdapter.rollback(root, install);
+      activeAdapter.rollback(root, rawInstall);
     } catch (error) {
       rollbackCause = error;
     }

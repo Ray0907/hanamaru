@@ -41,6 +41,8 @@ function fakeAdapter(options = {}) {
       releases: 0,
       release() {
         record.releases += 1;
+        options.onRelease?.(record);
+        if (options.releaseError !== undefined) throw options.releaseError;
       },
     };
     installs.push(record);
@@ -101,6 +103,59 @@ test('normalizeShadowStyles returns canonical auto, sheet, and preinstalled reco
   assert.deepEqual(normalizeShadowStyles({ mode: 'preinstalled' }), {
     mode: 'preinstalled',
   });
+});
+
+test('normalized and exposed canonical configs are frozen without mutable registry aliases', () => {
+  const sheet = new FakeSheet();
+  const otherSheet = new FakeSheet();
+  const canonical = [
+    normalizeShadowStyles(),
+    normalizeShadowStyles({ mode: 'auto', nonce: '' }),
+    normalizeShadowStyles({ mode: 'sheet', sheet }),
+    normalizeShadowStyles({ mode: 'preinstalled' }),
+  ];
+  assert.ok(canonical.every(Object.isFrozen));
+  assert.throws(() => {
+    canonical[0].mode = 'preinstalled';
+  }, TypeError);
+  assert.throws(() => {
+    canonical[1].nonce = 'mutated';
+  }, TypeError);
+  assert.throws(() => {
+    canonical[2].sheet = otherSheet;
+  }, TypeError);
+
+  const root = {};
+  const adapter = fakeAdapter();
+  const first = acquireShadowStyles(root, { mode: 'auto', nonce: 'stable' }, adapter);
+  assert.ok(Object.isFrozen(first.config));
+  assert.throws(() => {
+    first.config.nonce = 'mutated';
+  }, TypeError);
+  const second = acquireShadowStyles(
+    root,
+    { mode: 'auto', nonce: 'stable' },
+    adapter,
+  );
+  let conflict;
+  try {
+    acquireShadowStyles(root, { mode: 'preinstalled' }, adapter);
+  } catch (error) {
+    conflict = error;
+  }
+  assert.ok(conflict instanceof HanamaruConfigError);
+  assert.ok(Object.isFrozen(conflict.details.current));
+  assert.ok(Object.isFrozen(conflict.details.incoming));
+  assert.throws(() => {
+    conflict.details.current.mode = 'preinstalled';
+  }, TypeError);
+  assert.equal(getShadowRootState(root).styles.config.mode, 'auto');
+  assert.equal(getShadowRootState(root).styles.config.nonce, 'stable');
+  assert.equal(getShadowRootState(root).styles.count, 2);
+  assert.equal(adapter.installs.length, 1);
+
+  first.release();
+  second.release();
 });
 
 test('normalizeShadowStyles rejects behavior-bearing, unknown, and invalid inputs without invoking accessors', () => {
@@ -346,17 +401,102 @@ test('failed installation still invokes rollback and preserves an independent re
   releaseShadowRootSlot(root, 'resources', resources);
 });
 
+test('malformed install records roll back with the exact raw adapter identity', () => {
+  const cases = [
+    {
+      raw: {
+        owned: 'yes',
+        release() {},
+      },
+    },
+    {
+      raw: {
+        owned: true,
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    const root = {};
+    let work = 1;
+    let rollbackRaw;
+    const adapter = {
+      installAuto() {
+        return entry.raw;
+      },
+      adoptSheet() {
+        throw new Error('unused');
+      },
+      verifyMarker() {
+        throw new Error('verify must not run');
+      },
+      rollback(_root, raw) {
+        rollbackRaw = raw;
+        work = 0;
+      },
+    };
+
+    assert.throws(
+      () => acquireShadowStyles(root, undefined, adapter),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_SHADOW_STYLES'
+        && error.details.cause instanceof TypeError,
+    );
+    assert.strictEqual(rollbackRaw, entry.raw);
+    assert.equal(work, 0);
+    assert.equal(runtimeState.shadows.has(root), false);
+  }
+});
+
+test('successful install snapshots owned and release with the raw method receiver', () => {
+  const root = {};
+  let originalCalls = 0;
+  let replacementCalls = 0;
+  let receiver;
+  const raw = {
+    owned: true,
+    release() {
+      originalCalls += 1;
+      receiver = this;
+    },
+  };
+  const adapter = {
+    installAuto() {
+      return raw;
+    },
+    adoptSheet() {
+      throw new Error('unused');
+    },
+    verifyMarker() {},
+    rollback(_root, install) {
+      install?.release();
+    },
+  };
+  const first = acquireShadowStyles(root, undefined, adapter);
+
+  raw.owned = false;
+  raw.release = function replacementRelease() {
+    replacementCalls += 1;
+  };
+  const second = acquireShadowStyles(root, undefined, adapter);
+
+  assert.equal(first.owned, true);
+  assert.equal(second.owned, true);
+  first.release();
+  second.release();
+  assert.equal(originalCalls, 1);
+  assert.equal(replacementCalls, 0);
+  assert.strictEqual(receiver, raw);
+  assert.equal(runtimeState.shadows.has(root), false);
+});
+
 test('final style release preserves resources and release cleanup is failure-contained', () => {
   const root = {};
   const resources = {};
   claimShadowRootSlot(root, 'resources', resources);
   const releaseCause = new Error('release failed after cleanup');
-  const adapter = fakeAdapter();
+  const adapter = fakeAdapter({ releaseError: releaseCause });
   const lease = acquireShadowStyles(root, undefined, adapter);
-  adapter.installs[0].release = () => {
-    adapter.installs[0].releases += 1;
-    throw releaseCause;
-  };
 
   assert.throws(
     () => lease.release(),
@@ -370,4 +510,61 @@ test('final style release preserves resources and release cleanup is failure-con
   lease.release();
   assert.equal(adapter.installs[0].releases, 1);
   releaseShadowRootSlot(root, 'resources', resources);
+});
+
+test('final release rejects caught reentrant acquire without returning an orphan lease', () => {
+  const root = {};
+  let adapter;
+  let reentrantError;
+  let reentrantLease;
+  adapter = fakeAdapter({
+    onRelease() {
+      try {
+        reentrantLease = acquireShadowStyles(root, undefined, adapter);
+      } catch (error) {
+        reentrantError = error;
+      }
+    },
+  });
+  const lease = acquireShadowStyles(root, undefined, adapter);
+
+  lease.release();
+
+  assert.equal(reentrantLease, undefined);
+  assert.ok(reentrantError instanceof HanamaruStateError);
+  assert.equal(reentrantError.code, 'HANA_STATE_SHADOW_STYLES');
+  assert.equal(adapter.installs.length, 1);
+  assert.equal(adapter.installs[0].releases, 1);
+  assert.equal(runtimeState.shadows.has(root), false);
+
+  adapter = fakeAdapter();
+  const replacement = acquireShadowStyles(root, undefined, adapter);
+  assert.equal(adapter.installs.length, 1);
+  replacement.release();
+  assert.equal(runtimeState.shadows.has(root), false);
+});
+
+test('final release contains uncaught reentrant acquire and still clears the exact slot', () => {
+  const root = {};
+  let adapter;
+  adapter = fakeAdapter({
+    onRelease() {
+      acquireShadowStyles(root, undefined, adapter);
+    },
+  });
+  const lease = acquireShadowStyles(root, undefined, adapter);
+
+  assert.throws(
+    () => lease.release(),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_STYLES'
+      && error.details.operation === 'release'
+      && error.details.cause instanceof HanamaruStateError
+      && error.details.cause.code === 'HANA_STATE_SHADOW_STYLES',
+  );
+  assert.equal(adapter.installs.length, 1);
+  assert.equal(adapter.installs[0].releases, 1);
+  assert.equal(runtimeState.shadows.has(root), false);
+  lease.release();
+  assert.equal(adapter.installs[0].releases, 1);
 });
