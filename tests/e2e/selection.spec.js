@@ -38,6 +38,32 @@ test('annotates omitted and explicit Document selections without changing anchor
   });
 });
 
+test('rejects a proxy-shaped Selection before reading any spoofed selection property', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotateSelection } = await import('/src/selection.js');
+    const reads = [];
+    const spoof = new Proxy({
+      anchorNode: document.querySelector('#document-target').firstChild,
+      getRangeAt() { throw new Error('spoofed getRangeAt must not run'); },
+      rangeCount: 1,
+    }, {
+      get(target, key, receiver) {
+        reads.push(String(key));
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    let code;
+    try {
+      annotateSelection({ mark: 'underline' }, spoof);
+    } catch (error) {
+      code = error.code;
+    }
+    return { code, reads };
+  });
+
+  expect(result).toEqual({ code: 'HANA_TARGET_SELECTION_UNAVAILABLE', reads: [] });
+});
+
 test('keeps the accepted range after the native Selection changes and accepts whitespace-only ranges', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotateSelection } = await import('/src/selection.js');
@@ -77,6 +103,47 @@ test('keeps the accepted range after the native Selection changes and accepts wh
   });
 
   expect(result).toEqual({ events: ['document'], whitespaceState: 'visible' });
+});
+
+test('uses system reduced-motion for a Selection annotation without interpolated animation', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const result = await page.evaluate(async () => {
+    const { annotateSelection } = await import('/src/selection.js');
+    const target = document.querySelector('#document-target');
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const events = [];
+    target.addEventListener('hana:complete', () => events.push('complete'));
+    const controller = annotateSelection({ mark: 'highlight', duration: 500 });
+    controller.show();
+    const immediate = {
+      events: [...events],
+      markPaths: document.querySelectorAll('.hana-mark-path').length,
+      state: controller.state,
+    };
+    await Promise.resolve();
+    const group = document.querySelector('.hana-annotation');
+    const output = {
+      animating: group.classList.contains('hana-is-animating'),
+      immediate,
+      markPaths: group.querySelectorAll('.hana-mark-path').length,
+      microtask: { events: [...events], state: controller.state },
+      state: controller.state,
+    };
+    controller.destroy();
+    return output;
+  });
+
+  expect(result).toEqual({
+    animating: false,
+    immediate: { events: ['complete'], markPaths: 1, state: 'visible' },
+    markPaths: 1,
+    microtask: { events: ['complete'], state: 'visible' },
+    state: 'visible',
+  });
 });
 
 test('supports omitted and explicit iframe Document selections and reports a genuine empty iframe Selection', async ({ page }) => {
