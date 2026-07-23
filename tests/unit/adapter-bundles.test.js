@@ -14,6 +14,7 @@ const projectRoot = path.resolve(
   '..',
 );
 const sourceRoot = path.join(projectRoot, 'src');
+const adapterSourceRoot = path.join(sourceRoot, 'adapters');
 const entries = Object.freeze({
   main: path.join(sourceRoot, 'index.js'),
   react: path.join(sourceRoot, 'adapters', 'react.js'),
@@ -143,6 +144,10 @@ function insideDirectory(file, directory) {
     && relative !== '..'
     && !relative.startsWith(`..${path.sep}`)
     && !path.isAbsolute(relative);
+}
+
+function adapterSourceLabel(file) {
+  return path.relative(adapterSourceRoot, file).split(path.sep).join('/');
 }
 
 async function gzipClosure(closure) {
@@ -321,6 +326,15 @@ async function verifyAdapterBuild({
     for (const [adapter, contract] of Object.entries(adapterContract)) {
       const entryOutput = findEntryOutput(outputs, entries[adapter]);
       const completeClosure = outputClosure(outputs, entryOutput);
+      const localAdapterSources = [...allSourceInputs(outputs, completeClosure)]
+        .filter((input) => insideDirectory(input, adapterSourceRoot))
+        .map(adapterSourceLabel)
+        .sort();
+      assert.deepEqual(
+        localAdapterSources,
+        [`${adapter}.js`, 'lifecycle.js'].sort(),
+        `${adapter} local adapter sources changed`,
+      );
       assert.ok(
         [...completeClosure].some((file) => mainClosure.has(file)),
         `${adapter} does not share its core runtime with the main entry`,
@@ -415,6 +429,26 @@ test('mutation: an adapter cannot add an undeclared framework external', async (
       ],
     }),
     /react external imports changed/,
+  );
+});
+
+test('mutation: a framework adapter cannot retain another adapter entry', async () => {
+  await assert.rejects(
+    verifyAdapterBuild({
+      plugins: [
+        appendSourcePlugin(
+          entries.react,
+          [
+            'import { annotation as leakedSvelteAnnotation } from "./svelte.js";',
+            'if (globalThis.__hana_adapter_mutation__) {',
+            '  globalThis.__hana_adapter_mutation_sink__ = leakedSvelteAnnotation;',
+            '}',
+          ].join('\n'),
+          'mutate-react-local-adapter-import',
+        ),
+      ],
+    }),
+    /react local adapter sources changed/,
   );
 });
 
