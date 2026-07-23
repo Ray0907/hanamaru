@@ -11,8 +11,68 @@ const ESCAPED_CODE_POINTS = Object.freeze({
   '\u2029': '\\u2029',
 });
 
+function invalidJson() {
+  throw new TypeError('Inspector output must contain exact JSON-compatible data');
+}
+
+function isArrayIndex(name, length) {
+  if (!/^(?:0|[1-9]\d*)$/u.test(name)) return false;
+  const index = Number(name);
+  return Number.isSafeInteger(index) && index < length;
+}
+
+function assertUncoercedJsonValue(value) {
+  if (typeof value === 'number' && !Number.isFinite(value)) invalidJson();
+  if (value === undefined
+    || typeof value === 'bigint'
+    || typeof value === 'function'
+    || typeof value === 'symbol') {
+    invalidJson();
+  }
+}
+
+function assertExactJsonContainer(value) {
+  if (Array.isArray(value)) {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const name of Reflect.ownKeys(descriptors)) {
+      if (typeof name !== 'string'
+        || (name !== 'length' && !isArrayIndex(name, value.length))) {
+        invalidJson();
+      }
+      if (name !== 'length' && Object.hasOwn(descriptors[name], 'value')) {
+        assertUncoercedJsonValue(descriptors[name].value);
+      }
+    }
+    return;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) invalidJson();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  for (const name of Reflect.ownKeys(descriptors)) {
+    if (typeof name !== 'string' || descriptors[name].enumerable !== true) {
+      invalidJson();
+    }
+    if (Object.hasOwn(descriptors[name], 'value')) {
+      assertUncoercedJsonValue(descriptors[name].value);
+    }
+  }
+}
+
+function exactJsonReplacer(_key, value) {
+  assertUncoercedJsonValue(value);
+  if (typeof value === 'object' && value !== null) assertExactJsonContainer(value);
+  return value;
+}
+
 function safeSerialized(value, spacing = 2) {
-  const serialized = JSON.stringify(value, null, spacing);
+  let serialized;
+  try {
+    assertUncoercedJsonValue(value);
+    serialized = JSON.stringify(value, exactJsonReplacer, spacing);
+  } catch (cause) {
+    throw new TypeError('Inspector output must be JSON-serializable', { cause });
+  }
   if (typeof serialized !== 'string') {
     throw new TypeError('Inspector output must be JSON-serializable');
   }
@@ -64,8 +124,33 @@ function hasExactBoundaries(candidate, expected) {
     && candidate.endOffset === expected.endOffset;
 }
 
-function persistentOutput(previousOutput, definition) {
-  const serializedDefinition = safeSerialized(definition);
+function isRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value, keys) {
+  if (!isRecord(value)) return false;
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => actual.includes(key));
+}
+
+function matchesProvenDefinition(definition, text, occurrence) {
+  if (!isRecord(definition)
+    || definition.schema !== 'hanamaru/v1'
+    || definition.kind !== 'annotation'
+    || !hasExactKeys(definition.target, ['type', 'within', 'text', 'occurrence'])
+    || !hasExactKeys(definition.target.within, ['type', 'selector'])) {
+    return false;
+  }
+
+  return definition.target.type === 'locator'
+    && definition.target.within.type === 'selector'
+    && definition.target.within.selector === '#inspector-document'
+    && definition.target.text === text
+    && definition.target.occurrence === occurrence;
+}
+
+function persistentOutput(previousOutput, serializedDefinition) {
   const javascript = [
     "import { restore } from 'hanamaru-annotations/serialize';",
     '',
@@ -116,10 +201,15 @@ export function proveRangeLocator({
           occurrence,
         },
       });
+      const definition = serialize(controller);
+      const serializedDefinition = safeSerialized(definition);
+      const stableDefinition = JSON.parse(serializedDefinition);
+      if (!matchesProvenDefinition(stableDefinition, selectedText, occurrence)) {
+        return previousOutput;
+      }
+      return persistentOutput(previousOutput, serializedDefinition);
     } catch {
       return previousOutput;
     }
-    const definition = serialize(controller);
-    return persistentOutput(previousOutput, definition);
   }
 }
