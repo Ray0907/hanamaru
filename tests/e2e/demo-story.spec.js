@@ -122,6 +122,54 @@ test('mobile story suppresses offscreen target output without changing its compl
   await expect(storyNotes).toHaveCount(2);
   await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
 
+  const mobileProofLayout = await page.evaluate(() => {
+    const prose = document.querySelector('#locator-proof');
+    const lineRects = [];
+    const walker = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const range = document.createRange();
+      range.selectNodeContents(walker.currentNode);
+      for (const rect of range.getClientRects()) {
+        if (rect.width > 0 && rect.height > 0) {
+          lineRects.push({
+            bottom: rect.bottom,
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+          });
+        }
+      }
+    }
+    const notes = [...document.querySelectorAll('.hana-note:not(.hana-is-hidden)')]
+      .filter((node) => /Still attached|Measured again/.test(node.textContent))
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        return {
+          bottom: rect.bottom,
+          left: rect.left,
+          right: rect.right,
+          text: node.textContent.trim(),
+          top: rect.top,
+        };
+      });
+    const intersects = (a, b) => a.left < b.right && a.right > b.left
+      && a.top < b.bottom && a.bottom > b.top;
+    return {
+      collisions: notes.flatMap((note) => lineRects
+        .filter((line) => intersects(note, line))
+        .map((line) => ({ line, note }))),
+      notes,
+      overflowingStages: [...document.querySelectorAll('[data-demo-sequence-stage]')]
+        .filter((node) => node.scrollWidth > node.clientWidth + 1)
+        .map((node) => node.dataset.demoSequenceStage),
+      pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    };
+  });
+  expect(mobileProofLayout.notes).toHaveLength(2);
+  expect(mobileProofLayout.collisions).toEqual([]);
+  expect(mobileProofLayout.overflowingStages).toEqual([]);
+  expect(mobileProofLayout.pageOverflow).toBeLessThanOrEqual(0);
+
   await play.scrollIntoViewIfNeeded();
   await expect(storyNotes).toHaveCount(0);
   await expect(state).toHaveText('complete');

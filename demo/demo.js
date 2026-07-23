@@ -21,7 +21,7 @@ const storySteps = [
     },
     mark: 'circle',
     note: 'Measured again.',
-    placement: 'auto',
+    placement: 'bottom',
     duration: 700,
   },
 ];

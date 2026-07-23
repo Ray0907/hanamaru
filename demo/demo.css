@@ -1606,6 +1606,14 @@
     padding: 1rem 2.1rem 1rem 0.5rem;
   }
 
+  #locator-proof {
+    margin-bottom: 5rem;
+  }
+
+  .demo-redline-note {
+    margin-top: 0 !important;
+  }
+
   .demo-registration-data {
     grid-template-columns: 1fr;
     gap: 0.65rem;
@@ -1626,7 +1634,12 @@
 
   .demo-sequence li {
     overflow: hidden;
+    font-size: 0.64rem;
     text-overflow: ellipsis;
+  }
+
+  .demo-sequence li span {
+    font-size: 0.68rem;
   }
 
   .demo-registration-cross {
