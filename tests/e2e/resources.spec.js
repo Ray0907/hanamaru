@@ -223,6 +223,54 @@ test('shared ownership keeps one document root and observer set until the final 
   });
 });
 
+test('visual viewport resize and scroll share layout refresh and final cleanup', async ({ page }) => {
+  await installInstrumentation(page);
+
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const lease = acquireDocumentResources(document);
+    const { shared } = lease;
+    const state = window.__resources;
+    const target = document.querySelector('#direct-target');
+    let writes = 0;
+    shared.registerController('visual-viewport');
+    shared.observeLayout({
+      id: 'visual-viewport',
+      generation: 0,
+      record: { kind: 'element', element: target, ownerElement: target },
+      note: null,
+      read() { return ++writes; },
+      write() {},
+    });
+    state.runFrame();
+
+    const listeners = state.listeners
+      .filter(({ target: label, type }) => label === 'VisualViewport'
+        && (type === 'resize' || type === 'scroll'))
+      .map(({ type }) => type)
+      .sort();
+    visualViewport.dispatchEvent(new Event('resize'));
+    state.runFrame();
+    visualViewport.dispatchEvent(new Event('scroll'));
+    state.runFrame();
+    shared.releaseController('visual-viewport');
+    lease.release();
+    const removals = state.removals
+      .filter(({ target: label, type }) => label === 'VisualViewport'
+        && (type === 'resize' || type === 'scroll'))
+      .map(({ type }) => type)
+      .sort();
+
+    return { listeners, removals, writes };
+  });
+
+  expect(result).toEqual({
+    listeners: ['resize', 'scroll'],
+    removals: ['resize', 'scroll'],
+    writes: 2,
+  });
+});
+
 test('public queue keeps shared read/write ordering and rejects stale controller tokens', async ({ page }) => {
   await installInstrumentation(page);
 
@@ -391,7 +439,9 @@ test('shares scroll and resize resources while routing signals by controller', a
       }));
     }
 
-    const scrollAdds = state.listeners.filter(({ type }) => type === 'scroll');
+    const scrollAdds = state.listeners.filter(({ target: listenerTarget, type }) => (
+      type === 'scroll' && listenerTarget !== 'VisualViewport'
+    ));
     const observed = [...state.resizeObservers[0].observed].map((target) => target.id).sort();
 
     state.resizeObservers[0].deliver([document.querySelector('#direct-target')]);
@@ -485,7 +535,9 @@ test('rebinds scroll ancestors and invalidates queued work when generation chang
     document.querySelector('#move-destination').append(target);
     record.refresh();
     const unsubscribe = shared.rebindLayout('moving', callbacks(generation));
-    const addsAfterMove = state.listeners.filter(({ type }) => type === 'scroll').map(({ target: listenerTarget }) => listenerTarget);
+    const addsAfterMove = state.listeners.filter(({ target: listenerTarget, type }) => (
+      type === 'scroll' && listenerTarget !== 'VisualViewport'
+    )).map(({ target: listenerTarget }) => listenerTarget);
     const removalsAfterMove = state.removals.filter(({ type }) => type === 'scroll').map(({ target: listenerTarget }) => listenerTarget);
 
     document.querySelector('#inner-scroll').dispatchEvent(new Event('scroll'));
@@ -1186,7 +1238,7 @@ test('releaseController and final lease teardown cancel every registration and s
     mutationDisconnected: true,
     overlayCount: 0,
     resizeDisconnected: true,
-    scrollRemovals: ['inner-scroll', 'outer-scroll', 'window'],
+    scrollRemovals: ['inner-scroll', 'outer-scroll', 'window', 'VisualViewport'],
     windowResizeRemovals: 1,
   });
 });

@@ -106,6 +106,16 @@ test('intersectsViewport accepts partial visual intersection and rejects outside
   assert.equal(intersectsViewport(rect(10, 80, 10, 10), viewport), false);
 });
 
+test('intersectsViewport honors an offset visual viewport', () => {
+  const viewport = { width: 100, height: 80, left: 250, top: 120 };
+
+  assert.equal(intersectsViewport(rect(245, 130, 10, 10), viewport), true);
+  assert.equal(intersectsViewport(rect(340, 190, 20, 20), viewport), true);
+  assert.equal(intersectsViewport(rect(200, 130, 40, 10), viewport), false);
+  assert.equal(intersectsViewport(rect(350, 130, 10, 10), viewport), false);
+  assert.equal(intersectsViewport(rect(270, 200, 10, 10), viewport), false);
+});
+
 test('overflowPixels sums every edge excess outside the inset viewport', () => {
   const viewport = { width: 100, height: 80 };
 
@@ -168,6 +178,25 @@ test('clampNoteRect caps size then positions a note inside the inset viewport', 
   assert.deepEqual(
     clampNoteRect(rect(50, 80, 100, 60), { width: 390, height: 844 }, 12),
     rect(50, 80, 100, 60),
+  );
+});
+
+test('clampNoteRect keeps notes inside an offset visual viewport', () => {
+  assert.deepEqual(
+    clampNoteRect(
+      rect(700, 40, 180, 120),
+      { width: 640, height: 360, left: 80, top: 30 },
+      12,
+    ),
+    rect(528, 42, 180, 120),
+  );
+  assert.deepEqual(
+    clampNoteRect(
+      rect(-20, -20, 900, 500),
+      { width: 640, height: 360, left: 80, top: 30 },
+      12,
+    ),
+    rect(92, 42, 616, 336),
   );
 });
 

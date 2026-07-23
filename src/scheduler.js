@@ -238,6 +238,8 @@ class SharedDocumentResources {
 
   #window;
 
+  #visualViewport;
+
   #windowResize = () => {
     for (const id of this.#layouts.keys()) {
       this.#signal(id);
@@ -247,6 +249,7 @@ class SharedDocumentResources {
   constructor(doc) {
     this.#doc = doc;
     this.#window = doc.defaultView;
+    this.#visualViewport = this.#window.visualViewport;
     const { noteLayer, overlay, svgLayer } = createOverlay(doc);
     this.overlay = overlay;
     this.svgLayer = svgLayer;
@@ -313,6 +316,8 @@ class SharedDocumentResources {
     });
 
     this.#window.addEventListener('resize', this.#windowResize);
+    this.#visualViewport?.addEventListener('resize', this.#windowResize, { passive: true });
+    this.#visualViewport?.addEventListener('scroll', this.#windowResize, { passive: true });
   }
 
   registerController(id) {
@@ -773,6 +778,8 @@ class SharedDocumentResources {
     cleanup(() => this.#resizeObserver?.disconnect());
     cleanup(() => this.#mutationObserver?.disconnect());
     cleanup(() => this.#window.removeEventListener('resize', this.#windowResize));
+    cleanup(() => this.#visualViewport?.removeEventListener('resize', this.#windowResize));
+    cleanup(() => this.#visualViewport?.removeEventListener('scroll', this.#windowResize));
     cleanup(() => this.#frameQueue.destroy());
     cleanup(() => this.overlay.remove());
     if (failure !== null) throw failure;

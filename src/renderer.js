@@ -256,6 +256,7 @@ export function createRenderer({ id, record, options, lease }) {
   }
 
   function measure() {
+    const visualViewport = win.visualViewport;
     const noteRect = noteElement === null ? null : copyRect(noteElement.getBoundingClientRect());
     const peerNoteRects = [...shared.noteLayer.children]
       .filter((candidate) => (
@@ -267,7 +268,12 @@ export function createRenderer({ id, record, options, lease }) {
     return {
       noteRect,
       peerNoteRects,
-      viewport: { width: win.innerWidth, height: win.innerHeight },
+      viewport: {
+        width: visualViewport?.width ?? win.innerWidth,
+        height: visualViewport?.height ?? win.innerHeight,
+        left: visualViewport?.offsetLeft ?? 0,
+        top: visualViewport?.offsetTop ?? 0,
+      },
     };
   }
 
@@ -297,6 +303,8 @@ export function createRenderer({ id, record, options, lease }) {
     group.replaceChildren(fragment);
 
     if (noteElement !== null) {
+      noteElement.style.setProperty('--hana-visual-viewport-width', `${layout.viewport.width}px`);
+      noteElement.style.setProperty('--hana-visual-viewport-height', `${layout.viewport.height}px`);
       noteElement.style.left = `${layout.noteRect.x}px`;
       noteElement.style.top = `${layout.noteRect.y}px`;
       noteElement.setAttribute('data-hana-side', layout.side);

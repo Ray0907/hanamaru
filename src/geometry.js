@@ -12,12 +12,15 @@ export function rect(x, y, width, height) {
 }
 
 export function intersectsViewport(input, viewport) {
+  const left = viewport.left ?? 0;
+  const top = viewport.top ?? 0;
+
   return input.width > 0
     && input.height > 0
-    && input.right > 0
-    && input.bottom > 0
-    && input.left < viewport.width
-    && input.top < viewport.height;
+    && input.right > left
+    && input.bottom > top
+    && input.left < left + viewport.width
+    && input.top < top + viewport.height;
 }
 
 export function fnv1a(value) {
@@ -245,11 +248,13 @@ export function intersectionArea(a, b) {
 }
 
 export function overflowPixels(note, viewport, inset = 12) {
-  const right = viewport.width - inset;
-  const bottom = viewport.height - inset;
+  const left = viewport.left ?? 0;
+  const top = viewport.top ?? 0;
+  const right = left + viewport.width - inset;
+  const bottom = top + viewport.height - inset;
 
-  return Math.max(0, inset - note.left)
-    + Math.max(0, inset - note.top)
+  return Math.max(0, left + inset - note.left)
+    + Math.max(0, top + inset - note.top)
     + Math.max(0, note.right - right)
     + Math.max(0, note.bottom - bottom);
 }
@@ -283,14 +288,16 @@ export function scoreCandidate(candidate, {
 }
 
 export function clampNoteRect(input, viewport, inset = 12) {
+  const left = viewport.left ?? 0;
+  const top = viewport.top ?? 0;
   const horizontalInset = Math.min(inset, viewport.width / 2);
   const verticalInset = Math.min(inset, viewport.height / 2);
   const width = Math.max(0, Math.min(input.width, viewport.width - (2 * horizontalInset)));
   const height = Math.max(0, Math.min(input.height, viewport.height - (2 * verticalInset)));
-  const minX = horizontalInset;
-  const minY = verticalInset;
-  const maxX = viewport.width - horizontalInset - width;
-  const maxY = viewport.height - verticalInset - height;
+  const minX = left + horizontalInset;
+  const minY = top + verticalInset;
+  const maxX = left + viewport.width - horizontalInset - width;
+  const maxY = top + viewport.height - verticalInset - height;
   const x = Math.max(minX, Math.min(input.x, maxX));
   const y = Math.max(minY, Math.min(input.y, maxY));
 
