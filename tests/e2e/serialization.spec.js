@@ -109,3 +109,93 @@ test('target preserves native Element and Range identity only in private metadat
   expect(pageErrors).toEqual([]);
   expect(unhandled).toEqual([]);
 });
+
+test('serialized Range keys reject document Comments and invalid clone overrides', async ({ page }) => {
+  await page.goto('/tests/fixtures/annotation.html');
+
+  const result = await page.evaluate(async () => {
+    const { resolveSerializedTarget } = await import('/src/serialize.js');
+    const wire = {
+      type: 'key',
+      key: 'selection',
+      targetKind: 'range',
+    };
+    const resolve = (range) => {
+      try {
+        const value = resolveSerializedTarget(wire, {
+          root: document,
+          resolveTarget() { return range; },
+        });
+        return {
+          returned: true,
+          isRange: value instanceof Range,
+          value,
+        };
+      } catch (error) {
+        return {
+          returned: false,
+          code: error.code,
+          hasCause: error.details?.cause !== undefined,
+        };
+      }
+    };
+
+    const host = document.querySelector('#range-target');
+    const valid = document.createRange();
+    valid.selectNodeContents(host);
+    const validResult = resolve(valid);
+    const validProof = {
+      returned: validResult.returned,
+      isRange: validResult.isRange,
+      distinct: validResult.value !== valid,
+      sameStartContainer: validResult.value?.startContainer === valid.startContainer,
+      sameEndContainer: validResult.value?.endContainer === valid.endContainer,
+      sameStartOffset: validResult.value?.startOffset === valid.startOffset,
+      sameEndOffset: validResult.value?.endOffset === valid.endOffset,
+    };
+
+    const comment = document.createComment('document-level range');
+    document.append(comment);
+    const commentRange = document.createRange();
+    commentRange.setStart(comment, 0);
+    commentRange.setEnd(comment, comment.data.length);
+    const commentResult = resolve(commentRange);
+
+    const overridden = document.createRange();
+    overridden.selectNodeContents(host);
+    Object.defineProperty(overridden, 'cloneRange', {
+      configurable: true,
+      value() { return 'not a Range'; },
+    });
+    const overrideResult = resolve(overridden);
+
+    valid.detach();
+    commentRange.detach();
+    overridden.detach();
+    comment.remove();
+
+    return { validProof, commentResult, overrideResult };
+  });
+
+  expect(result).toEqual({
+    validProof: {
+      returned: true,
+      isRange: true,
+      distinct: true,
+      sameStartContainer: true,
+      sameEndContainer: true,
+      sameStartOffset: true,
+      sameEndOffset: true,
+    },
+    commentResult: {
+      returned: false,
+      code: 'HANA_TARGET_INVALID',
+      hasCause: true,
+    },
+    overrideResult: {
+      returned: false,
+      code: 'HANA_TARGET_INVALID',
+      hasCause: true,
+    },
+  });
+});

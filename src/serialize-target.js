@@ -112,7 +112,16 @@ function connectedRange(value, root) {
     ))) {
       targetError(message, { target: value });
     }
-    return value.cloneRange();
+    const clone = resolveTarget(value, root).range;
+    if (!(clone instanceof RangeConstructor)
+      || clone === value
+      || clone.startContainer !== value.startContainer
+      || clone.endContainer !== value.endContainer
+      || clone.startOffset !== value.startOffset
+      || clone.endOffset !== value.endOffset) {
+      throw new TypeError('Resolved Range clone must be a distinct equivalent Range');
+    }
+    return clone;
   }, (cause) => targetError(message, { target: value, cause }));
 }
 

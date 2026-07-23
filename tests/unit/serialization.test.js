@@ -1144,6 +1144,7 @@ test('resolveSerializedTarget uses exact key contexts and clones resolved ranges
   });
 
   assert.notEqual(resolved, range);
+  assert.ok(resolved instanceof realm.RealmRange);
   assert.equal(resolved.startContainer, range.startContainer);
   assert.equal(resolved.endContainer, range.endContainer);
   assert.equal(resolved.startOffset, range.startOffset);
@@ -1152,6 +1153,107 @@ test('resolveSerializedTarget uses exact key contexts and clones resolved ranges
     'selection',
     { targetKind: 'range', role: 'target', controllerKind: null, index: null },
   ]]);
+});
+
+test('resolveSerializedTarget rejects a connected Range without an Element owner', () => {
+  const realm = minimalNativeRealm();
+  const comment = {
+    nodeType: 8,
+    ownerDocument: realm.document,
+    isConnected: true,
+    parentElement: null,
+    getRootNode() { return realm.document; },
+  };
+  const range = new realm.RealmRange(realm.document, comment);
+
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'key',
+      key: 'document-comment',
+      targetKind: 'range',
+    }, {
+      root: realm.document,
+      resolveTarget() { return range; },
+    }),
+    (error) => error instanceof HanamaruTargetError
+      && error.code === 'HANA_TARGET_INVALID'
+      && error.details.cause instanceof HanamaruTargetError,
+  );
+});
+
+test('resolveSerializedTarget rejects invalid Range clone results with their causes', () => {
+  const realm = minimalNativeRealm();
+  const textNode = {
+    nodeType: 3,
+    ownerDocument: realm.document,
+    isConnected: true,
+    parentElement: realm.element,
+    getRootNode() { return realm.document; },
+  };
+  const wrongTextNode = {
+    nodeType: 3,
+    ownerDocument: realm.document,
+    isConnected: true,
+    parentElement: realm.element,
+    getRootNode() { return realm.document; },
+  };
+  const invalidTextNode = {
+    nodeType: 3,
+    ownerDocument: realm.document,
+    isConnected: false,
+    parentElement: null,
+    getRootNode() { return null; },
+  };
+  const cases = [
+    ['a string', () => 'not a Range'],
+    ['the source Range', (range) => range],
+    ['a Range with different boundaries', () => (
+      new realm.RealmRange(realm.document, wrongTextNode)
+    )],
+    ['a disconnected Range', () => (
+      new realm.RealmRange(realm.document, invalidTextNode)
+    )],
+  ];
+
+  for (const [label, cloneResult] of cases) {
+    const range = new realm.RealmRange(realm.document, textNode);
+    range.cloneRange = () => cloneResult(range);
+
+    assert.throws(
+      () => resolveSerializedTarget({
+        type: 'key',
+        key: `invalid-clone-${label}`,
+        targetKind: 'range',
+      }, {
+        root: realm.document,
+        resolveTarget() { return range; },
+      }),
+      (error) => error instanceof HanamaruTargetError
+        && error.code === 'HANA_TARGET_INVALID'
+        && error.details.cause !== undefined,
+      label,
+    );
+  }
+
+  const cloneCause = new HanamaruConfigError(
+    'FORGED_CLONE',
+    'cloneRange failed',
+  );
+  const throwingRange = new realm.RealmRange(realm.document, textNode);
+  throwingRange.cloneRange = () => { throw cloneCause; };
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'key',
+      key: 'throwing-clone',
+      targetKind: 'range',
+    }, {
+      root: realm.document,
+      resolveTarget() { return throwingRange; },
+    }),
+    (error) => error instanceof HanamaruTargetError
+      && error.code === 'HANA_TARGET_INVALID'
+      && error.details.cause === cloneCause,
+  );
 });
 
 test('resolveSerializedTarget rejects a connected Range whose boundaries are in a ShadowRoot', () => {
