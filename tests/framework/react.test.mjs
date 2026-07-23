@@ -55,10 +55,12 @@ const application = String.raw`
   function Claim({
     accessible,
     configMode,
+    duration,
     enabled,
     hidden,
     mark,
     note,
+    motion,
     patchListen,
     present,
     targetKey,
@@ -71,8 +73,8 @@ const application = String.raw`
         mark,
         note,
         accessible,
-        duration: 0,
-        motion: 'system',
+        duration,
+        motion,
         ...(trigger === undefined ? {} : { trigger }),
       },
       {
@@ -117,10 +119,12 @@ const application = String.raw`
       const props = {
         accessible: input.accessible ?? true,
         configMode: input.configMode ?? 'record',
+        duration: input.duration ?? 0,
         enabled: input.enabled ?? true,
         hidden: input.hidden ?? false,
         mark: input.mark ?? 'underline',
         note: input.note ?? 'React adapter',
+        motion: input.motion ?? 'system',
         patchListen: input.patchListen ?? false,
         present: input.present ?? true,
         targetKey: input.targetKey ?? 'first',
@@ -455,10 +459,68 @@ test('cleans before a throwing onError callback is surfaced from a microtask', a
   expect(snapshot.tokens).toBeNull()
 })
 
-test('inherits reduced motion and reaches visible without an animation delay', async ({ page }) => {
+test('inherits reduced motion and settles a long system animation synchronously', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
-  const started = Date.now()
-  await render(page)
-  await waitVisible(page)
-  expect(Date.now() - started).toBeLessThan(500)
+  const mounted = await render(page, { duration: 900, motion: 'system' })
+
+  expect(mounted.state).toBe('visible')
+  expect(await page.evaluate(async () => {
+    const controller = window.__reactAnnotation.annotationRef.current
+    let settlement = 'pending'
+    controller.finished.then(
+      () => { settlement = 'resolved' },
+      () => { settlement = 'rejected' },
+    )
+    await Promise.resolve()
+    const group = document.querySelector('.hana-annotation')
+    const path = group.querySelector('.hana-mark-path')
+    return {
+      activeAnimations: path.getAnimations().length,
+      animatingClass: group.classList.contains('hana-is-animating'),
+      settlement,
+      state: controller.state,
+      strokeDashoffset: path.style.strokeDashoffset,
+    }
+  })).toEqual({
+    activeAnimations: 0,
+    animatingClass: false,
+    settlement: 'resolved',
+    state: 'visible',
+    strokeDashoffset: '0',
+  })
+})
+
+test('keeps the same long system animation active without reduced motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  const mounted = await render(page, { duration: 900, motion: 'system' })
+
+  expect(mounted.state).toBe('showing')
+  await page.waitForFunction(() => {
+    const path = document.querySelector('.hana-mark-path')
+    const group = document.querySelector('.hana-annotation')
+    return (path?.getAnimations().length ?? 0) > 0
+      || group?.classList.contains('hana-is-animating')
+  })
+  expect(await page.evaluate(async () => {
+    const controller = window.__reactAnnotation.annotationRef.current
+    let settlement = 'pending'
+    controller.finished.then(
+      () => { settlement = 'resolved' },
+      () => { settlement = 'rejected' },
+    )
+    const path = document.querySelector('.hana-mark-path')
+    const group = document.querySelector('.hana-annotation')
+    const snapshot = {
+      activeMotion: path.getAnimations().length > 0
+        || group.classList.contains('hana-is-animating'),
+      settlement,
+      state: controller.state,
+    }
+    window.fixture.unmount()
+    return snapshot
+  })).toEqual({
+    activeMotion: true,
+    settlement: 'pending',
+    state: 'showing',
+  })
 })
