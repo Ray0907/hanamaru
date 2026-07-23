@@ -143,6 +143,17 @@ export function abortError(reason = 'Annotation run cancelled') {
   return new DOMException(reason, 'AbortError');
 }
 
+function rendererThemeStage(renderer) {
+  if (typeof renderer.prepareTheme !== 'function'
+    || typeof renderer.applyTheme !== 'function') {
+    return {};
+  }
+  return {
+    prepare: () => renderer.prepareTheme(),
+    apply: (theme) => renderer.applyTheme(theme),
+  };
+}
+
 function layoutFor(
   record,
   renderer,
@@ -764,6 +775,7 @@ export function createAnnotation(target, rawOptions, env) {
       generation,
       record,
       note: renderer.noteElement,
+      ...rendererThemeStage(renderer),
       read: () => {
         const snapshot = currentMarkPathsSnapshot();
         if (snapshot?.status === 'rebuilding' || snapshot?.status === 'failed') return null;
@@ -948,8 +960,12 @@ export function createAnnotation(target, rawOptions, env) {
         },
       );
     };
+    const themeStage = rendererThemeStage(renderer);
     if (animate && env.reducedMotion(options)) {
       try {
+        if (themeStage.prepare !== undefined) {
+          themeStage.apply(themeStage.prepare());
+        }
         write(read(), true);
       } catch (error) {
         if (isCurrentOperation(operation)) handleScheduledFailure(error);
@@ -961,6 +977,7 @@ export function createAnnotation(target, rawOptions, env) {
         id,
         generation,
         channel: 'lifecycle',
+        ...themeStage,
         read,
         write,
         onError(error) {

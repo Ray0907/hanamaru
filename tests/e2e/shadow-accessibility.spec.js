@@ -36,6 +36,44 @@ async function settle(page) {
   }));
 }
 
+async function prepareDeferredOverflow(page) {
+  await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const fixture = window.__shadowAccessibility.first;
+    const scope = createShadowScope(fixture.root);
+    const controller = scope.annotate(fixture.target, {
+      mark: 'box',
+      note: 'Deferred overflow focus state. '.repeat(8),
+      accessible: true,
+      duration: 0,
+    });
+    controller.show();
+    await controller.finished;
+    const note = document.querySelector('[data-hana-shadow-overlay] [data-hana-note]');
+    note.style.cssText += ';width:150px;max-height:44px';
+    controller.refresh();
+    window.__deferredOverflow = {
+      controller,
+      fixture,
+      note,
+      scope,
+    };
+  });
+  await settle(page);
+  await page.locator('[data-hana-shadow-overlay] [data-hana-note]').focus();
+  await page.evaluate(() => {
+    const { controller, note } = window.__deferredOverflow;
+    note.style.maxHeight = '600px';
+    controller.refresh();
+  });
+  await settle(page);
+  await page.evaluate(() => {
+    const { controller, note } = window.__deferredOverflow;
+    note.style.maxHeight = '44px';
+    controller.refresh();
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   const errors = [];
   browserErrors.set(page, errors);
@@ -426,6 +464,186 @@ test('overflow returning before focused note blur keeps it exposed and focusable
   await page.evaluate(() => window.__overflowReturn.scope.destroy());
 });
 
+test('viewport-hidden focused overflow cannot regain deferred accessibility state', async ({
+  page,
+}) => {
+  await prepareDeferredOverflow(page);
+  const note = page.locator('[data-hana-shadow-overlay] [data-hana-note]');
+  await expect(note).toBeFocused();
+  await page.evaluate(() => {
+    const { controller, fixture } = window.__deferredOverflow;
+    fixture.target.style.transform = 'translateX(2000px)';
+    controller.refresh();
+  });
+  await settle(page);
+
+  await expect(note).toHaveClass(/hana-is-hidden/u);
+  await expect(note).toHaveAttribute('aria-hidden', 'true');
+  await expect(note).not.toHaveAttribute('role', 'note');
+  await expect(note).not.toHaveAttribute('tabindex', '0');
+  expect(await note.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(false);
+  await page.evaluate(() => window.__deferredOverflow.scope.destroy());
+});
+
+test('hide cancels deferred focused-overflow blur and queued restoration', async ({
+  page,
+}) => {
+  await prepareDeferredOverflow(page);
+  const note = page.locator('[data-hana-shadow-overlay] [data-hana-note]');
+  await page.evaluate(() => window.__deferredOverflow.controller.hide());
+  await settle(page);
+
+  await expect(note).toHaveClass(/hana-is-hidden/u);
+  await expect(note).toHaveAttribute('aria-hidden', 'true');
+  await expect(note).not.toHaveAttribute('role', 'note');
+  await expect(note).not.toHaveAttribute('tabindex', '0');
+  expect(await note.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(false);
+  await page.evaluate(() => window.__deferredOverflow.scope.destroy());
+});
+
+test('destroy cancels deferred focused-overflow work before removing its note', async ({
+  page,
+}) => {
+  await prepareDeferredOverflow(page);
+  const result = await page.evaluate(async () => {
+    const { controller, fixture, note, scope } = window.__deferredOverflow;
+    controller.destroy();
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+    const output = {
+      active: document.activeElement === note,
+      connected: note.isConnected,
+      mirrors: fixture.root.querySelectorAll('[data-hana-shadow-mirror]').length,
+      notes: document.querySelectorAll('[data-hana-shadow-overlay] [data-hana-note]').length,
+      describedBy: fixture.target.getAttribute('aria-describedby'),
+    };
+    scope.destroy();
+    return output;
+  });
+
+  expect(result).toEqual({
+    active: false,
+    connected: false,
+    mirrors: 0,
+    notes: 0,
+    describedBy: 'author-first-target',
+  });
+});
+
+test('renderer invalidates deferred overflow restoration before offscreen, hide, and destroy resets', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const fixture = window.__shadowAccessibility.first;
+    const lease = acquireDocumentResources(document);
+    const frames = () => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+    const visibleLayout = {
+      targetRects: [],
+      unionRect: null,
+      markPaths: [],
+      side: 'right',
+      noteRect: {
+        x: 20, y: 20, width: 150, height: 44,
+      },
+      connector: { shaft: '', head: '' },
+      viewport: { width: innerWidth, height: innerHeight },
+      targetVisible: true,
+    };
+    const description = {
+      host: fixture.host,
+      portal: lease.shared.overlay,
+      create() { return {}; },
+      remove() {},
+    };
+
+    const run = async (mode) => {
+      const id = `deferred-${mode}`;
+      lease.shared.registerController(id);
+      const renderer = createRenderer({
+        id,
+        record: {
+          kind: 'element',
+          element: fixture.target,
+          ownerElement: fixture.target,
+        },
+        options: {
+          mark: 'box',
+          note: `Deferred ${mode}`,
+          accessible: true,
+        },
+        lease,
+        description,
+      });
+      const note = renderer.noteElement;
+      let overflowing = true;
+      Object.defineProperties(note, {
+        clientHeight: { configurable: true, get: () => 30 },
+        clientWidth: { configurable: true, get: () => 100 },
+        scrollHeight: { configurable: true, get: () => (overflowing ? 80 : 30) },
+        scrollWidth: { configurable: true, get: () => 100 },
+      });
+      renderer.applyTheme(renderer.prepareTheme());
+      renderer.draw(visibleLayout);
+      await frames();
+      note.focus();
+      overflowing = false;
+      renderer.draw(visibleLayout);
+      await frames();
+      overflowing = true;
+      if (mode === 'offscreen') {
+        renderer.draw({ ...visibleLayout, targetVisible: false });
+      } else if (mode === 'hide') {
+        renderer.hide();
+      } else {
+        renderer.destroy();
+      }
+      await frames();
+      const output = {
+        active: document.activeElement === note,
+        ariaHidden: note.getAttribute('aria-hidden'),
+        connected: note.isConnected,
+        role: note.getAttribute('role'),
+        tabindex: note.getAttribute('tabindex'),
+      };
+      renderer.destroy();
+      lease.shared.releaseController(id);
+      return output;
+    };
+
+    const output = {
+      offscreen: await run('offscreen'),
+      hide: await run('hide'),
+      destroy: await run('destroy'),
+    };
+    lease.release();
+    return output;
+  });
+
+  expect(result.offscreen).toEqual({
+    active: false,
+    ariaHidden: 'true',
+    connected: true,
+    role: null,
+    tabindex: null,
+  });
+  expect(result.hide).toEqual({
+    active: false,
+    ariaHidden: 'true',
+    connected: true,
+    role: null,
+    tabindex: null,
+  });
+  expect(result.destroy).toMatchObject({
+    active: false,
+    connected: false,
+  });
+});
+
 test('horizontal overflow also exposes the bounded note as a focus target', async ({
   page,
 }) => {
@@ -537,6 +755,70 @@ test('target and host theme values bridge to owned output with per-root z-index'
   expect(result.output.firstPortalZ).toBe('1401');
   expect(result.output.secondColor).toBe('rgb(150 40 80)');
   expect(result.output.secondPortalZ).toBe('2402');
+});
+
+test('large bridged font and padding use final note geometry before finished without a later jump', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 520, height: 360 });
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const fixture = window.__shadowAccessibility.first;
+    fixture.host.style.cssText = [
+      'position:absolute',
+      'left:420px',
+      'top:150px',
+      '--hana-font:700 30px/1.35 monospace',
+      '--hana-padding:36px 44px',
+      '--hana-note-gap:24px',
+    ].join(';');
+    const scope = createShadowScope(fixture.root);
+    const controller = scope.annotate(fixture.target, {
+      mark: 'circle',
+      note: 'Large themed note geometry must settle once',
+      placement: 'auto',
+      accessible: true,
+      duration: 0,
+    });
+    controller.show();
+    await controller.finished;
+    const note = document.querySelector('[data-hana-shadow-overlay] .hana-note');
+    const snapshot = () => {
+      const rect = note.getBoundingClientRect();
+      const style = getComputedStyle(note);
+      return {
+        rect: {
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          width: rect.width,
+          height: rect.height,
+        },
+        fontSize: style.fontSize,
+        paddingTop: style.paddingTop,
+        side: note.getAttribute('data-hana-side'),
+      };
+    };
+    const atFinished = snapshot();
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+    const afterFrames = snapshot();
+    scope.destroy();
+    return { atFinished, afterFrames };
+  });
+
+  expect(result.atFinished.fontSize).toBe('30px');
+  expect(result.atFinished.paddingTop).toBe('36px');
+  expect(result.atFinished.side).toBe(result.afterFrames.side);
+  expect(result.atFinished.rect.left).toBeGreaterThanOrEqual(12);
+  expect(result.atFinished.rect.top).toBeGreaterThanOrEqual(12);
+  expect(result.atFinished.rect.right).toBeLessThanOrEqual(508);
+  expect(result.atFinished.rect.bottom).toBeLessThanOrEqual(348);
+  for (const field of ['left', 'top', 'right', 'bottom', 'width', 'height']) {
+    expect(result.atFinished.rect[field]).toBeCloseTo(result.afterFrames.rect[field], 1);
+  }
 });
 
 test('transformed contained clipped host keeps viewport geometry outside its clip without page overflow', async ({
@@ -736,6 +1018,129 @@ test('root mutations, host scrolling, resize, and visual viewport signals reflow
   expect(result.afterViewport.second).toBeCloseTo(result.initial.second, 4);
   expect(result.afterResize.firstWidth).toBeGreaterThan(145);
   expect(result.afterResize.secondWidth).toBeLessThan(140);
+});
+
+test('direct Element reflows for a Shadow-root grandparent style mutation without waking another root', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const { first, second } = window.__shadowAccessibility;
+    first.root.innerHTML = `
+      <div id="element-grandparent">
+        <section><button id="element-direct">Element target</button></section>
+      </div>
+    `;
+    const target = first.root.querySelector('#element-direct');
+    const grandparent = first.root.querySelector('#element-grandparent');
+    const firstScope = createShadowScope(first.root);
+    const secondScope = createShadowScope(second.root);
+    const firstController = firstScope.annotate(target, {
+      mark: 'box', note: null, duration: 0,
+    });
+    const secondController = secondScope.annotate(second.target, {
+      mark: 'box', note: null, duration: 0,
+    });
+    firstController.show();
+    secondController.show();
+    await Promise.all([firstController.finished, secondController.finished]);
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+    const [firstGroup, secondGroup] = [
+      ...document.querySelectorAll('[data-hana-shadow-overlay] .hana-annotation'),
+    ];
+    const before = {
+      first: firstGroup.getBBox().x,
+      second: secondGroup.getBBox().x,
+    };
+    const nativeSecondRect = second.target.getBoundingClientRect.bind(second.target);
+    let unrelatedReads = 0;
+    second.target.getBoundingClientRect = () => {
+      unrelatedReads += 1;
+      return nativeSecondRect();
+    };
+
+    grandparent.style.marginLeft = '96px';
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+    const after = {
+      first: firstGroup.getBBox().x,
+      second: secondGroup.getBBox().x,
+      unrelatedReads,
+    };
+    firstScope.destroy();
+    secondScope.destroy();
+    return { before, after };
+  });
+
+  expect(result.after.first).toBeGreaterThan(result.before.first + 80);
+  expect(result.after.second).toBeCloseTo(result.before.second, 4);
+  expect(result.after.unrelatedReads).toBe(0);
+});
+
+test('direct Range reflows for a Shadow-root grandparent attribute mutation without waking another root', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const { first, second } = window.__shadowAccessibility;
+    first.root.innerHTML = `
+      <style>.range-shifted { margin-left: 110px; }</style>
+      <div id="range-grandparent">
+        <section><p><span id="range-direct">Range target text</span></p></section>
+      </div>
+    `;
+    const rangeText = first.root.querySelector('#range-direct').firstChild;
+    const range = document.createRange();
+    range.selectNodeContents(rangeText);
+    const grandparent = first.root.querySelector('#range-grandparent');
+    const firstScope = createShadowScope(first.root);
+    const secondScope = createShadowScope(second.root);
+    const firstController = firstScope.annotate(range, {
+      mark: 'underline', note: null, duration: 0,
+    });
+    const secondController = secondScope.annotate(second.target, {
+      mark: 'box', note: null, duration: 0,
+    });
+    firstController.show();
+    secondController.show();
+    await Promise.all([firstController.finished, secondController.finished]);
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+    const [firstGroup, secondGroup] = [
+      ...document.querySelectorAll('[data-hana-shadow-overlay] .hana-annotation'),
+    ];
+    const before = {
+      first: firstGroup.getBBox().x,
+      second: secondGroup.getBBox().x,
+    };
+    const nativeSecondRect = second.target.getBoundingClientRect.bind(second.target);
+    let unrelatedReads = 0;
+    second.target.getBoundingClientRect = () => {
+      unrelatedReads += 1;
+      return nativeSecondRect();
+    };
+
+    grandparent.classList.add('range-shifted');
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+    const after = {
+      first: firstGroup.getBBox().x,
+      second: secondGroup.getBBox().x,
+      unrelatedReads,
+    };
+    firstScope.destroy();
+    secondScope.destroy();
+    return { before, after };
+  });
+
+  expect(result.after.first).toBeGreaterThan(result.before.first + 90);
+  expect(result.after.second).toBeCloseTo(result.before.second, 4);
+  expect(result.after.unrelatedReads).toBe(0);
 });
 
 test('scoped layout observes the shadow host as a scroll and resize dependency', async ({

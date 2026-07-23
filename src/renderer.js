@@ -187,6 +187,14 @@ function readShadowTheme(description, owner, view) {
   };
 }
 
+function sameShadowTheme(left, right) {
+  if (left === null || right === null) return left === right;
+  if (left.zIndex !== right.zIndex) return false;
+  return SHADOW_THEME_PROPERTIES.every(
+    (name) => left.values[name] === right.values[name],
+  );
+}
+
 export function createRenderer({
   id,
   record,
@@ -222,6 +230,7 @@ export function createRenderer({
   }
 
   let owner = record.ownerElement ?? null;
+  let appliedTheme = null;
   let descriptionAssociated = false;
   let descriptionMirror = null;
   let destroyed = false;
@@ -261,6 +270,17 @@ export function createRenderer({
     if (!destroyed) scheduleOverflowCheck();
   }
 
+  function removeDeferredBlurCheck() {
+    if (!blurCheckInstalled) return;
+    blurCheckInstalled = false;
+    noteElement?.removeEventListener('blur', onOverflowNoteBlur);
+  }
+
+  function cancelOverflowChecks() {
+    overflowSequence += 1;
+    removeDeferredBlurCheck();
+  }
+
   function deferOrdinaryNoteState() {
     if (noteElement === null) return;
     noteElement.removeAttribute('aria-hidden');
@@ -279,6 +299,7 @@ export function createRenderer({
       return;
     }
     if (overflowing) {
+      removeDeferredBlurCheck();
       noteElement.removeAttribute('aria-hidden');
       noteElement.setAttribute('role', 'note');
       noteElement.setAttribute('tabindex', '0');
@@ -288,13 +309,35 @@ export function createRenderer({
       deferOrdinaryNoteState();
       return;
     }
+    removeDeferredBlurCheck();
     noteElement.setAttribute('aria-hidden', 'true');
     noteElement.removeAttribute('role');
     noteElement.removeAttribute('tabindex');
   }
 
+  function prepareTheme() {
+    return readShadowTheme(description, owner, win);
+  }
+
+  function applyTheme(theme) {
+    if (sameShadowTheme(appliedTheme, theme)) return;
+    for (const name of SHADOW_THEME_PROPERTIES) {
+      const value = theme?.values[name];
+      if (value === undefined) {
+        group.style.removeProperty(name);
+        noteElement?.style.removeProperty(name);
+      } else {
+        group.style.setProperty(name, value);
+        noteElement?.style.setProperty(name, value);
+      }
+    }
+    if (theme !== null) description.portal.style.zIndex = theme.zIndex;
+    appliedTheme = theme;
+  }
+
   function resetScopedNoteAccessibility() {
     if (noteElement === null || description === null || !options.accessible) return;
+    cancelOverflowChecks();
     if (noteIsFocused()) noteElement.blur();
     noteElement.setAttribute('aria-hidden', 'true');
     noteElement.removeAttribute('role');
@@ -364,14 +407,17 @@ export function createRenderer({
       associateDescription();
     }
     if (!layoutVisible) {
-      overflowSequence += 1;
       group.setAttribute('hidden', '');
       group.classList.remove('hana-is-visible');
       if (noteElement !== null) {
         noteElement.classList.add('hana-is-hidden');
         noteElement.classList.remove('hana-is-visible');
-        if (description === null) noteElement.removeAttribute('tabindex');
-        else resetScopedNoteAccessibility();
+        if (description === null) {
+          overflowSequence += 1;
+          noteElement.removeAttribute('tabindex');
+        } else {
+          resetScopedNoteAccessibility();
+        }
       }
       return;
     }
@@ -386,7 +432,7 @@ export function createRenderer({
 
   function measure() {
     const visualViewport = win.visualViewport;
-    const theme = readShadowTheme(description, owner, win);
+    const theme = appliedTheme;
     const noteRect = noteElement === null ? null : copyRect(noteElement.getBoundingClientRect());
     const peerNoteRects = [];
     const addPeerRect = (input) => {
@@ -443,19 +489,6 @@ export function createRenderer({
       ));
     }
     layoutVisible = layout.targetVisible !== false;
-    if (layout.theme !== undefined) {
-      for (const name of SHADOW_THEME_PROPERTIES) {
-        const value = layout.theme.values[name];
-        if (value === undefined) {
-          group.style.removeProperty(name);
-          noteElement?.style.removeProperty(name);
-        } else {
-          group.style.setProperty(name, value);
-          noteElement?.style.setProperty(name, value);
-        }
-      }
-      description.portal.style.zIndex = layout.theme.zIndex;
-    }
     group.replaceChildren(fragment);
 
     if (noteElement !== null) {
@@ -695,14 +728,17 @@ export function createRenderer({
     }
     cancelMotion();
     removeDescription();
-    overflowSequence += 1;
     group.setAttribute('hidden', '');
     group.classList.remove('hana-is-visible');
     if (noteElement !== null) {
       noteElement.classList.add('hana-is-hidden');
       noteElement.classList.remove('hana-is-visible');
-      if (description === null) noteElement.removeAttribute('tabindex');
-      else resetScopedNoteAccessibility();
+      if (description === null) {
+        overflowSequence += 1;
+        noteElement.removeAttribute('tabindex');
+      } else {
+        resetScopedNoteAccessibility();
+      }
     }
   }
 
@@ -711,19 +747,15 @@ export function createRenderer({
       return;
     }
     destroyed = true;
-    if (blurCheckInstalled) {
-      blurCheckInstalled = false;
-      noteElement?.removeEventListener('blur', onOverflowNoteBlur);
-    }
+    cancelOverflowChecks();
     noteElement?.removeEventListener('keydown', onOverflowNoteKeydown);
     cancelMotion();
     removeDescription();
-    overflowSequence += 1;
     group.remove();
     noteElement?.remove();
   }
 
-  return {
+  const renderer = {
     group,
     noteElement,
     measure,
@@ -737,4 +769,9 @@ export function createRenderer({
     hide,
     destroy,
   };
+  Object.defineProperties(renderer, {
+    prepareTheme: { value: prepareTheme },
+    applyTheme: { value: applyTheme },
+  });
+  return renderer;
 }

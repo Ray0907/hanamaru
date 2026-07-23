@@ -279,6 +279,37 @@ test('runs every surviving read before any write', () => {
   ]);
 });
 
+test('stages every prepare read and apply write before geometry reads and final writes', () => {
+  const { generations, queue, runFrame } = createHarness();
+  const events = [];
+  generations.set('a', 1);
+  generations.set('b', 1);
+
+  for (const key of ['a', 'b']) {
+    queue.enqueue(job(key, 1, events, key, {
+      prepare() {
+        events.push(`prepare:${key}`);
+        return `theme:${key}`;
+      },
+      apply(value) {
+        events.push(`apply:${key}:${value}`);
+      },
+    }));
+  }
+  runFrame();
+
+  assert.deepEqual(events, [
+    'prepare:a',
+    'prepare:b',
+    'apply:a:theme:a',
+    'apply:b:theme:b',
+    'read:a',
+    'read:b',
+    'write:a:value:a',
+    'write:b:value:b',
+  ]);
+});
+
 test('brackets the complete read-all write-all batch with one pair of frame hooks', () => {
   const events = [];
   const { generations, queue, runFrame } = createHarness({

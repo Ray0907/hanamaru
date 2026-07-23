@@ -76,10 +76,16 @@ export class FrameQueue {
     const {
       key,
       generation,
+      prepare,
+      apply,
       read,
       write,
       onError,
     } = candidate;
+    if (prepare !== undefined || apply !== undefined) {
+      requireFunction('prepare', prepare);
+      requireFunction('apply', apply);
+    }
     requireFunction('read', read);
     requireFunction('write', write);
     if (onError !== undefined) {
@@ -90,6 +96,8 @@ export class FrameQueue {
     this.#pending.set(key, {
       key,
       generation,
+      prepare,
+      apply,
       read,
       write,
       onError,
@@ -147,6 +155,9 @@ export class FrameQueue {
     this.#pending = new Map();
     try {
       this.#beforeFlush?.();
+      const blockedJobs = new Set();
+      const preparations = [];
+      const prepareErrors = [];
       const reads = [];
       const readErrors = [];
 
@@ -154,6 +165,76 @@ export class FrameQueue {
         if (!this.#alive) {
           return;
         }
+        if (job.prepare === undefined) continue;
+
+        let currentGeneration;
+        try {
+          currentGeneration = this.#generationFor(job.key);
+        } catch (error) {
+          prepareErrors.push({ job, error });
+          blockedJobs.add(job);
+          continue;
+        }
+        if (currentGeneration !== job.generation) {
+          blockedJobs.add(job);
+          continue;
+        }
+
+        try {
+          preparations.push({ job, value: job.prepare() });
+        } catch (error) {
+          prepareErrors.push({ job, error });
+          blockedJobs.add(job);
+        }
+      }
+
+      for (const entry of prepareErrors) {
+        if (!this.#alive) {
+          return;
+        }
+
+        let currentGeneration;
+        try {
+          currentGeneration = this.#generationFor(entry.job.key);
+        } catch (error) {
+          this.#report(entry.job, error);
+          continue;
+        }
+        if (currentGeneration !== entry.job.generation) continue;
+        this.#report(entry.job, entry.error);
+      }
+
+      for (const entry of preparations) {
+        if (!this.#alive) {
+          return;
+        }
+
+        let currentGeneration;
+        try {
+          currentGeneration = this.#generationFor(entry.job.key);
+        } catch (error) {
+          blockedJobs.add(entry.job);
+          this.#report(entry.job, error);
+          continue;
+        }
+        if (currentGeneration !== entry.job.generation) {
+          blockedJobs.add(entry.job);
+          continue;
+        }
+
+        try {
+          entry.job.apply(entry.value);
+        } catch (error) {
+          blockedJobs.add(entry.job);
+          this.#report(entry.job, error);
+        }
+      }
+
+      for (const job of jobs.values()) {
+        if (!this.#alive) {
+          return;
+        }
+        if (blockedJobs.has(job)) continue;
 
         let currentGeneration;
         try {
@@ -465,6 +546,8 @@ class SharedDocumentResources {
       id,
       generation,
       channel = 'default',
+      prepare,
+      apply,
       read,
       write,
       onError,
@@ -476,6 +559,10 @@ class SharedDocumentResources {
     if (typeof channel !== 'string' || channel.length === 0) {
       throw new TypeError('queue channel must be a non-empty string');
     }
+    if (prepare !== undefined || apply !== undefined) {
+      requireFunction('prepare', prepare);
+      requireFunction('apply', apply);
+    }
     requireFunction('read', read);
     requireFunction('write', write);
     if (onError !== undefined) {
@@ -484,6 +571,8 @@ class SharedDocumentResources {
     this.#frameQueue.enqueue({
       key: this.#queueKey(controller, id, `public:${channel}`),
       generation: controller.token,
+      prepare,
+      apply,
       read,
       write,
       onError,
@@ -624,6 +713,8 @@ class SharedDocumentResources {
       generation,
       record,
       note = null,
+      prepare,
+      apply,
       read,
       write,
       onError,
@@ -633,6 +724,10 @@ class SharedDocumentResources {
     }
     if (record === null || typeof record !== 'object') {
       throw new TypeError('record must be an object');
+    }
+    if (prepare !== undefined || apply !== undefined) {
+      requireFunction('prepare', prepare);
+      requireFunction('apply', apply);
     }
     requireFunction('read', read);
     requireFunction('write', write);
@@ -655,6 +750,8 @@ class SharedDocumentResources {
       mutationScope: this.#discoverMutationScope(record, mutationRoot),
       note,
       onError,
+      prepare,
+      apply,
       read,
       record,
       resizeTargets: this.#discoverResizeTargets(record, note, mutationHost),
@@ -766,7 +863,9 @@ class SharedDocumentResources {
         if (record.target === mutationHost
           || binding.mutationScope === mutationRoot
           || record.target === binding.mutationScope
-          || binding.mutationScope.contains?.(record.target)) {
+          || binding.mutationScope.contains?.(record.target)
+          || (mutationRoot !== this.#doc
+            && record.target.contains?.(binding.mutationScope))) {
           ids.add(binding.id);
         }
       }
@@ -864,6 +963,8 @@ class SharedDocumentResources {
     this.#frameQueue.enqueue({
       key: this.#queueKey(controller, id, 'internal:layout'),
       generation: binding.token,
+      prepare: binding.prepare,
+      apply: binding.apply,
       read: binding.read,
       write: binding.write,
       onError: binding.onError,
