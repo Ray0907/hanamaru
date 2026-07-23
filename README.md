@@ -1,4 +1,5 @@
 # Hanamaru
+![Hanamaru Living Redline demo](docs/assets/hanamaru-demo.png)
 
 Hanamaru is a framework-free DOM annotation runtime for expressive marks, attached notes, and ordered annotation stories that stay aligned while a page reflows. It uses ordinary HTML, CSS, and a small JavaScript runtime with zero production dependencies.
 

@@ -50,8 +50,12 @@ test.beforeAll(async () => {
   );
 });
 
-test('offers stable adoption anchors without a pre-acceptance screenshot', () => {
-  expect(readme).toMatch(/^# Hanamaru\s*$/m);
+test('offers stable adoption anchors with the accepted Living Redline screenshot', async () => {
+  expect(readme).toMatch(
+    /^# Hanamaru\n!\[Hanamaru Living Redline demo\]\(docs\/assets\/hanamaru-demo\.png\)\n\n/,
+  );
+  const screenshot = await readFile(path.join(root, 'docs/assets/hanamaru-demo.png'));
+  expect([...screenshot.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   for (const title of [
     'Quick Start',
     'API',
@@ -63,7 +67,9 @@ test('offers stable adoption anchors without a pre-acceptance screenshot', () =>
     expect(readme).toMatch(new RegExp(`^## ${title}\\s*$`, 'm'));
     expect(readme).toContain(`(#${title.toLowerCase().replaceAll(' ', '-')})`);
   }
-  expect(readme).not.toMatch(/!\[[^\]]*\]\([^)]+\)/);
+  expect(readme.match(/!\[[^\]]*\]\([^)]+\)/g)).toEqual([
+    '![Hanamaru Living Redline demo](docs/assets/hanamaru-demo.png)',
+  ]);
   expect(readme).not.toMatch(/https?:\/\//);
 });
 
