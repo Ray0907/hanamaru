@@ -195,6 +195,24 @@ function sameShadowTheme(left, right) {
   );
 }
 
+function visualViewportSnapshot(view) {
+  const viewport = view.visualViewport;
+  return {
+    width: viewport?.width ?? view.innerWidth,
+    height: viewport?.height ?? view.innerHeight,
+    left: viewport?.offsetLeft ?? 0,
+    top: viewport?.offsetTop ?? 0,
+  };
+}
+
+function sameViewport(left, right) {
+  return left !== null
+    && left.width === right.width
+    && left.height === right.height
+    && left.left === right.left
+    && left.top === right.top;
+}
+
 export function createRenderer({
   id,
   record,
@@ -231,6 +249,7 @@ export function createRenderer({
 
   let owner = record.ownerElement ?? null;
   let appliedTheme = null;
+  let appliedViewport = null;
   let descriptionAssociated = false;
   let descriptionMirror = null;
   let destroyed = false;
@@ -316,23 +335,33 @@ export function createRenderer({
   }
 
   function prepareTheme() {
-    return readShadowTheme(description, owner, win);
+    return {
+      theme: readShadowTheme(description, owner, win),
+      viewport: visualViewportSnapshot(win),
+    };
   }
 
-  function applyTheme(theme) {
-    if (sameShadowTheme(appliedTheme, theme)) return;
-    for (const name of SHADOW_THEME_PROPERTIES) {
-      const value = theme?.values[name];
-      if (value === undefined) {
-        group.style.removeProperty(name);
-        noteElement?.style.removeProperty(name);
-      } else {
-        group.style.setProperty(name, value);
-        noteElement?.style.setProperty(name, value);
+  function applyTheme(stage) {
+    const { theme, viewport } = stage;
+    if (!sameShadowTheme(appliedTheme, theme)) {
+      for (const name of SHADOW_THEME_PROPERTIES) {
+        const value = theme?.values[name];
+        if (value === undefined) {
+          group.style.removeProperty(name);
+          noteElement?.style.removeProperty(name);
+        } else {
+          group.style.setProperty(name, value);
+          noteElement?.style.setProperty(name, value);
+        }
       }
+      if (theme !== null) description.portal.style.zIndex = theme.zIndex;
+      appliedTheme = theme;
     }
-    if (theme !== null) description.portal.style.zIndex = theme.zIndex;
-    appliedTheme = theme;
+    if (!sameViewport(appliedViewport, viewport)) {
+      noteElement?.style.setProperty('--hana-visual-viewport-width', `${viewport.width}px`);
+      noteElement?.style.setProperty('--hana-visual-viewport-height', `${viewport.height}px`);
+      appliedViewport = viewport;
+    }
   }
 
   function resetScopedNoteAccessibility() {
@@ -431,8 +460,8 @@ export function createRenderer({
   }
 
   function measure() {
-    const visualViewport = win.visualViewport;
     const theme = appliedTheme;
+    const viewport = appliedViewport ?? visualViewportSnapshot(win);
     const noteRect = noteElement === null ? null : copyRect(noteElement.getBoundingClientRect());
     const peerNoteRects = [];
     const addPeerRect = (input) => {
@@ -452,12 +481,7 @@ export function createRenderer({
     return {
       noteRect,
       peerNoteRects,
-      viewport: {
-        width: visualViewport?.width ?? win.innerWidth,
-        height: visualViewport?.height ?? win.innerHeight,
-        left: visualViewport?.offsetLeft ?? 0,
-        top: visualViewport?.offsetTop ?? 0,
-      },
+      viewport,
       ...(theme === null ? {} : { theme }),
     };
   }
@@ -492,8 +516,6 @@ export function createRenderer({
     group.replaceChildren(fragment);
 
     if (noteElement !== null) {
-      noteElement.style.setProperty('--hana-visual-viewport-width', `${layout.viewport.width}px`);
-      noteElement.style.setProperty('--hana-visual-viewport-height', `${layout.viewport.height}px`);
       noteElement.style.left = `${layout.noteRect.x}px`;
       noteElement.style.top = `${layout.noteRect.y}px`;
       noteElement.setAttribute('data-hana-side', layout.side);

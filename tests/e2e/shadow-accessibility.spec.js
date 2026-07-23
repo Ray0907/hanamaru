@@ -821,6 +821,101 @@ test('large bridged font and padding use final note geometry before finished wit
   }
 });
 
+test('pinch-zoom visual viewport sizes the wrapping note before finished without a stale first frame', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 4 });
+  try {
+    const result = await page.evaluate(async () => {
+      const { createShadowScope } = await import('/src/shadow.js');
+      const fixture = window.__shadowAccessibility.first;
+      fixture.host.style.cssText = 'position:absolute;left:200px;top:150px';
+      const scope = createShadowScope(fixture.root);
+      const controller = scope.annotate(fixture.target, {
+        mark: 'box',
+        note: 'Pinch viewport wrapping geometry '.repeat(4),
+        placement: 'left',
+        accessible: true,
+        duration: 0,
+      });
+      controller.show();
+      await controller.finished;
+      const note = document.querySelector('[data-hana-shadow-overlay] .hana-note');
+      const snapshot = () => {
+        const rect = note.getBoundingClientRect();
+        return {
+          rect: {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+          },
+          viewport: {
+            left: visualViewport.offsetLeft,
+            top: visualViewport.offsetTop,
+            width: visualViewport.width,
+            height: visualViewport.height,
+          },
+        };
+      };
+      const atFinished = snapshot();
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        });
+      });
+      const afterFrames = snapshot();
+      window.__pinchZoomFixture = { scope, snapshot };
+      return { atFinished, afterFrames };
+    });
+
+    const expectBoundedAndStable = (first, settled) => {
+      const { rect, viewport } = first;
+      expect(rect.left).toBeGreaterThanOrEqual(viewport.left + 12);
+      expect(rect.top).toBeGreaterThanOrEqual(viewport.top + 12);
+      expect(rect.right).toBeLessThanOrEqual(viewport.left + viewport.width - 12);
+      expect(rect.bottom).toBeLessThanOrEqual(viewport.top + viewport.height - 12);
+      for (const field of ['left', 'top', 'right', 'bottom', 'width', 'height']) {
+        expect(rect[field]).toBeCloseTo(settled.rect[field], 1);
+      }
+    };
+    expect(result.atFinished.viewport.width).toBeCloseTo(266.67, 1);
+    expect(result.atFinished.viewport.height).toBeCloseTo(200, 1);
+    expectBoundedAndStable(result.atFinished, result.afterFrames);
+
+    await page.evaluate(() => {
+      const fixture = window.__pinchZoomFixture;
+      fixture.firstResizeFrame = new Promise((resolve) => {
+        visualViewport.addEventListener('resize', () => {
+          requestAnimationFrame(() => resolve(fixture.snapshot()));
+        }, { once: true });
+      });
+    });
+    await cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 2 });
+    const firstResizeFrame = await page.evaluate(
+      () => window.__pinchZoomFixture.firstResizeFrame,
+    );
+    const settledResize = await page.evaluate(() => new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => requestAnimationFrame(
+          () => resolve(window.__pinchZoomFixture.snapshot()),
+        ));
+      });
+    }));
+    expect(firstResizeFrame.viewport.width).toBeGreaterThan(result.atFinished.viewport.width);
+    expect(firstResizeFrame.viewport.height).toBeGreaterThan(result.atFinished.viewport.height);
+    expectBoundedAndStable(firstResizeFrame, settledResize);
+  } finally {
+    await page.evaluate(() => window.__pinchZoomFixture?.scope.destroy());
+    await cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 1 });
+    await cdp.detach();
+  }
+});
+
 test('transformed contained clipped host keeps viewport geometry outside its clip without page overflow', async ({
   page,
 }) => {
