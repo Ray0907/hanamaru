@@ -270,6 +270,7 @@ export function createGroup(members, rawOptions = {}, env) {
   let operationEpoch = 0;
   let refreshEpoch = 0;
   let requestedVisible = false;
+  let activeRefresh = null;
   let stopRefresh = null;
   const automatic = {
     active: false,
@@ -315,6 +316,7 @@ export function createGroup(members, rawOptions = {}, env) {
 
   function cancelRefreshObservation() {
     refreshEpoch += 1;
+    activeRefresh = null;
     const cleanup = stopRefresh;
     stopRefresh = null;
     if (cleanup === null) return null;
@@ -328,6 +330,7 @@ export function createGroup(members, rawOptions = {}, env) {
 
   function refreshIsCurrent(refreshOperation) {
     return state !== 'destroyed'
+      && activeRefresh === refreshOperation
       && refreshOperation.id === refreshEpoch
       && refreshOperation.operation === operationEpoch;
   }
@@ -498,6 +501,12 @@ export function createGroup(members, rawOptions = {}, env) {
 
   function failRun(operation, activeRun, index, cause) {
     if (!isCurrent(operation, activeRun) || activeRun.settled) return;
+    if (activeRefresh !== null
+      && activeRefresh.groupRun === activeRun
+      && refreshIsCurrent(activeRefresh)) {
+      recordRefreshFailure(activeRefresh, index, cause);
+      return;
+    }
     cancelRefreshObservation();
     const error = groupMemberError(index, cause);
     operationEpoch += 1;
@@ -578,6 +587,7 @@ export function createGroup(members, rawOptions = {}, env) {
     if (state !== 'idle' && state !== 'hidden' && state !== 'suspended') {
       return controller;
     }
+    const priorState = state;
     cancelRefreshObservation();
     const triggerFailure = stopAutomaticTrigger();
     if (triggerFailure !== null) {
@@ -586,7 +596,10 @@ export function createGroup(members, rawOptions = {}, env) {
     }
     const failures = preflightAll();
     if (failures.length > 0) {
-      reportPreflightFailure(failures[0], false);
+      reportPreflightFailure(
+        failures[0],
+        priorState === 'suspended' && run !== null,
+      );
       return controller;
     }
     beginRun();
@@ -657,6 +670,43 @@ export function createGroup(members, rawOptions = {}, env) {
     return failures;
   }
 
+  function combinedRefreshFailures(refreshOperation) {
+    return [
+      ...refreshOperation.failures,
+      ...refreshFailures(),
+    ];
+  }
+
+  function scheduleRefreshCoordinator(refreshOperation) {
+    if (!refreshIsCurrent(refreshOperation)
+      || refreshOperation.coordinatorQueued) return;
+    refreshOperation.coordinatorQueued = true;
+    const coordinate = () => {
+      if (!refreshIsCurrent(refreshOperation)) return;
+      refreshOperation.coordinatorQueued = false;
+      const failures = combinedRefreshFailures(refreshOperation);
+      if (failures.length > 0) {
+        failRefresh(refreshOperation, failures);
+        return;
+      }
+      if (refreshOperation.recovery) {
+        finishRefreshRecovery(refreshOperation);
+      } else {
+        activeRefresh = null;
+      }
+    };
+    if (typeof env.microtask === 'function') env.microtask(coordinate);
+    else Promise.resolve().then(coordinate);
+  }
+
+  function recordRefreshFailure(refreshOperation, index, error) {
+    if (!refreshIsCurrent(refreshOperation)) return;
+    refreshOperation.failures.push({ index, error });
+    if (refreshOperation.frameChecked) {
+      scheduleRefreshCoordinator(refreshOperation);
+    }
+  }
+
   function failRefresh(refreshOperation, failures) {
     if (!refreshIsCurrent(refreshOperation) || failures.length === 0) return;
     const failure = failures.reduce((lowest, candidate) => (
@@ -684,13 +734,14 @@ export function createGroup(members, rawOptions = {}, env) {
       || !refreshOperation.recovery
       || !refreshOperation.frameChecked
       || refreshOperation.remaining !== 0) return;
-    const failures = refreshFailures();
+    const failures = combinedRefreshFailures(refreshOperation);
     if (failures.length > 0) {
       failRefresh(refreshOperation, failures);
       return;
     }
     if (annotations.every((annotation) => annotation.state === 'visible')) {
       state = 'visible';
+      activeRefresh = null;
     }
   }
 
@@ -704,7 +755,7 @@ export function createGroup(members, rawOptions = {}, env) {
       },
       (error) => {
         if (!refreshIsCurrent(refreshOperation)) return;
-        failRefresh(refreshOperation, [{ index, error }]);
+        recordRefreshFailure(refreshOperation, index, error);
       },
     ).catch(() => {});
   }
@@ -712,13 +763,13 @@ export function createGroup(members, rawOptions = {}, env) {
   function checkRefreshFrame(refreshOperation) {
     if (!refreshIsCurrent(refreshOperation)) return;
     stopRefresh = null;
-    const failures = refreshFailures();
+    const failures = combinedRefreshFailures(refreshOperation);
     if (failures.length > 0) {
       failRefresh(refreshOperation, failures);
       return;
     }
     refreshOperation.frameChecked = true;
-    finishRefreshRecovery(refreshOperation);
+    scheduleRefreshCoordinator(refreshOperation);
   }
 
   function scheduleRefreshCheck(refreshOperation) {
@@ -743,7 +794,10 @@ export function createGroup(members, rawOptions = {}, env) {
     const priorState = state;
     const priorRequestedVisible = requestedVisible;
     const refreshOperation = {
+      coordinatorQueued: false,
+      failures: [],
       frameChecked: false,
+      groupRun: run,
       id: refreshEpoch,
       operation: operationEpoch,
       priorState,
@@ -751,6 +805,7 @@ export function createGroup(members, rawOptions = {}, env) {
       remaining: 0,
       requestedVisible: priorRequestedVisible,
     };
+    activeRefresh = refreshOperation;
     const failures = [];
     for (const annotation of annotations) {
       env.clearMemberError?.(annotation);

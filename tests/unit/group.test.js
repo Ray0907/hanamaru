@@ -169,17 +169,20 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
           operation += 1;
           const refreshOperation = operation;
           const activeRun = run;
-          pendingRefreshWrites.push(() => {
-            if (refreshOperation !== operation) return;
-            const error = asyncRefreshFailures.get(target);
-            if (error !== undefined) {
-              memberRefreshErrors.set(annotation, error);
-              if (activeRun !== null && !activeRun.settled) annotation.fail(error);
-              else state = 'suspended';
-              return;
-            }
-            annotation.finish();
-            state = 'visible';
+          pendingRefreshWrites.push({
+            target,
+            write() {
+              if (refreshOperation !== operation) return;
+              const error = asyncRefreshFailures.get(target);
+              if (error !== undefined) {
+                memberRefreshErrors.set(annotation, error);
+                if (activeRun !== null && !activeRun.settled) annotation.fail(error);
+                else state = 'suspended';
+                return;
+              }
+              annotation.finish();
+              state = 'visible';
+            },
           });
           return annotation;
         }
@@ -238,9 +241,16 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
     useAsyncRefresh() { asyncRefresh = true; },
     async flushRefreshFrame() {
       const writes = pendingRefreshWrites.splice(0);
-      for (const write of writes) write();
+      for (const entry of writes) entry.write();
       const checks = pendingRefreshChecks.splice(0);
       for (const check of checks) check();
+      await flushMicrotasks();
+    },
+    async flushRefreshWrite(target) {
+      const index = pendingRefreshWrites.findIndex((entry) => entry.target === target);
+      assert.notEqual(index, -1, `pending refresh write for ${target}`);
+      const [entry] = pendingRefreshWrites.splice(index, 1);
+      entry.write();
       await flushMicrotasks();
     },
     env: {
@@ -658,6 +668,50 @@ test('show transition starts every member in input order and completes atomicall
   });
   assert.equal(controller.show(), controller);
   assert.equal(controller.finished, run);
+});
+
+test('show from suspended creates a fresh recoverable run and preserves finished on failed preflight', async () => {
+  const successEnvironment = fakeEnvironment();
+  const recoverable = createGroup(definitions(), {}, successEnvironment.env);
+  recoverable.show();
+  successEnvironment.annotations[1].fail(new Error('temporary member failure'));
+  const rejectedRun = recoverable.finished;
+  await assert.rejects(rejectedRun, HanamaruStateError);
+  assert.equal(recoverable.state, 'suspended');
+
+  assert.equal(recoverable.show(), recoverable);
+  const recoveryRun = recoverable.finished;
+  assert.notEqual(recoveryRun, rejectedRun);
+  assert.equal(recoverable.state, 'showing');
+  assert.deepEqual(successEnvironment.annotations.map(({ state }) => state), [
+    'showing', 'showing', 'showing',
+  ]);
+  for (const annotation of successEnvironment.annotations) annotation.finish();
+  await recoveryRun;
+  assert.equal(recoverable.state, 'visible');
+
+  const failureEnvironment = fakeEnvironment();
+  const stillSuspended = createGroup(definitions(), {}, failureEnvironment.env);
+  stillSuspended.show();
+  failureEnvironment.annotations[0].fail(new Error('initial failure'));
+  const previousFinished = stillSuspended.finished;
+  await assert.rejects(previousFinished, HanamaruStateError);
+  failureEnvironment.failResolve(
+    'second',
+    new HanamaruTargetError('HANA_TARGET_MISSING', 'still missing'),
+  );
+  const showCalls = failureEnvironment.calls
+    .filter(([name]) => name === 'annotation:show').length;
+
+  assert.equal(stillSuspended.show(), stillSuspended);
+  assert.equal(stillSuspended.state, 'suspended');
+  assert.equal(stillSuspended.finished, previousFinished);
+  assert.equal(
+    failureEnvironment.calls.filter(([name]) => name === 'annotation:show').length,
+    showCalls,
+  );
+  assert.equal(failureEnvironment.events.at(-1).type, 'hana:error');
+  assert.equal(failureEnvironment.events.at(-1).detail.index, 1);
 });
 
 test('hide transition aborts a pending run, hides all members, and is a no-op elsewhere', async () => {
@@ -1236,6 +1290,58 @@ test('pending async refresh failure rejects the existing run after every member 
   });
   assert.equal(controller.state, 'suspended');
   assert.equal(controller.finished, run);
+});
+
+test('async refresh failure ordering selects the lowest index after the observation window', async () => {
+  const unhandled = [];
+  const onUnhandled = (error) => { unhandled.push(error); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    for (const settled of [false, true]) {
+      const environment = fakeEnvironment();
+      environment.useAsyncRefresh();
+      const controller = createGroup(definitions(), {}, environment.env);
+      controller.show();
+      const finished = controller.finished;
+      if (settled) {
+        for (const annotation of environment.annotations) annotation.finish();
+        await finished;
+      }
+      const lateLow = new HanamaruTargetError('HANA_TARGET_MISSING', 'index zero');
+      environment.failRefreshAsync('third', new Error('index two rejects first'));
+      environment.failRefreshAsync('first', lateLow);
+
+      controller.refresh();
+      await environment.flushRefreshWrite('third');
+      assert.equal(controller.state, settled ? 'visible' : 'showing');
+      assert.equal(environment.events.filter(({ type }) => type === 'hana:error').length, 0);
+      await environment.flushRefreshWrite('first');
+      await environment.flushRefreshFrame();
+
+      assert.equal(controller.state, 'suspended');
+      assert.equal(controller.finished, finished);
+      if (settled) await finished;
+      else {
+        await assert.rejects(finished, (error) => {
+          assert.equal(error.code, 'HANA_STATE_GROUP_MEMBER');
+          assert.equal(error.details.index, 0);
+          assert.equal(error.details.error, lateLow);
+          return true;
+        });
+      }
+      const errors = environment.events.filter(({ type }) => type === 'hana:error');
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].detail.index, 0);
+      assert.equal(errors[0].detail.error.details.error, lateLow);
+      assert.deepEqual(environment.annotations.map(({ state }) => state), [
+        'hidden', 'hidden', 'hidden',
+      ]);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
 });
 
 test('requested-visible suspended refresh recovers only after every async member recovers', async () => {
