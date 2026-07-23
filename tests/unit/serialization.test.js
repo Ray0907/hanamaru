@@ -190,14 +190,14 @@ test('annotation records its accepted target and canonical normalized options pr
   controller.destroy();
 });
 
-test('annotation retains selector, locator, Element, and Range sources without freezing them', () => {
-  class Element {}
-  class Range {}
+test('annotation retains selector, locator, and opaque node-like sources without freezing them', () => {
+  class MockElement {}
+  class MockRange {}
   const sources = [
     '#accepted-selector',
     { within: '#scope', text: 'accepted locator' },
-    new Element(),
-    new Range(),
+    new MockElement(),
+    new MockRange(),
   ];
 
   for (const source of sources) {
