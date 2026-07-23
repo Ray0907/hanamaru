@@ -679,3 +679,251 @@ test('validates required injected callbacks and job callbacks clearly', () => {
     /onError.*function/i,
   );
 });
+
+function createDependencyRegistrationHarness(mode) {
+  const cause = new Error(`${mode} registration failed after its side effect`);
+  const resizeEvents = [];
+  let fail = false;
+  let document;
+
+  const element = (name, overflow = false) => {
+    const listeners = new Set();
+    const events = [];
+    const value = {
+      name,
+      nodeType: 1,
+      ownerDocument: null,
+      parentElement: null,
+      listeners,
+      events,
+      overflow,
+      addEventListener(type, listener) {
+        if (type !== 'scroll') return;
+        events.push('add');
+        listeners.add(listener);
+        if (fail && mode === 'scroll' && value === nextScrollB) throw cause;
+      },
+      removeEventListener(type, listener) {
+        if (type !== 'scroll') return;
+        events.push('remove');
+        listeners.delete(listener);
+      },
+      contains(candidate) {
+        let current = candidate;
+        while (current !== null && current !== undefined) {
+          if (current === value) return true;
+          current = current.parentElement;
+        }
+        return false;
+      },
+    };
+    return value;
+  };
+
+  const target = element('target');
+  const oldScroll = element('old-scroll', true);
+  const oldResize = element('old-resize');
+  const nextScrollA = element('next-scroll-a', true);
+  const nextScrollB = element('next-scroll-b', true);
+  const nextResizeA = element('next-resize-a');
+  const nextResizeB = element('next-resize-b');
+  const allElements = [
+    target,
+    oldScroll,
+    oldResize,
+    nextScrollA,
+    nextScrollB,
+    nextResizeA,
+    nextResizeB,
+  ];
+
+  class FakeResizeObserver {
+    observed = new Set();
+
+    observe(candidate) {
+      resizeEvents.push(`observe:${candidate.name}`);
+      this.observed.add(candidate);
+      if (fail && mode === 'resize' && candidate === nextResizeB) throw cause;
+    }
+
+    unobserve(candidate) {
+      resizeEvents.push(`unobserve:${candidate.name}`);
+      this.observed.delete(candidate);
+    }
+
+    disconnect() {
+      this.observed.clear();
+    }
+  }
+
+  class FakeMutationObserver {
+    observe() {}
+
+    disconnect() {}
+  }
+
+  const viewListeners = new Set();
+  const view = {
+    MutationObserver: FakeMutationObserver,
+    ResizeObserver: FakeResizeObserver,
+    visualViewport: null,
+    getComputedStyle(candidate) {
+      const overflow = candidate.overflow ? 'auto' : 'visible';
+      return { overflowX: overflow, overflowY: overflow };
+    },
+    requestAnimationFrame() {
+      return 1;
+    },
+    cancelAnimationFrame() {},
+    addEventListener(type, listener) {
+      if (type === 'scroll') viewListeners.add(listener);
+    },
+    removeEventListener(type, listener) {
+      if (type === 'scroll') viewListeners.delete(listener);
+    },
+  };
+  document = {
+    defaultView: view,
+    nodeType: 9,
+    body: element('body'),
+    documentElement: element('document-element'),
+    scrollingElement: null,
+  };
+  document.scrollingElement = document.documentElement;
+  for (const candidate of [...allElements, document.body, document.documentElement]) {
+    candidate.ownerDocument = document;
+  }
+
+  const dependencies = (scrollTargets, resizeTargets) => ({
+    ancestors: scrollTargets,
+    hosts: [],
+    preceding: resizeTargets,
+    roots: [],
+  });
+  const oldDependencies = dependencies([oldScroll], [oldResize]);
+  const nextDependencies = dependencies(
+    mode === 'scroll' ? [nextScrollA, nextScrollB] : [nextScrollA],
+    mode === 'resize' ? [nextResizeA, nextResizeB] : [],
+  );
+  const record = {
+    element: target,
+    kind: 'element',
+    ownerElement: target,
+  };
+
+  return {
+    cause,
+    document,
+    nextResizeA,
+    nextResizeB,
+    nextScrollA,
+    nextScrollB,
+    oldDependencies,
+    oldResize,
+    oldScroll,
+    nextDependencies,
+    record,
+    resizeEvents,
+    setFailure(value) {
+      fail = value;
+    },
+  };
+}
+
+for (const mode of ['scroll', 'resize']) {
+  test(`dynamic ${mode} registration rolls back partial dependency replacement and retries`, () => {
+    const harness = createDependencyRegistrationHarness(mode);
+    const lease = acquireDocumentScheduler(harness.document);
+    const id = `transaction-${mode}`;
+    lease.shared.registerController(id);
+    const options = {
+      generation: 0,
+      layoutDependencies: harness.oldDependencies,
+      onError() {},
+      read() {},
+      record: harness.record,
+      write() {},
+    };
+    lease.shared.observeLayout({ id, ...options });
+
+    assert.equal(harness.oldScroll.listeners.size, 1);
+    assert.match(harness.resizeEvents.join(','), /observe:old-resize/u);
+
+    lease.shared.bumpGeneration(id);
+    harness.setFailure(true);
+    assert.throws(
+      () => lease.shared.rebindLayout(id, {
+        ...options,
+        generation: 1,
+        layoutDependencies: () => harness.nextDependencies,
+      }),
+      (error) => error === harness.cause,
+    );
+
+    assert.equal(harness.oldScroll.listeners.size, 1);
+    assert.equal(
+      harness.resizeEvents.filter((event) => event === 'unobserve:old-resize').length,
+      0,
+    );
+    assert.equal(harness.nextScrollA.listeners.size, 0);
+    if (mode === 'scroll') assert.equal(harness.nextScrollB.listeners.size, 0);
+    if (mode === 'resize') {
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'unobserve:next-resize-a').length,
+        1,
+      );
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'unobserve:next-resize-b').length,
+        1,
+      );
+    }
+
+    harness.setFailure(false);
+    lease.shared.rebindLayout(id, {
+      ...options,
+      generation: 1,
+      layoutDependencies: () => harness.nextDependencies,
+    });
+
+    assert.equal(harness.oldScroll.listeners.size, 0);
+    assert.equal(harness.nextScrollA.events.filter((event) => event === 'add').length, 2);
+    assert.equal(harness.nextScrollA.listeners.size, 1);
+    if (mode === 'scroll') {
+      assert.equal(harness.nextScrollB.events.filter((event) => event === 'add').length, 2);
+      assert.equal(harness.nextScrollB.listeners.size, 1);
+    } else {
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'observe:next-resize-a').length,
+        2,
+      );
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'observe:next-resize-b').length,
+        2,
+      );
+    }
+
+    lease.shared.releaseController(id);
+    lease.release();
+    assert.equal(harness.nextScrollA.listeners.size, 0);
+    assert.equal(
+      harness.nextScrollA.events.filter((event) => event === 'remove').length,
+      2,
+    );
+    if (mode === 'scroll') {
+      assert.equal(harness.nextScrollB.listeners.size, 0);
+      assert.equal(
+        harness.nextScrollB.events.filter((event) => event === 'remove').length,
+        2,
+      );
+    } else {
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'unobserve:next-resize-a').length,
+        2,
+      );
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'unobserve:next-resize-b').length,
+        2,
+      );
+    }
+  });
+}

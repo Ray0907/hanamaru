@@ -411,6 +411,71 @@ test('owned scoped descriptions reconcile connected tampering and clone duplicat
   });
 });
 
+test('mixed author layout and owned mirror mutations reconcile without suppressing reflow', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const fixture = window.__shadowAccessibility.first;
+    fixture.host.style.cssText = 'display:block;width:500px;height:320px;overflow:visible';
+    const scope = createShadowScope(fixture.root);
+    const controller = scope.annotate(fixture.target, {
+      mark: 'box',
+      note: 'Mixed mutation description',
+      accessible: true,
+      duration: 0,
+    });
+    controller.show();
+    await controller.finished;
+    const frames = (count = 4) => new Promise((resolve) => {
+      const next = () => {
+        if (count === 0) {
+          resolve();
+          return;
+        }
+        count -= 1;
+        requestAnimationFrame(next);
+      };
+      next();
+    });
+    await frames();
+    const group = document.querySelector('[data-hana-shadow-overlay] .hana-annotation');
+    const mirror = fixture.root.querySelector('[data-hana-shadow-mirror]');
+    const before = {
+      groupY: group.getBBox().y,
+      targetY: fixture.target.getBoundingClientRect().top,
+    };
+
+    const authorBlock = document.createElement('div');
+    authorBlock.id = 'mixed-author-block';
+    authorBlock.style.height = '100px';
+    const fragment = document.createDocumentFragment();
+    fragment.append(authorBlock, mirror.cloneNode(true));
+    fixture.root.insertBefore(fragment, fixture.root.firstChild);
+    await frames();
+    const after = {
+      authorHeight: authorBlock.getBoundingClientRect().height,
+      groupY: group.getBBox().y,
+      mirrorCount: fixture.root.querySelectorAll('[data-hana-shadow-mirror]').length,
+      mirrorText: fixture.root.querySelector('[data-hana-shadow-mirror]')?.textContent,
+      targetY: fixture.target.getBoundingClientRect().top,
+    };
+    const settled = after.groupY;
+    await frames();
+    const later = group.getBBox().y;
+    controller.destroy();
+    scope.destroy();
+    return { after, before, later, settled };
+  });
+
+  expect(result.after.authorHeight).toBeCloseTo(100, 1);
+  expect(result.after.targetY).toBeCloseTo(result.before.targetY + 100, 1);
+  expect(result.after.groupY).toBeCloseTo(result.before.groupY + 100, 1);
+  expect(result.after.mirrorCount).toBe(1);
+  expect(result.after.mirrorText).toBe('Mixed mutation description');
+  expect(result.later).toBeCloseTo(result.settled, 4);
+});
+
 test('mirrors stay unique across roots and updates preserve author description tokens', async ({
   page,
 }) => {
@@ -1853,6 +1918,256 @@ test('deep nested scopes follow every composed scroll resize and mutation depend
     middleHostResize: true,
     innerHostResize: true,
     scrollRemoves: 1,
+  });
+});
+
+test('dynamic Shadow dependency failures roll native registrations and observed roots back for retry', async ({
+  page,
+}) => {
+  const results = await page.evaluate(async () => {
+    const nativeAdd = EventTarget.prototype.addEventListener;
+    const nativeRemove = EventTarget.prototype.removeEventListener;
+    const NativeResizeObserver = ResizeObserver;
+    const NativeMutationObserver = MutationObserver;
+    const active = {
+      failMode: null,
+      failingScroller: null,
+      scrollAdds: new Map(),
+      scrollRemoves: new Map(),
+      resizeObserved: [],
+      resizeUnobserved: [],
+      mutationObserved: [],
+    };
+    const increment = (map, target) => map.set(target, (map.get(target) ?? 0) + 1);
+
+    EventTarget.prototype.addEventListener = function addEventListener(
+      type,
+      listener,
+      options,
+    ) {
+      const result = nativeAdd.call(this, type, listener, options);
+      if (type === 'scroll') increment(active.scrollAdds, this);
+      if (type === 'scroll'
+        && active.failMode === 'scroll'
+        && this === active.failingScroller) {
+        throw new Error('dynamic scroll add failed after registration');
+      }
+      return result;
+    };
+    EventTarget.prototype.removeEventListener = function removeEventListener(
+      type,
+      listener,
+      options,
+    ) {
+      if (type === 'scroll') increment(active.scrollRemoves, this);
+      return nativeRemove.call(this, type, listener, options);
+    };
+    window.ResizeObserver = class TrackingResizeObserver {
+      constructor(callback) {
+        this.native = new NativeResizeObserver(callback);
+      }
+
+      observe(target) {
+        active.resizeObserved.push(target);
+        this.native.observe(target);
+        if (active.failMode === 'resize' && target === active.failingScroller) {
+          throw new Error('dynamic resize observe failed after registration');
+        }
+      }
+
+      unobserve(target) {
+        active.resizeUnobserved.push(target);
+        this.native.unobserve(target);
+      }
+
+      disconnect() {
+        this.native.disconnect();
+      }
+    };
+    window.MutationObserver = class TrackingMutationObserver {
+      constructor(callback) {
+        this.native = new NativeMutationObserver(callback);
+      }
+
+      observe(target, options) {
+        active.mutationObserved.push(target);
+        this.native.observe(target, options);
+      }
+
+      disconnect() {
+        this.native.disconnect();
+      }
+
+      takeRecords() {
+        return this.native.takeRecords();
+      }
+    };
+
+    const count = (values, target) => values.filter((value) => value === target).length;
+    const frames = (remaining = 5) => new Promise((resolve) => {
+      const next = () => {
+        if (remaining === 0) {
+          resolve();
+          return;
+        }
+        remaining -= 1;
+        requestAnimationFrame(next);
+      };
+      next();
+    });
+    const outputs = [];
+    try {
+      const { createShadowScope } = await import('/src/shadow.js');
+      for (const mode of ['scroll', 'resize']) {
+        active.failMode = null;
+        active.scrollAdds.clear();
+        active.scrollRemoves.clear();
+        active.resizeObserved.length = 0;
+        active.resizeUnobserved.length = 0;
+        active.mutationObserved.length = 0;
+
+        const stage = document.createElement('div');
+        stage.style.cssText = 'position:absolute;left:40px;top:120px;width:520px;height:180px';
+        const oldScroller = document.createElement('div');
+        const newScroller = document.createElement('div');
+        for (const scroller of [oldScroller, newScroller]) {
+          scroller.style.cssText = [
+            'position:absolute',
+            'top:0',
+            'width:240px',
+            'height:150px',
+            'overflow:auto',
+            'overflow-anchor:none',
+          ].join(';');
+        }
+        newScroller.style.left = '270px';
+        const oldHost = document.createElement('div');
+        const newHost = document.createElement('div');
+        oldHost.style.height = '320px';
+        newHost.style.height = '320px';
+        oldScroller.append(oldHost);
+        newScroller.append(newHost);
+        stage.append(oldScroller, newScroller);
+        document.body.append(stage);
+        const oldRoot = oldHost.attachShadow({ mode: 'open' });
+        const newRoot = newHost.attachShadow({ mode: 'open' });
+        const innerHost = document.createElement('div');
+        oldRoot.append(innerHost);
+        const innerRoot = innerHost.attachShadow({ mode: 'open' });
+        const target = document.createElement('button');
+        target.textContent = `Transactional ${mode} target`;
+        innerRoot.append(target);
+        active.failingScroller = newScroller;
+
+        const scope = createShadowScope(innerRoot);
+        const controller = scope.annotate(target, {
+          mark: 'box', note: null, duration: 0,
+        });
+        controller.show();
+        await controller.finished;
+        await frames();
+        const group = document.querySelector('[data-hana-shadow-overlay] .hana-annotation');
+
+        active.failMode = mode;
+        newRoot.append(innerHost);
+        await frames();
+        const failed = {
+          newRootObserved: count(active.mutationObserved, newRoot),
+          newScrollAdds: active.scrollAdds.get(newScroller) ?? 0,
+          newScrollRemoves: active.scrollRemoves.get(newScroller) ?? 0,
+          newResizeObserved: count(active.resizeObserved, newScroller),
+          newResizeUnobserved: count(active.resizeUnobserved, newScroller),
+          oldRootObserved: count(active.mutationObserved, oldRoot),
+          oldScrollRemoves: active.scrollRemoves.get(oldScroller) ?? 0,
+          oldResizeUnobserved: count(active.resizeUnobserved, oldScroller),
+        };
+
+        active.failMode = null;
+        controller.refresh();
+        await frames();
+        const beforeScroll = {
+          groupY: group.getBBox().y,
+          targetY: target.getBoundingClientRect().top,
+        };
+        newScroller.scrollTop = 24;
+        newScroller.dispatchEvent(new Event('scroll'));
+        await frames();
+        const retried = {
+          groupDelta: group.getBBox().y - beforeScroll.groupY,
+          newRootObserved: count(active.mutationObserved, newRoot),
+          newScrollAdds: active.scrollAdds.get(newScroller) ?? 0,
+          newResizeObserved: count(active.resizeObserved, newScroller),
+          oldScrollRemoves: active.scrollRemoves.get(oldScroller) ?? 0,
+          oldResizeUnobserved: count(active.resizeUnobserved, oldScroller),
+          targetDelta: target.getBoundingClientRect().top - beforeScroll.targetY,
+        };
+
+        controller.destroy();
+        scope.destroy();
+        const cleaned = {
+          newScrollRemoves: active.scrollRemoves.get(newScroller) ?? 0,
+          newResizeUnobserved: count(active.resizeUnobserved, newScroller),
+        };
+        stage.remove();
+        outputs.push({ cleaned, failed, mode, retried });
+      }
+      return outputs;
+    } finally {
+      EventTarget.prototype.addEventListener = nativeAdd;
+      EventTarget.prototype.removeEventListener = nativeRemove;
+      window.ResizeObserver = NativeResizeObserver;
+      window.MutationObserver = NativeMutationObserver;
+    }
+  });
+
+  const scroll = results.find(({ mode }) => mode === 'scroll');
+  expect(scroll.failed).toEqual({
+    newRootObserved: 1,
+    newScrollAdds: 1,
+    newScrollRemoves: 1,
+    newResizeObserved: 0,
+    newResizeUnobserved: 0,
+    oldRootObserved: 2,
+    oldScrollRemoves: 0,
+    oldResizeUnobserved: 0,
+  });
+  expect(scroll.retried).toMatchObject({
+    newRootObserved: 2,
+    newScrollAdds: 2,
+    newResizeObserved: 1,
+    oldScrollRemoves: 1,
+    oldResizeUnobserved: 1,
+  });
+  expect(scroll.retried.groupDelta).toBeCloseTo(-24, 1);
+  expect(scroll.retried.targetDelta).toBeCloseTo(-24, 1);
+  expect(scroll.cleaned).toEqual({
+    newScrollRemoves: 2,
+    newResizeUnobserved: 1,
+  });
+
+  const resize = results.find(({ mode }) => mode === 'resize');
+  expect(resize.failed).toEqual({
+    newRootObserved: 1,
+    newScrollAdds: 1,
+    newScrollRemoves: 1,
+    newResizeObserved: 1,
+    newResizeUnobserved: 1,
+    oldRootObserved: 2,
+    oldScrollRemoves: 0,
+    oldResizeUnobserved: 0,
+  });
+  expect(resize.retried).toMatchObject({
+    newRootObserved: 2,
+    newScrollAdds: 2,
+    newResizeObserved: 2,
+    oldScrollRemoves: 1,
+    oldResizeUnobserved: 1,
+  });
+  expect(resize.retried.groupDelta).toBeCloseTo(-24, 1);
+  expect(resize.retried.targetDelta).toBeCloseTo(-24, 1);
+  expect(resize.cleaned).toEqual({
+    newScrollRemoves: 2,
+    newResizeUnobserved: 2,
   });
 });
 

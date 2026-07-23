@@ -133,37 +133,46 @@ function markedElements(node) {
   return marked;
 }
 
-function recordContainsAlias(record, aliases) {
-  const target = record.target;
-  for (const alias of aliases) {
-    if (target === alias || alias.contains?.(target)) return true;
-  }
-  if (record.type !== 'childList') return false;
-  for (const node of [...record.addedNodes, ...record.removedNodes]) {
-    for (const alias of aliases) {
-      if (node === alias || node.contains?.(alias)) return true;
-    }
-  }
-  return false;
-}
-
 function isOwnedMirrorMutation(root, record, entries) {
   const ownedIds = new Set(entries.map((entry) => entry.id));
+  const aliases = new Set(entries.flatMap((entry) => [...entry.aliases]));
   for (const entry of entries) {
     if (record.type === 'attributes'
       && record.attributeName === 'aria-describedby'
       && record.target === entry.owner) {
-      return true;
-    }
-    if (recordContainsAlias(record, entry.aliases)) return true;
-  }
-  if (record.type !== 'childList') return false;
-  for (const node of [...record.addedNodes, ...record.removedNodes]) {
-    if (markedElements(node).some((mirror) => ownedIds.has(mirror.id))) {
-      return true;
+      return 1;
     }
   }
-  return false;
+  for (const alias of aliases) {
+    if (record.target === alias || alias.contains?.(record.target)) return 1;
+  }
+  if (record.type !== 'childList') return 0;
+
+  const replacingAlias = [...record.removedNodes].some((node) => aliases.has(node));
+  let touched = false;
+  let exclusive = true;
+  for (const [nodes, added] of [
+    [record.addedNodes, true],
+    [record.removedNodes, false],
+  ]) {
+    for (const node of nodes) {
+      const markedReplacement = node?.nodeType === 1
+        && node.hasAttribute?.(MIRROR_MARKER)
+        && (ownedIds.has(node.id) || (added && replacingAlias));
+      const exact = aliases.has(node)
+        || markedReplacement;
+      const containsOwned = exact
+        || [...aliases].some((alias) => node?.contains?.(alias))
+        || markedElements(node).some((mirror) => ownedIds.has(mirror.id));
+      if (containsOwned) {
+        touched = true;
+      } else {
+        exclusive = false;
+      }
+      if (!exact) exclusive = false;
+    }
+  }
+  return touched ? exclusive ? 1 : 2 : 0;
 }
 
 function reconcileMirror(root, mirror, id, text, records, ownedIds) {
@@ -709,9 +718,9 @@ function environmentFor(record) {
     const layoutRecords = [];
     let ownedMutation = false;
     for (const mutation of records) {
-      if (adapter.isOwnedMirrorMutation(root, mutation, entries)) {
-        ownedMutation = true;
-      } else {
+      const ownership = adapter.isOwnedMirrorMutation(root, mutation, entries);
+      if (ownership) ownedMutation = true;
+      if (ownership !== 1) {
         layoutRecords.push(mutation);
       }
     }
@@ -913,6 +922,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
   let observerInstall;
   let record;
   const readLayoutDependencies = () => {
+    const previous = layoutDependencies;
     const next = typeof activeAdapter.layoutDependenciesForRoot === 'function'
       ? activeAdapter.layoutDependenciesForRoot(root)
       : layoutDependencies;
@@ -920,9 +930,33 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
       && typeof activeAdapter.updateMutationObserverRoots === 'function') {
       activeAdapter.updateMutationObserverRoots(root, observerInstall.observer, next);
     }
-    layoutDependencies = next;
-    if (record !== undefined) record.layoutDependencies = next;
-    return next;
+    let settled = false;
+    return {
+      dependencies: next,
+      commit() {
+        if (settled) return;
+        settled = true;
+        layoutDependencies = next;
+        if (record !== undefined) record.layoutDependencies = next;
+      },
+      rollback() {
+        if (settled) return;
+        settled = true;
+        try {
+          if (record?.phase === 'active'
+            && typeof activeAdapter.updateMutationObserverRoots === 'function') {
+            activeAdapter.updateMutationObserverRoots(
+              root,
+              observerInstall.observer,
+              previous,
+            );
+          }
+        } finally {
+          layoutDependencies = previous;
+          if (record !== undefined) record.layoutDependencies = previous;
+        }
+      },
+    };
   };
   let unregisterPortal = () => {};
   try {

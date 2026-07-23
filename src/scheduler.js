@@ -23,6 +23,51 @@ function attachRollbackCause(cause, rollbackCause) {
   }
 }
 
+function rollbackOperations(operations, cause) {
+  const rethrow = arguments.length > 1;
+  let failure = null;
+  for (let index = operations.length - 1; index >= 0; index -= 1) {
+    try {
+      operations[index]();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (rethrow) {
+    if (failure !== null) attachRollbackCause(cause, failure);
+    throw cause;
+  }
+  if (failure !== null) throw failure;
+}
+
+function runRegistrationTransaction(operations) {
+  const rollbacks = [];
+  try {
+    for (const operation of operations) rollbacks.push(operation());
+  } catch (cause) {
+    rollbackOperations(rollbacks, cause);
+  }
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    rollbackOperations(rollbacks);
+  };
+}
+
+function changeNativeRegistration(apply, rollback) {
+  try {
+    apply();
+  } catch (cause) {
+    try {
+      rollback();
+    } catch (error) {
+      attachRollbackCause(cause, error);
+    }
+    throw cause;
+  }
+}
+
 export class FrameQueue {
   #requestFrame;
 
@@ -745,35 +790,51 @@ class SharedDocumentResources {
     const readLayoutDependencies = typeof options.layoutDependencies === 'function'
       ? options.layoutDependencies
       : null;
-    const layoutDependencies = this.#discoverLayoutDependencies(
-      readLayoutDependencies?.() ?? options.layoutDependencies,
+    const dependencyChange = this.#prepareLayoutDependencies(
+      readLayoutDependencies ?? options.layoutDependencies,
     );
-    const binding = {
-      generation,
-      id,
-      layoutDependencies,
-      mutationRoot,
-      mutationHost,
-      mutationScope: this.#discoverMutationScope(record, mutationRoot),
-      note,
-      onError,
-      prepare,
-      apply,
-      read,
-      readLayoutDependencies,
-      record,
-      resizeTargets: this.#discoverResizeTargets(record, note, layoutDependencies),
-      scrollTargets: this.#discoverScrollTargets(record, layoutDependencies),
-      token,
-      write,
-    };
+    let binding;
+    let rollbackTargets = null;
+    try {
+      const layoutDependencies = dependencyChange.value;
+      binding = {
+        generation,
+        id,
+        layoutDependencies,
+        mutationRoot,
+        mutationHost,
+        mutationScope: this.#discoverMutationScope(record, mutationRoot),
+        note,
+        onError,
+        prepare,
+        apply,
+        read,
+        readLayoutDependencies,
+        record,
+        resizeTargets: this.#discoverResizeTargets(record, note, layoutDependencies),
+        scrollTargets: this.#discoverScrollTargets(record, layoutDependencies),
+        token,
+        write,
+      };
+      rollbackTargets = this.#replaceDependencyTargets(
+        id,
+        prior?.scrollTargets ?? new Set(),
+        binding.scrollTargets,
+        prior?.resizeTargets ?? new Set(),
+        binding.resizeTargets,
+      );
+      dependencyChange.commit();
+    } catch (cause) {
+      rollbackOperations([
+        dependencyChange.rollback,
+        ...(rollbackTargets === null ? [] : [rollbackTargets]),
+      ], cause);
+    }
     if (renewToken) {
       controller.token = token;
       this.#cancelControllerJobs(controller);
     }
     this.#layouts.set(id, binding);
-    this.#diffScrollTargets(id, prior?.scrollTargets ?? new Set(), binding.scrollTargets);
-    this.#diffResizeTargets(id, prior?.resizeTargets ?? new Set(), binding.resizeTargets);
 
     let unsubscribed = false;
     return () => {
@@ -785,6 +846,27 @@ class SharedDocumentResources {
         this.#removeLayout(id);
       }
     };
+  }
+
+  #prepareLayoutDependencies(source) {
+    const candidate = typeof source === 'function' ? source() : source;
+    const transactional = candidate !== null
+      && typeof candidate === 'object'
+      && typeof candidate.commit === 'function'
+      && typeof candidate.rollback === 'function';
+    const commit = transactional ? () => candidate.commit() : () => {};
+    const rollback = transactional ? () => candidate.rollback() : () => {};
+    try {
+      return {
+        commit,
+        rollback,
+        value: this.#discoverLayoutDependencies(
+          transactional ? candidate.dependencies : candidate,
+        ),
+      };
+    } catch (cause) {
+      rollbackOperations([rollback], cause);
+    }
   }
 
   #discoverLayoutDependencies(input) {
@@ -889,24 +971,43 @@ class SharedDocumentResources {
 
   #refreshLayoutDependencies(binding) {
     if (binding.readLayoutDependencies === null) return;
-    const layoutDependencies = this.#discoverLayoutDependencies(
-      binding.readLayoutDependencies(),
+    const dependencyChange = this.#prepareLayoutDependencies(
+      binding.readLayoutDependencies,
     );
-    const mutationScope = this.#discoverMutationScope(
-      binding.record,
-      binding.mutationRoot,
-    );
-    const resizeTargets = this.#discoverResizeTargets(
-      binding.record,
-      binding.note,
-      layoutDependencies,
-    );
-    const scrollTargets = this.#discoverScrollTargets(
-      binding.record,
-      layoutDependencies,
-    );
-    this.#diffScrollTargets(binding.id, binding.scrollTargets, scrollTargets);
-    this.#diffResizeTargets(binding.id, binding.resizeTargets, resizeTargets);
+    let layoutDependencies;
+    let mutationScope;
+    let resizeTargets;
+    let scrollTargets;
+    let rollbackTargets = null;
+    try {
+      layoutDependencies = dependencyChange.value;
+      mutationScope = this.#discoverMutationScope(
+        binding.record,
+        binding.mutationRoot,
+      );
+      resizeTargets = this.#discoverResizeTargets(
+        binding.record,
+        binding.note,
+        layoutDependencies,
+      );
+      scrollTargets = this.#discoverScrollTargets(
+        binding.record,
+        layoutDependencies,
+      );
+      rollbackTargets = this.#replaceDependencyTargets(
+        binding.id,
+        binding.scrollTargets,
+        scrollTargets,
+        binding.resizeTargets,
+        resizeTargets,
+      );
+      dependencyChange.commit();
+    } catch (cause) {
+      rollbackOperations([
+        dependencyChange.rollback,
+        ...(rollbackTargets === null ? [] : [rollbackTargets]),
+      ], cause);
+    }
     binding.layoutDependencies = layoutDependencies;
     binding.mutationScope = mutationScope;
     binding.resizeTargets = resizeTargets;
@@ -952,65 +1053,136 @@ class SharedDocumentResources {
     }
   }
 
-  #diffScrollTargets(id, previous, next) {
-    for (const target of previous) {
-      if (next.has(target)) {
-        continue;
-      }
-      const registration = this.#scrollTargets.get(target);
-      registration?.ids.delete(id);
-      if (registration?.ids.size === 0) {
-        target.removeEventListener('scroll', registration.listener, { passive: true });
-        this.#scrollTargets.delete(target);
-      }
-    }
+  #replaceDependencyTargets(
+    id,
+    previousScroll,
+    nextScroll,
+    previousResize,
+    nextResize,
+  ) {
+    const operations = [];
+    const scrollOptions = { passive: true };
 
-    for (const target of next) {
-      if (previous.has(target)) {
-        continue;
-      }
-      let registration = this.#scrollTargets.get(target);
-      if (registration === undefined) {
+    for (const target of nextScroll) {
+      if (previousScroll.has(target)) continue;
+      operations.push(() => {
+        let registration = this.#scrollTargets.get(target);
+        if (registration !== undefined) {
+          registration.ids.add(id);
+          return () => registration.ids.delete(id);
+        }
         registration = {
-          ids: new Set(),
+          ids: new Set([id]),
           listener: () => {
             for (const controllerId of registration.ids) {
               this.#signal(controllerId);
             }
           },
         };
+        changeNativeRegistration(
+          () => target.addEventListener('scroll', registration.listener, scrollOptions),
+          () => target.removeEventListener('scroll', registration.listener, scrollOptions),
+        );
         this.#scrollTargets.set(target, registration);
-        target.addEventListener('scroll', registration.listener, { passive: true });
-      }
-      registration.ids.add(id);
-    }
-  }
-
-  #diffResizeTargets(id, previous, next) {
-    for (const target of previous) {
-      if (next.has(target)) {
-        continue;
-      }
-      const ids = this.#resizeTargets.get(target);
-      ids?.delete(id);
-      if (ids?.size === 0) {
-        this.#resizeTargets.delete(target);
-        this.#resizeObserver?.unobserve(target);
-      }
+        return () => {
+          let failure = null;
+          try {
+            target.removeEventListener('scroll', registration.listener, scrollOptions);
+          } catch (error) {
+            failure = error;
+          }
+          registration.ids.delete(id);
+          if (this.#scrollTargets.get(target) === registration) {
+            this.#scrollTargets.delete(target);
+          }
+          if (failure !== null) throw failure;
+        };
+      });
     }
 
-    for (const target of next) {
-      if (previous.has(target)) {
-        continue;
-      }
-      let ids = this.#resizeTargets.get(target);
-      if (ids === undefined) {
-        ids = new Set();
+    for (const target of nextResize) {
+      if (previousResize.has(target)) continue;
+      operations.push(() => {
+        let ids = this.#resizeTargets.get(target);
+        if (ids !== undefined) {
+          ids.add(id);
+          return () => ids.delete(id);
+        }
+        ids = new Set([id]);
+        changeNativeRegistration(
+          () => this.#resizeObserver?.observe(target),
+          () => this.#resizeObserver?.unobserve(target),
+        );
         this.#resizeTargets.set(target, ids);
-        this.#resizeObserver?.observe(target);
-      }
-      ids.add(id);
+        return () => {
+          let failure = null;
+          try {
+            this.#resizeObserver?.unobserve(target);
+          } catch (error) {
+            failure = error;
+          }
+          ids.delete(id);
+          if (this.#resizeTargets.get(target) === ids) {
+            this.#resizeTargets.delete(target);
+          }
+          if (failure !== null) throw failure;
+        };
+      });
     }
+
+    for (const target of previousScroll) {
+      if (nextScroll.has(target)) continue;
+      operations.push(() => {
+        const registration = this.#scrollTargets.get(target);
+        if (registration === undefined || !registration.ids.has(id)) return () => {};
+        if (registration.ids.size > 1) {
+          registration.ids.delete(id);
+          return () => registration.ids.add(id);
+        }
+        changeNativeRegistration(
+          () => target.removeEventListener('scroll', registration.listener, scrollOptions),
+          () => target.addEventListener('scroll', registration.listener, scrollOptions),
+        );
+        registration.ids.delete(id);
+        this.#scrollTargets.delete(target);
+        return () => {
+          changeNativeRegistration(
+            () => target.addEventListener('scroll', registration.listener, scrollOptions),
+            () => target.removeEventListener('scroll', registration.listener, scrollOptions),
+          );
+          registration.ids.add(id);
+          this.#scrollTargets.set(target, registration);
+        };
+      });
+    }
+
+    for (const target of previousResize) {
+      if (nextResize.has(target)) continue;
+      operations.push(() => {
+        const ids = this.#resizeTargets.get(target);
+        if (ids === undefined || !ids.has(id)) return () => {};
+        if (ids.size > 1) {
+          ids.delete(id);
+          return () => ids.add(id);
+        }
+        changeNativeRegistration(
+          () => this.#resizeObserver?.unobserve(target),
+          () => this.#resizeObserver?.observe(target),
+        );
+        ids.delete(id);
+        this.#resizeTargets.delete(target);
+        return () => {
+          changeNativeRegistration(
+            () => this.#resizeObserver?.observe(target),
+            () => this.#resizeObserver?.unobserve(target),
+          );
+          ids.add(id);
+          this.#resizeTargets.set(target, ids);
+        };
+      });
+    }
+
+    return runRegistrationTransaction(operations);
   }
 
   #removeLayout(id) {
@@ -1018,9 +1190,14 @@ class SharedDocumentResources {
     if (binding === undefined) {
       return;
     }
+    this.#replaceDependencyTargets(
+      id,
+      binding.scrollTargets,
+      new Set(),
+      binding.resizeTargets,
+      new Set(),
+    );
     this.#layouts.delete(id);
-    this.#diffScrollTargets(id, binding.scrollTargets, new Set());
-    this.#diffResizeTargets(id, binding.resizeTargets, new Set());
     const layoutKey = this.#controllers.get(id)?.queueKeys.get('internal:layout');
     if (layoutKey !== undefined) this.#frameQueue.cancel(layoutKey);
   }
