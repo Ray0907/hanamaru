@@ -9,6 +9,7 @@ const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json',
 };
+const PLUGIN_FIXTURE_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'";
 
 function notFound(response) {
   response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
@@ -52,7 +53,11 @@ export async function createStaticServer({ root = process.cwd(), port = 4173 } =
         return;
       }
       const type = MIME_TYPES[path.extname(realFilePath)] ?? 'application/octet-stream';
-      response.writeHead(200, { 'content-type': type });
+      const headers = { 'content-type': type };
+      if (pathname === '/tests/fixtures/plugins.html') {
+        headers['content-security-policy'] = PLUGIN_FIXTURE_CSP;
+      }
+      response.writeHead(200, headers);
       response.end(await readFile(realFilePath));
     } catch {
       notFound(response);

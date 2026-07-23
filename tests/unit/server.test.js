@@ -77,6 +77,29 @@ test('createStaticServer returns 404 for / when demo/index.html is absent', asyn
   assert.equal(response.body, 'Not found');
 });
 
+test('createStaticServer applies strict CSP only to the plugin browser fixture', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-server-csp-'));
+  const fixtureDirectory = path.join(root, 'tests', 'fixtures');
+  await mkdir(fixtureDirectory, { recursive: true });
+  await Promise.all([
+    writeFile(path.join(fixtureDirectory, 'plugins.html'), '<h1>plugin fixture</h1>'),
+    writeFile(path.join(fixtureDirectory, 'ordinary.html'), '<h1>ordinary fixture</h1>'),
+  ]);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const { server, url } = await createStaticServer({ root, port: 0 });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = new URL(url).port;
+  const plugin = await request('/tests/fixtures/plugins.html', port);
+  const ordinary = await request('/tests/fixtures/ordinary.html', port);
+
+  assert.equal(
+    plugin.headers['content-security-policy'],
+    "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'",
+  );
+  assert.equal(ordinary.headers['content-security-policy'], undefined);
+});
+
 test('createStaticServer does not serve files through symlinks that escape root', async (t) => {
   const parent = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-server-symlink-'));
   const root = path.join(parent, 'root');
