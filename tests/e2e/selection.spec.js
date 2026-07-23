@@ -64,6 +64,38 @@ test('rejects a proxy-shaped Selection before reading any spoofed selection prop
   expect(result).toEqual({ code: 'HANA_TARGET_SELECTION_UNAVAILABLE', reads: [] });
 });
 
+test('uses native getRangeAt instead of an overridden genuine Selection method', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotateSelection } = await import('/src/selection.js');
+    const target = document.querySelector('#document-target');
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    let ownReads = 0;
+    Object.defineProperty(selection, 'getRangeAt', {
+      configurable: true,
+      get() {
+        ownReads += 1;
+        throw new Error('overridden getRangeAt must not run');
+      },
+    });
+    try {
+      const controller = annotateSelection({ mark: 'underline' }, selection);
+      const state = controller.state;
+      controller.destroy();
+      return { code: null, ownReads, state };
+    } catch (error) {
+      return { code: error.code ?? error.message, ownReads, state: null };
+    } finally {
+      delete selection.getRangeAt;
+    }
+  });
+
+  expect(result).toEqual({ code: null, ownReads: 0, state: 'idle' });
+});
+
 test('keeps the accepted range after the native Selection changes and accepts whitespace-only ranges', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotateSelection } = await import('/src/selection.js');
@@ -146,6 +178,38 @@ test('uses system reduced-motion for a Selection annotation without interpolated
   });
 });
 
+test('rejects a collapsed native Selection without changing its anchor, focus, or resources', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotateSelection } = await import('/src/selection.js');
+    const text = document.querySelector('#document-target').firstChild;
+    const range = document.createRange();
+    range.setStart(text, 3);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const before = [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset];
+    let code;
+    try {
+      annotateSelection({ mark: 'underline' }, selection);
+    } catch (error) {
+      code = error.code;
+    }
+    const after = [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset];
+    return {
+      after: after.map((value, index) => (index % 2 === 0 ? value === before[index] : value)),
+      code,
+      resources: document.querySelectorAll('[data-hana-id]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    after: [true, 3, true, 3],
+    code: 'HANA_TARGET_SELECTION_EMPTY',
+    resources: 0,
+  });
+});
+
 test('supports omitted and explicit iframe Document selections and reports a genuine empty iframe Selection', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotateSelection } = await import('/src/selection.js');
@@ -193,7 +257,7 @@ test('supports omitted and explicit iframe Document selections and reports a gen
   expect(omitted).toBe('visible');
 });
 
-test('rejects disconnected, cross-root, and standalone Shadow selections without mutating them', async ({ page }) => {
+test('rejects cross-document and standalone Shadow selections without mutating them', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { annotateSelection, annotateSelectionWithEnvironment } = await import('/src/selection.js');
     const selection = window.getSelection();
@@ -205,13 +269,12 @@ test('rejects disconnected, cross-root, and standalone Shadow selections without
     const frame = document.querySelector('#selection-frame');
     const frameRange = frame.contentDocument.createRange();
     frameRange.selectNodeContents(frame.contentDocument.querySelector('#frame-target'));
+    const frameSelection = frame.contentWindow.getSelection();
+    frameSelection.removeAllRanges();
+    frameSelection.addRange(frameRange);
     const outcomes = {};
-    Object.defineProperty(selection, 'getRangeAt', {
-      configurable: true,
-      value() { return frameRange; },
-    });
     try {
-      annotateSelectionWithEnvironment({ mark: 'underline' }, selection, {
+      annotateSelectionWithEnvironment({ mark: 'underline' }, frameSelection, {
         createAnnotation() { throw new Error('must not delegate'); },
         root: document,
         view: window,
@@ -219,25 +282,6 @@ test('rejects disconnected, cross-root, and standalone Shadow selections without
     } catch (error) {
       outcomes.crossDocument = error.code;
     }
-    delete selection.getRangeAt;
-    const detached = document.createElement('p');
-    detached.textContent = 'detached selection';
-    const detachedRange = document.createRange();
-    detachedRange.selectNodeContents(detached);
-    Object.defineProperty(selection, 'getRangeAt', {
-      configurable: true,
-      value() { return detachedRange; },
-    });
-    try {
-      annotateSelectionWithEnvironment({ mark: 'underline' }, selection, {
-        createAnnotation() { throw new Error('must not delegate'); },
-        root: document,
-        view: window,
-      });
-    } catch (error) {
-      outcomes.disconnected = error.code;
-    }
-    delete selection.getRangeAt;
     const host = document.querySelector('#shadow-host');
     const shadow = host.attachShadow({ mode: 'open' });
     const shadowText = shadow.appendChild(document.createTextNode('shadow selection'));
@@ -256,7 +300,6 @@ test('rejects disconnected, cross-root, and standalone Shadow selections without
   expect(result).toEqual({
     outcomes: {
       crossDocument: 'HANA_TARGET_INVALID',
-      disconnected: 'HANA_TARGET_INVALID',
       shadow: 'HANA_TARGET_SHADOW_UNSCOPED',
     },
     rangeCount: 1,
@@ -274,8 +317,9 @@ test('rejects multiple ranges when the browser exposes them and preserves normal
     selection.removeAllRanges();
     selection.addRange(first);
     selection.addRange(second);
+    const supportsMultipleRanges = selection.rangeCount > 1;
     let multipleCode = null;
-    if (selection.rangeCount > 1) {
+    if (supportsMultipleRanges) {
       try { annotateSelection({ mark: 'underline' }); } catch (error) { multipleCode = error.code; }
     }
     selection.removeAllRanges();
@@ -297,15 +341,18 @@ test('rejects multiple ranges when the browser exposes them and preserves normal
       markupUnchanged: target.innerHTML === markup,
       multipleCode,
       replayed,
+      supportsMultipleRanges,
       visible,
     };
   });
 
-  expect(result).toEqual({
+  expect(result).toMatchObject({
     hidden: 'hidden',
     markupUnchanged: true,
-    multipleCode: null,
     replayed: 'visible',
     visible: 'visible',
   });
+  expect(result.multipleCode).toBe(
+    result.supportsMultipleRanges ? 'HANA_TARGET_SELECTION_AMBIGUOUS' : null,
+  );
 });

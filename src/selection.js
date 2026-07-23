@@ -43,6 +43,26 @@ function selectionRangeCount(selection, view) {
   }
 }
 
+function selectionRange(selection, view) {
+  const method = view?.Selection?.prototype?.getRangeAt;
+  if (typeof method !== 'function') {
+    throw targetError(
+      'HANA_TARGET_SELECTION_UNAVAILABLE',
+      'Selection is unavailable in this browsing context',
+      {},
+    );
+  }
+  try {
+    return Reflect.apply(method, selection, [0]);
+  } catch {
+    throw targetError(
+      'HANA_TARGET_SELECTION_UNAVAILABLE',
+      'Selection must be a native Selection',
+      {},
+    );
+  }
+}
+
 function validateSelection(options, selection, env) {
   let current = selection;
   if (current === undefined) {
@@ -72,7 +92,7 @@ function validateSelection(options, selection, env) {
     );
   }
 
-  const range = current.getRangeAt(0);
+  const range = selectionRange(current, env.view);
   if (range.collapsed) {
     throw targetError(
       'HANA_TARGET_SELECTION_EMPTY',
