@@ -48,14 +48,21 @@ function initialDefaultView(document) {
 }
 
 function initialShadowHost(root) {
-  const descriptor = Object.getOwnPropertyDescriptor(
-    Object.getPrototypeOf(root),
-    'host',
-  );
-  if (typeof descriptor?.get !== 'function') {
-    throw new TypeError('Root is not a native ShadowRoot');
+  let prototype = Object.getPrototypeOf(root);
+  while (prototype !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'host');
+    if (typeof descriptor?.get === 'function') {
+      const source = methodReader(
+        Object.getPrototypeOf(descriptor.get),
+        'toString',
+      )(descriptor.get);
+      if (source === 'function get host() { [native code] }') {
+        return Reflect.apply(descriptor.get, root, []);
+      }
+    }
+    prototype = Object.getPrototypeOf(prototype);
   }
-  return Reflect.apply(descriptor.get, root, []);
+  throw new TypeError('Root is not a native ShadowRoot');
 }
 
 export function isNativeShadowRoot(root) {

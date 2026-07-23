@@ -930,12 +930,26 @@ test('standalone scan intrinsically rejects masked open closed and iframe Shadow
       });
     };
     for (const root of roots) {
+      const prototype = Object.getPrototypeOf(root);
+      Object.setPrototypeOf(root, Object.create(prototype));
+      restores.push(() => Object.setPrototypeOf(root, prototype));
+    }
+    for (const root of roots) {
       mask(root, 'ownerDocument', null);
       mask(root, 'host', null);
     }
     for (const owner of [document, frameDocument]) mask(owner, 'defaultView', null);
     for (const view of [window, frameView]) mask(view, 'ShadowRoot', null);
     const documentScan = scan(document);
+    const forged = document.body.appendChild(document.createElement('div'));
+    const forgedPrototype = Object.create(Object.getPrototypeOf(forged));
+    Object.defineProperty(forgedPrototype, 'host', {
+      configurable: true,
+      get() { return state.openHost; },
+    });
+    Object.setPrototypeOf(forged, forgedPrototype);
+    const forgedScan = scan(forged);
+    forged.remove();
     const failures = [];
     for (const root of roots) {
       try {
@@ -972,6 +986,10 @@ test('standalone scan intrinsically rejects masked open closed and iframe Shadow
         annotations: documentScan.annotations.length,
         errors: documentScan.errors.length,
       },
+      forgedScan: {
+        annotations: forgedScan.annotations.length,
+        errors: forgedScan.errors.length,
+      },
       failures,
       resourcesAfterStandalone,
       scoped,
@@ -982,6 +1000,7 @@ test('standalone scan intrinsically rejects masked open closed and iframe Shadow
 
   expect(result).toEqual({
     documentScan: { annotations: 0, errors: 0 },
+    forgedScan: { annotations: 0, errors: 0 },
     failures: [
       {
         name: 'HanamaruTargetError',
