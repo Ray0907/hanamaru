@@ -62,6 +62,7 @@ function createHarness() {
   let createFailure = null;
   let showFailure = null;
   let updateFailure = null;
+  let updateEvent = null;
   let destroyFailure = null;
   let exposeFailure = null;
   let onDestroy = null;
@@ -77,9 +78,15 @@ function createHarness() {
       const controller = {
         target,
         run,
+        updateReturned: false,
         update(optionsPatch) {
+          controller.updateReturned = false;
           calls.push(['update', target.name, optionsPatch]);
+          if (updateEvent !== null) {
+            target.fail(controller, updateEvent.error, updateEvent.generation);
+          }
           if (updateFailure !== null) throw updateFailure;
+          controller.updateReturned = true;
           return controller;
         },
         show() {
@@ -132,6 +139,9 @@ function createHarness() {
     },
     setShowFinishedFailure(error) { showFinishedFailure = error; },
     setShowFailure(error) { showFailure = error; },
+    setUpdateEvent(error, generation = undefined) {
+      updateEvent = error === null ? null : { error, generation };
+    },
     setUpdateFailure(error) { updateFailure = error; },
   };
 }
@@ -1019,4 +1029,469 @@ test('stale candidate event and finished rejection never report after reentrant 
   assert.deepEqual(harness.queued, []);
   assert.equal(target.listenerCount, 0);
   assert.equal(harness.calls.filter((call) => call === 'destroy:failed').length, 1);
+});
+
+test('hana:error emitted synchronously during successful update is delivered after update returns', () => {
+  const harness = createHarness();
+  const target = new FakeTarget('current', harness.calls);
+  const failure = new Error('update event');
+  const observed = [];
+  harness.owner.mount(target, box);
+  harness.setUpdateEvent(failure, 31);
+  harness.calls.length = 0;
+
+  harness.owner.update(target, circle, {
+    onError(error, controller) {
+      observed.push({
+        controller,
+        error,
+        exposed: harness.exposed.at(-1),
+        listeners: target.listenerCount,
+        updateReturned: controller.updateReturned,
+      });
+    },
+  });
+
+  assert.deepEqual(observed, [{
+    controller: harness.controllers[0],
+    error: failure,
+    exposed: null,
+    listeners: 0,
+    updateReturned: true,
+  }]);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:current').length, 1);
+  assert.equal(harness.exposed.filter((value) => value === null).length, 1);
+});
+
+test('update event followed by synchronous throw discards buffered failure and directly rethrows', () => {
+  const harness = createHarness();
+  const target = new FakeTarget('current', harness.calls);
+  const eventFailure = new Error('buffered update event');
+  const updateFailure = new Error('update threw');
+  const observed = [];
+  harness.owner.mount(target, box);
+  harness.setUpdateEvent(eventFailure, 32);
+  harness.setUpdateFailure(updateFailure);
+  harness.calls.length = 0;
+
+  assert.throws(
+    () => harness.owner.update(target, circle, {
+      onError(error) { observed.push(error); },
+    }),
+    (error) => error === updateFailure,
+  );
+
+  assert.deepEqual(observed, []);
+  assert.deepEqual(harness.queued, []);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:current').length, 1);
+  assert.equal(harness.exposed.filter((value) => value === null).length, 1);
+});
+
+test('reentrant winner during buffered update failure owns the final state', () => {
+  for (const listenerOrder of ['before-adapter', 'after-adapter']) {
+    const harness = createHarness();
+    const target = new FakeTarget(`current-${listenerOrder}`, harness.calls);
+    const winner = new FakeTarget(`winner-${listenerOrder}`, harness.calls);
+    const listener = () => {
+      target.removeEventListener('hana:error', listener);
+      harness.setUpdateEvent(null);
+      harness.owner.update(winner, circle);
+    };
+    if (listenerOrder === 'before-adapter') {
+      target.addEventListener('hana:error', listener);
+    }
+    harness.owner.mount(target, box);
+    if (listenerOrder === 'after-adapter') {
+      target.addEventListener('hana:error', listener);
+    }
+    harness.setUpdateEvent(new Error(`stale ${listenerOrder}`), 33);
+    harness.calls.length = 0;
+
+    harness.owner.update(target, { mark: 'underline' }, {
+      onError() { throw new Error('stale update onError must not run'); },
+    });
+
+    assert.equal(harness.exposed.at(-1).target, winner, listenerOrder);
+    assert.equal(harness.exposed.filter((value) => value === null).length, 1, listenerOrder);
+    assert.deepEqual(harness.queued, [], listenerOrder);
+    assert.equal(target.listenerCount, 0, listenerOrder);
+    assert.equal(winner.listenerCount, 1, listenerOrder);
+  }
+});
+
+function captureThrown(operation) {
+  let thrown = false;
+  let value;
+  try {
+    operation();
+  } catch (error) {
+    thrown = true;
+    value = error;
+  }
+  assert.equal(thrown, true);
+  return value;
+}
+
+function cleanupFailureHarness(settings = {}) {
+  const removeThrows = Object.hasOwn(settings, 'removeFailure');
+  const destroyThrows = Object.hasOwn(settings, 'destroyFailure');
+  const exposeThrows = Object.hasOwn(settings, 'exposeFailure');
+  const updateThrows = Object.hasOwn(settings, 'updateFailure');
+  const {
+    removeFailure,
+    destroyFailure,
+    exposeFailure,
+    updateFailure,
+  } = settings;
+  const listeners = new Set();
+  const exposed = [];
+  let destroyCount = 0;
+  const target = {
+    addEventListener(_type, listener) { listeners.add(listener); },
+    removeEventListener(_type, listener) {
+      listeners.delete(listener);
+      if (removeThrows) throw removeFailure;
+    },
+  };
+  const controller = {
+    finished: null,
+    show() {
+      controller.finished = Promise.resolve();
+      return controller;
+    },
+    update() {
+      if (updateThrows) throw updateFailure;
+      return controller;
+    },
+    destroy() {
+      destroyCount += 1;
+      if (destroyThrows) throw destroyFailure;
+      return controller;
+    },
+  };
+  const owner = createAdapterOwner({
+    create() { return controller; },
+    expose(value) {
+      exposed.push(value);
+      if (value === null && exposeThrows) throw exposeFailure;
+    },
+  });
+  owner.mount(target, box);
+  return {
+    controller,
+    exposed,
+    get destroyCount() { return destroyCount; },
+    get listenerCount() { return listeners.size; },
+    owner,
+    target,
+  };
+}
+
+test('cleanup preserves arbitrary first thrown values from remove, destroy, and expose', () => {
+  for (const first of [null, undefined, 0, false]) {
+    const remove = cleanupFailureHarness({
+      removeFailure: first,
+      destroyFailure: new Error('later destroy'),
+      exposeFailure: new Error('later expose'),
+    });
+    assert.ok(Object.is(captureThrown(() => remove.owner.destroy()), first));
+    assert.equal(remove.destroyCount, 1);
+    assert.equal(remove.listenerCount, 0);
+
+    const destroy = cleanupFailureHarness({
+      destroyFailure: first,
+      exposeFailure: new Error('later expose'),
+    });
+    assert.ok(Object.is(captureThrown(() => destroy.owner.destroy()), first));
+    assert.equal(destroy.destroyCount, 1);
+    assert.equal(destroy.listenerCount, 0);
+
+    const expose = cleanupFailureHarness({ exposeFailure: first });
+    assert.ok(Object.is(captureThrown(() => expose.owner.destroy()), first));
+    assert.equal(expose.destroyCount, 1);
+    assert.equal(expose.listenerCount, 0);
+  }
+});
+
+test('cleanup attaches later thrown values only to a safe first object failure', () => {
+  const first = new Error('remove first');
+  const harness = cleanupFailureHarness({
+    removeFailure: first,
+    destroyFailure: null,
+    exposeFailure: undefined,
+  });
+
+  assert.equal(captureThrown(() => harness.owner.destroy()), first);
+  assert.equal(first.cleanupCause, null);
+  assert.deepEqual(first.cleanupCauses, [null, undefined]);
+
+  const sealed = Object.preventExtensions(new Error('sealed first'));
+  const sealedHarness = cleanupFailureHarness({
+    removeFailure: sealed,
+    destroyFailure: new Error('cannot attach'),
+  });
+  assert.equal(captureThrown(() => sealedHarness.owner.destroy()), sealed);
+});
+
+test('synchronous update throw of undefined remains authoritative over cleanup errors', () => {
+  const harness = cleanupFailureHarness({
+    updateFailure: undefined,
+    removeFailure: new Error('later remove'),
+    destroyFailure: new Error('later destroy'),
+    exposeFailure: new Error('later expose'),
+  });
+
+  const thrown = captureThrown(() => harness.owner.update(harness.target, circle));
+
+  assert.equal(thrown, undefined);
+  assert.equal(harness.destroyCount, 1);
+  assert.equal(harness.listenerCount, 0);
+});
+
+function manualEventHarness() {
+  let listener = null;
+  let destroyCount = 0;
+  const observed = [];
+  const target = {
+    addEventListener(_type, nextListener) { listener = nextListener; },
+    removeEventListener(_type, nextListener) {
+      if (listener === nextListener) listener = null;
+    },
+  };
+  const controller = {
+    finished: null,
+    show() {
+      controller.finished = Promise.resolve();
+      return controller;
+    },
+    update() { return controller; },
+    destroy() {
+      destroyCount += 1;
+      return controller;
+    },
+  };
+  const owner = createAdapterOwner({
+    create() { return controller; },
+    expose() {},
+  });
+  owner.mount(target, box, {
+    onError(error) { observed.push(error); },
+  });
+  return {
+    controller,
+    fire(event) { listener?.(event); },
+    get destroyCount() { return destroyCount; },
+    get listening() { return listener !== null; },
+    observed,
+    owner,
+  };
+}
+
+test('hostile hana:error detail fields are read once and never escape the host listener', () => {
+  for (const trappedField of ['detail', 'controller', 'error', 'generation']) {
+    const harness = manualEventHarness();
+    const counts = {
+      detail: 0,
+      controller: 0,
+      error: 0,
+      generation: 0,
+    };
+    const trap = new Error(`${trappedField} getter trapped`);
+    const detail = {};
+    for (const field of ['controller', 'error', 'generation']) {
+      Object.defineProperty(detail, field, {
+        get() {
+          counts[field] += 1;
+          if (field === trappedField) throw trap;
+          if (field === 'controller') return harness.controller;
+          if (field === 'error') return new Error('controller failed');
+          return 41;
+        },
+      });
+    }
+    const event = {};
+    Object.defineProperty(event, 'detail', {
+      get() {
+        counts.detail += 1;
+        if (trappedField === 'detail') throw trap;
+        return detail;
+      },
+    });
+
+    assert.doesNotThrow(() => harness.fire(event), trappedField);
+    assert.deepEqual(harness.observed, [], trappedField);
+    assert.equal(harness.destroyCount, 0, trappedField);
+    assert.equal(harness.listening, true, trappedField);
+    assert.ok(Object.values(counts).every((count) => count <= 1), trappedField);
+    harness.owner.destroy();
+  }
+});
+
+test('proxy hana:error detail is snapshotted once before failure delivery', () => {
+  const harness = manualEventHarness();
+  const failure = new Error('proxy failure');
+  const reads = new Map();
+  const detail = new Proxy({}, {
+    get(_target, property) {
+      reads.set(property, (reads.get(property) ?? 0) + 1);
+      if (property === 'controller') return harness.controller;
+      if (property === 'error') return failure;
+      if (property === 'generation') return 42;
+      return undefined;
+    },
+  });
+
+  assert.doesNotThrow(() => harness.fire({ detail }));
+
+  assert.deepEqual(harness.observed, [failure]);
+  assert.equal(harness.destroyCount, 1);
+  assert.equal(harness.listening, false);
+  assert.equal(reads.get('controller'), 1);
+  assert.equal(reads.get('error'), 1);
+  assert.equal(reads.get('generation'), 1);
+});
+
+function attachReentryHarness() {
+  const controllers = [];
+  const exposed = [];
+  let createHook = null;
+  const owner = createAdapterOwner({
+    create(target) {
+      createHook?.(target);
+      const controller = {
+        target,
+        finished: null,
+        showCount: 0,
+        destroyCount: 0,
+        show() {
+          controller.showCount += 1;
+          controller.finished = Promise.resolve();
+          return controller;
+        },
+        update() { return controller; },
+        destroy() {
+          controller.destroyCount += 1;
+          return controller;
+        },
+      };
+      controllers.push(controller);
+      return controller;
+    },
+    expose(controller) { exposed.push(controller); },
+  });
+  return {
+    controllers,
+    exposed,
+    owner,
+    setCreateHook(hook) { createHook = hook; },
+  };
+}
+
+const NO_THROW = Symbol('no throw');
+
+function attachTarget(name) {
+  let addHook = null;
+  let addFailure = NO_THROW;
+  let listener = null;
+  let removeCount = 0;
+  return {
+    name,
+    addEventListener(_type, nextListener) {
+      listener = nextListener;
+      addHook?.();
+      if (addFailure !== NO_THROW) throw addFailure;
+    },
+    removeEventListener(_type, nextListener) {
+      removeCount += 1;
+      if (listener === nextListener) listener = null;
+    },
+    setAddFailure(error) { addFailure = error; },
+    setAddHook(hook) { addHook = hook; },
+    get listening() { return listener !== null; },
+    get removeCount() { return removeCount; },
+  };
+}
+
+test('listener attachment reentrant destroy, disable, or winner prevents stale show', () => {
+  for (const action of ['destroy', 'disable', 'winner']) {
+    const harness = attachReentryHarness();
+    const stale = attachTarget(`stale-${action}`);
+    const winner = attachTarget(`winner-${action}`);
+    stale.setAddHook(() => {
+      stale.setAddHook(null);
+      if (action === 'destroy') harness.owner.destroy();
+      else if (action === 'disable') {
+        harness.owner.update(stale, box, { enabled: false });
+      } else {
+        harness.owner.mount(winner, circle);
+      }
+    });
+
+    harness.owner.mount(stale, box);
+
+    const staleController = harness.controllers.find((item) => item.target === stale);
+    assert.equal(staleController.showCount, 0, action);
+    assert.equal(staleController.destroyCount, 1, action);
+    assert.equal(stale.listening, false, action);
+    assert.equal(stale.removeCount, 1, action);
+    if (action === 'winner') {
+      assert.equal(harness.exposed.at(-1).target, winner);
+      assert.equal(harness.exposed.filter((value) => value === null).length, 0);
+    } else {
+      assert.deepEqual(harness.exposed, [], action);
+    }
+  }
+});
+
+test('create callback reentrant winner prevents every later stale candidate external call', () => {
+  const harness = attachReentryHarness();
+  const stale = attachTarget('stale-create');
+  const winner = attachTarget('winner-create');
+  harness.setCreateHook((target) => {
+    if (target !== stale) return;
+    harness.setCreateHook(null);
+    harness.owner.mount(winner, circle);
+  });
+
+  harness.owner.mount(stale, box);
+
+  const staleController = harness.controllers.find((item) => item.target === stale);
+  assert.equal(staleController.showCount, 0);
+  assert.equal(staleController.destroyCount, 1);
+  assert.equal(stale.listening, false);
+  assert.equal(stale.removeCount, 0);
+  assert.equal(harness.exposed.at(-1).target, winner);
+});
+
+test('listener attachment throw after side effect cleans stale controller and rethrows exactly', () => {
+  for (const reentry of ['none', 'winner']) {
+    const harness = attachReentryHarness();
+    const stale = attachTarget(`stale-throw-${reentry}`);
+    const winner = attachTarget(`winner-throw-${reentry}`);
+    const failure = new Error(`add failed ${reentry}`);
+    if (reentry === 'winner') {
+      stale.setAddHook(() => {
+        stale.setAddHook(null);
+        harness.owner.mount(winner, circle);
+      });
+    }
+    stale.setAddFailure(failure);
+
+    assert.equal(
+      captureThrown(() => harness.owner.mount(stale, box)),
+      failure,
+      reentry,
+    );
+
+    const staleController = harness.controllers.find((item) => item.target === stale);
+    assert.equal(staleController.showCount, 0, reentry);
+    assert.equal(staleController.destroyCount, 1, reentry);
+    assert.equal(stale.listening, false, reentry);
+    assert.equal(stale.removeCount, 1, reentry);
+    if (reentry === 'winner') {
+      assert.equal(harness.exposed.at(-1).target, winner);
+    } else {
+      assert.deepEqual(harness.exposed, []);
+    }
+  }
 });

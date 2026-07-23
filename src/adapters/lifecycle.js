@@ -12,6 +12,7 @@ const OPTION_KEYS = new Set([
 ]);
 const CONFIG_KEYS = new Set(['enabled', 'onError']);
 const DEFAULT_SEED = '__hanamaru_adapter_default_seed__';
+const NO_FAILURE = Symbol('no failure');
 let nextAdapterSeed = 0;
 
 function invalid(field, value) {
@@ -98,6 +99,33 @@ function defaultQueueThrow(error) {
   });
 }
 
+function attachCleanupCause(cause, cleanupCause) {
+  if (cause === null
+    || (typeof cause !== 'object' && typeof cause !== 'function')) {
+    return;
+  }
+  try {
+    if (!Object.hasOwn(cause, 'cleanupCause')) {
+      Object.defineProperty(cause, 'cleanupCause', {
+        configurable: true,
+        value: cleanupCause,
+      });
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(cause, 'cleanupCauses');
+    const previous = descriptor !== undefined
+      && Object.hasOwn(descriptor, 'value')
+      && Array.isArray(descriptor.value)
+      ? descriptor.value
+      : [];
+    Object.defineProperty(cause, 'cleanupCauses', {
+      configurable: true,
+      value: Object.freeze([...previous, cleanupCause]),
+    });
+  } catch {
+    // The exact first failure remains authoritative when it cannot carry metadata.
+  }
+}
+
 export function createAdapterOwner({
   create,
   expose = () => {},
@@ -112,24 +140,27 @@ export function createAdapterOwner({
   let nextGeneration = 0;
   let operationEpoch = 0;
 
-  function cleanup(
-    record,
-    notify,
-    primaryFailure = null,
-    queueExposureFailure = false,
-  ) {
-    if (record === null || !record.active) return primaryFailure;
+  function cleanup(record, notify, ...failureOptions) {
+    let failure = failureOptions.length === 0 ? NO_FAILURE : failureOptions[0];
+    const queueExposureFailure = failureOptions[1] === true;
+    if (record === null || !record.active) return failure;
     record.active = false;
-    let failure = primaryFailure;
-    try {
-      record.target.removeEventListener('hana:error', record.listener);
-    } catch (error) {
-      failure ??= error;
+    const recordFailure = (error) => {
+      if (failure === NO_FAILURE) failure = error;
+      else attachCleanupCause(failure, error);
+    };
+    if (record.listening) {
+      record.listening = false;
+      try {
+        record.target.removeEventListener('hana:error', record.listener);
+      } catch (error) {
+        recordFailure(error);
+      }
     }
     try {
       record.controller.destroy();
     } catch (error) {
-      failure ??= error;
+      recordFailure(error);
     }
     if (notify && record.exposed) {
       record.exposed = false;
@@ -138,7 +169,7 @@ export function createAdapterOwner({
         expose(null);
       } catch (error) {
         if (queueExposureFailure) queueThrow(error);
-        else failure ??= error;
+        else recordFailure(error);
       }
     }
     return failure;
@@ -171,7 +202,13 @@ export function createAdapterOwner({
     if (destroyed || current !== record || !record.active) return;
     if (seenFailure(record, error, failureGeneration)) return;
 
-    current = null;
+    deliverFailure(record, error);
+  }
+
+  function deliverFailure(record, error) {
+    if (current === record) current = null;
+    record.phase = 'failed';
+    record.pendingFailure = null;
     cleanup(record, true, error, true);
     if (abortFailure(error) || record.onError === undefined) return;
     try {
@@ -183,7 +220,7 @@ export function createAdapterOwner({
 
   function routeFailure(record, error, failureGeneration) {
     if (!record.active) return;
-    if (record.phase === 'candidate') {
+    if (record.phase === 'candidate' || record.phase === 'updating') {
       if (record.pendingFailure !== null) return;
       if (seenFailure(record, error, failureGeneration)) return;
       record.pendingFailure = { error, generation: failureGeneration };
@@ -193,14 +230,19 @@ export function createAdapterOwner({
   }
 
   function eventFailure(record, event) {
-    let detail;
+    let controller;
+    let error;
+    let failureGeneration;
     try {
-      detail = event?.detail;
-      if (detail?.controller !== record.controller) return;
+      const detail = event?.detail;
+      controller = detail?.controller;
+      if (controller !== record.controller) return;
+      error = detail.error;
+      failureGeneration = detail.generation;
     } catch {
       return;
     }
-    routeFailure(record, detail.error, detail.generation);
+    routeFailure(record, error, failureGeneration);
   }
 
   function observeFinished(record) {
@@ -218,7 +260,11 @@ export function createAdapterOwner({
     ]);
   }
 
-  function createRecord(target, prepared, config) {
+  function operationIsCurrent(operation) {
+    return !destroyed && operation === operationEpoch;
+  }
+
+  function createRecord(target, prepared, config, operation) {
     const defaultSeed = allocateDefaultSeed();
     const controller = create(target, completeManual(prepared, defaultSeed));
     if (controller === null
@@ -238,18 +284,37 @@ export function createAdapterOwner({
       finished: null,
       generation: ++nextGeneration,
       listener: null,
+      listening: false,
       onError: config.onError,
       pendingFailure: null,
       phase: 'candidate',
       target,
     };
     record.listener = (event) => eventFailure(record, event);
+    if (!operationIsCurrent(operation)) {
+      cleanup(record, false);
+      return record;
+    }
 
     try {
+      record.listening = true;
       target.addEventListener('hana:error', record.listener);
+      if (!operationIsCurrent(operation)) {
+        cleanup(record, false);
+        return record;
+      }
       controller.show();
+      if (!operationIsCurrent(operation)) {
+        cleanup(record, false);
+        return record;
+      }
       record.finished = controller.finished;
+      if (!operationIsCurrent(operation)) {
+        cleanup(record, false);
+        return record;
+      }
       observeFinished(record);
+      if (!operationIsCurrent(operation)) cleanup(record, false);
     } catch (error) {
       cleanup(record, false, error);
       throw error;
@@ -298,7 +363,7 @@ export function createAdapterOwner({
       const previous = current;
       current = null;
       const failure = cleanup(previous, true);
-      if (failure !== null) throw failure;
+      if (failure !== NO_FAILURE) throw failure;
       return owner;
     }
 
@@ -310,25 +375,45 @@ export function createAdapterOwner({
     if (current !== null && current.target === target) {
       const active = current;
       active.onError = config.onError;
-      if (sameCanonical(active.canonical, prepared.canonical)) return owner;
+      if (sameCanonical(active.canonical, prepared.canonical)) {
+        if (active.phase === 'updating') {
+          active.phase = 'current';
+          active.pendingFailure = null;
+        }
+        return owner;
+      }
+      active.phase = 'updating';
+      active.pendingFailure = null;
+      active.phaseOperation = operation;
       try {
         active.controller.update(completeManual(prepared, active.defaultSeed));
-        if (!destroyed
-          && operation === operationEpoch
-          && current === active
-          && active.active) {
-          active.canonical = prepared.canonical;
-        }
       } catch (error) {
-        if (current === active) current = null;
-        cleanup(active, true, error);
+        const authoritative = operationIsCurrent(operation)
+          && current === active
+          && active.active
+          && active.phaseOperation === operation;
+        if (authoritative) {
+          current = null;
+          active.phase = 'failed';
+          active.pendingFailure = null;
+          cleanup(active, true, error);
+        }
         throw error;
       }
+      if (!operationIsCurrent(operation)
+        || current !== active
+        || !active.active
+        || active.phaseOperation !== operation) return owner;
+      active.canonical = prepared.canonical;
+      const pendingFailure = active.pendingFailure;
+      active.pendingFailure = null;
+      active.phase = 'current';
+      if (pendingFailure !== null) deliverFailure(active, pendingFailure.error);
       return owner;
     }
 
     const previous = current;
-    const candidate = createRecord(target, prepared, config);
+    const candidate = createRecord(target, prepared, config, operation);
     if (destroyed || operation !== operationEpoch) {
       cleanup(candidate, false);
       return owner;
@@ -340,7 +425,7 @@ export function createAdapterOwner({
     if (previous !== null) {
       current = null;
       const teardownFailure = cleanup(previous, true);
-      if (teardownFailure !== null) {
+      if (teardownFailure !== NO_FAILURE) {
         cleanup(candidate, false, teardownFailure);
         throw teardownFailure;
       }
@@ -374,7 +459,7 @@ export function createAdapterOwner({
     const previous = current;
     current = null;
     const failure = cleanup(previous, true);
-    if (failure !== null) throw failure;
+    if (failure !== NO_FAILURE) throw failure;
     return owner;
   }
 
