@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Selection fixture</title>
+    <style>
+      #whitespace-target { white-space: pre; }
+    </style>
+  </head>
+  <body>
+    <main id="selection-root">
+      <p id="document-target">Document selection target text</p>
+      <p id="other-target">A different target for later selection changes</p>
+      <p id="whitespace-target">     </p>
+      <div id="shadow-host"></div>
+      <iframe
+        id="selection-frame"
+        srcdoc="<!doctype html><html><body><p id='frame-target'>Iframe selection target text</p></body></html>"
+      ></iframe>
+    </main>
+  </body>
+</html>
