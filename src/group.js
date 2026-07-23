@@ -165,6 +165,7 @@ function documentContext(context) {
 
 function defaultGroupEnvironment(root) {
   const view = root.defaultView;
+  const memberErrors = new WeakMap();
   return {
     root,
     document: root,
@@ -172,7 +173,11 @@ function defaultGroupEnvironment(root) {
     acquireDocumentResources,
     createAnnotation(target, options) {
       const annotationEnvironment = createAnnotationEnvironment(target, root);
-      annotationEnvironment.createEvent = () => {};
+      annotationEnvironment.createEvent = (type, detail) => {
+        if (type === 'hana:error') {
+          memberErrors.set(detail.controller, detail.error);
+        }
+      };
       return createAnnotation(target, options, annotationEnvironment);
     },
     createEvent(type, detail, owner) {
@@ -186,6 +191,12 @@ function defaultGroupEnvironment(root) {
       try { record.refresh(); } catch { /* Retain the last valid owner for error delivery. */ }
       return record.ownerElement;
     },
+    afterRefresh(callback) {
+      const id = view.requestAnimationFrame(callback);
+      return () => view.cancelAnimationFrame(id);
+    },
+    clearMemberError(annotation) { memberErrors.delete(annotation); },
+    memberError(annotation) { return memberErrors.get(annotation); },
     microtask(callback) { view.queueMicrotask(callback); },
     resolveTarget(target) { return resolveTarget(target, root); },
   };
@@ -257,7 +268,9 @@ export function createGroup(members, rawOptions = {}, env) {
   let state = 'idle';
   let run = null;
   let operationEpoch = 0;
+  let refreshEpoch = 0;
   let requestedVisible = false;
+  let stopRefresh = null;
   const automatic = {
     active: false,
     epoch: 0,
@@ -300,6 +313,25 @@ export function createGroup(members, rawOptions = {}, env) {
     }
   }
 
+  function cancelRefreshObservation() {
+    refreshEpoch += 1;
+    const cleanup = stopRefresh;
+    stopRefresh = null;
+    if (cleanup === null) return null;
+    try {
+      cleanup();
+      return null;
+    } catch (error) {
+      return error;
+    }
+  }
+
+  function refreshIsCurrent(refreshOperation) {
+    return state !== 'destroyed'
+      && refreshOperation.id === refreshEpoch
+      && refreshOperation.operation === operationEpoch;
+  }
+
   function stopAutomaticTrigger() {
     automatic.active = false;
     automatic.epoch += 1;
@@ -333,6 +365,7 @@ export function createGroup(members, rawOptions = {}, env) {
   }
 
   function failTrigger(cause) {
+    cancelRefreshObservation();
     const cleanupFailure = stopAutomaticTrigger();
     const error = runtimeError(cause ?? cleanupFailure);
     operationEpoch += 1;
@@ -465,6 +498,7 @@ export function createGroup(members, rawOptions = {}, env) {
 
   function failRun(operation, activeRun, index, cause) {
     if (!isCurrent(operation, activeRun) || activeRun.settled) return;
+    cancelRefreshObservation();
     const error = groupMemberError(index, cause);
     operationEpoch += 1;
     requestedVisible = true;
@@ -493,6 +527,7 @@ export function createGroup(members, rawOptions = {}, env) {
   }
 
   function beginRun() {
+    cancelRefreshObservation();
     operationEpoch += 1;
     const operation = operationEpoch;
     const deferredRun = createDeferred();
@@ -543,6 +578,7 @@ export function createGroup(members, rawOptions = {}, env) {
     if (state !== 'idle' && state !== 'hidden' && state !== 'suspended') {
       return controller;
     }
+    cancelRefreshObservation();
     const triggerFailure = stopAutomaticTrigger();
     if (triggerFailure !== null) {
       failTrigger(triggerFailure);
@@ -561,6 +597,7 @@ export function createGroup(members, rawOptions = {}, env) {
     if (state !== 'showing' && state !== 'visible' && state !== 'suspended') {
       return controller;
     }
+    cancelRefreshObservation();
     operationEpoch += 1;
     requestedVisible = false;
     state = 'hidden';
@@ -581,6 +618,7 @@ export function createGroup(members, rawOptions = {}, env) {
     if (triggerFailure !== null) {
       throw failTrigger(triggerFailure);
     }
+    cancelRefreshObservation();
     operationEpoch += 1;
     const operation = operationEpoch;
     const previousState = state;
@@ -598,13 +636,125 @@ export function createGroup(members, rawOptions = {}, env) {
     return controller;
   }
 
+  function refreshFailures() {
+    const failures = [];
+    for (let index = 0; index < annotations.length; index += 1) {
+      const captured = typeof env.memberError === 'function'
+        ? env.memberError(annotations[index])
+        : undefined;
+      if (captured !== undefined) {
+        failures.push({ index, error: captured });
+      } else if (annotations[index].state === 'suspended') {
+        failures.push({
+          index,
+          error: new HanamaruStateError(
+            'HANA_STATE_RUNTIME',
+            'Group member refresh failed',
+          ),
+        });
+      }
+    }
+    return failures;
+  }
+
+  function failRefresh(refreshOperation, failures) {
+    if (!refreshIsCurrent(refreshOperation) || failures.length === 0) return;
+    const failure = failures.reduce((lowest, candidate) => (
+      candidate.index < lowest.index ? candidate : lowest
+    ));
+    const error = groupMemberError(failure.index, failure.error);
+    cancelRefreshObservation();
+    operationEpoch += 1;
+    requestedVisible = refreshOperation.priorState === 'showing'
+      || refreshOperation.priorState === 'visible'
+      ? true
+      : refreshOperation.requestedVisible;
+    state = 'suspended';
+    settleRejected(run, error);
+    hideAll();
+    dispatch('hana:error', {
+      controller,
+      error,
+      index: failure.index,
+    });
+  }
+
+  function finishRefreshRecovery(refreshOperation) {
+    if (!refreshIsCurrent(refreshOperation)
+      || !refreshOperation.recovery
+      || !refreshOperation.frameChecked
+      || refreshOperation.remaining !== 0) return;
+    const failures = refreshFailures();
+    if (failures.length > 0) {
+      failRefresh(refreshOperation, failures);
+      return;
+    }
+    if (annotations.every((annotation) => annotation.state === 'visible')) {
+      state = 'visible';
+    }
+  }
+
+  function observeRefreshRun(refreshOperation, index, memberRun) {
+    refreshOperation.remaining += 1;
+    memberRun.then(
+      () => {
+        if (!refreshIsCurrent(refreshOperation)) return;
+        refreshOperation.remaining -= 1;
+        finishRefreshRecovery(refreshOperation);
+      },
+      (error) => {
+        if (!refreshIsCurrent(refreshOperation)) return;
+        failRefresh(refreshOperation, [{ index, error }]);
+      },
+    ).catch(() => {});
+  }
+
+  function checkRefreshFrame(refreshOperation) {
+    if (!refreshIsCurrent(refreshOperation)) return;
+    stopRefresh = null;
+    const failures = refreshFailures();
+    if (failures.length > 0) {
+      failRefresh(refreshOperation, failures);
+      return;
+    }
+    refreshOperation.frameChecked = true;
+    finishRefreshRecovery(refreshOperation);
+  }
+
+  function scheduleRefreshCheck(refreshOperation) {
+    if (typeof env.afterRefresh === 'function') {
+      stopRefresh = env.afterRefresh(() => checkRefreshFrame(refreshOperation));
+      return;
+    }
+    let active = true;
+    const callback = () => {
+      if (active) checkRefreshFrame(refreshOperation);
+    };
+    if (typeof env.microtask === 'function') env.microtask(callback);
+    else Promise.resolve().then(callback);
+    stopRefresh = () => { active = false; };
+  }
+
   function refresh() {
     if (state !== 'showing' && state !== 'visible' && state !== 'suspended') {
       return controller;
     }
+    cancelRefreshObservation();
     const priorState = state;
     const priorRequestedVisible = requestedVisible;
+    const refreshOperation = {
+      frameChecked: false,
+      id: refreshEpoch,
+      operation: operationEpoch,
+      priorState,
+      recovery: priorState === 'suspended' && priorRequestedVisible,
+      remaining: 0,
+      requestedVisible: priorRequestedVisible,
+    };
     const failures = [];
+    for (const annotation of annotations) {
+      env.clearMemberError?.(annotation);
+    }
     for (let index = 0; index < annotations.length; index += 1) {
       try {
         prepared[index].record.refresh();
@@ -612,6 +762,24 @@ export function createGroup(members, rawOptions = {}, env) {
       } catch (error) {
         failures.push({ index, error });
       }
+    }
+    if (refreshOperation.recovery && failures.length === 0) {
+      for (let index = 0; index < annotations.length; index += 1) {
+        if (annotations[index].state === 'showing'
+          || annotations[index].state === 'visible') continue;
+        try {
+          annotations[index].show();
+          const memberRun = annotations[index].finished;
+          if (memberRun === null || typeof memberRun?.then !== 'function') {
+            throw new TypeError('Group member refresh did not provide a Promise');
+          }
+          observeRefreshRun(refreshOperation, index, memberRun);
+        } catch (error) {
+          failures.push({ index, error });
+        }
+      }
+    }
+    for (let index = 0; index < annotations.length; index += 1) {
       try {
         annotations[index].refresh();
       } catch (error) {
@@ -619,26 +787,23 @@ export function createGroup(members, rawOptions = {}, env) {
       }
     }
     if (failures.length > 0) {
-      const failure = failures[0];
-      const error = groupMemberError(failure.index, failure.error);
-      operationEpoch += 1;
-      requestedVisible = priorState === 'showing' || priorState === 'visible'
-        ? true
-        : priorRequestedVisible;
-      state = 'suspended';
-      settleRejected(run, error);
-      hideAll();
-      dispatch('hana:error', {
-        controller,
-        error,
-        index: failure.index,
-      });
+      failRefresh(refreshOperation, failures);
       return controller;
     }
-    if (state === 'suspended'
-      && requestedVisible
+    const immediateFailures = refreshFailures();
+    if (immediateFailures.length > 0) {
+      failRefresh(refreshOperation, immediateFailures);
+      return controller;
+    }
+    if (refreshOperation.recovery
+      && refreshOperation.remaining === 0
       && annotations.every((annotation) => annotation.state === 'visible')) {
       state = 'visible';
+    }
+    try {
+      scheduleRefreshCheck(refreshOperation);
+    } catch (error) {
+      failRefresh(refreshOperation, [{ index: 0, error }]);
     }
     return controller;
   }
@@ -650,7 +815,9 @@ export function createGroup(members, rawOptions = {}, env) {
     abortPending('destroyed');
     requestedVisible = false;
     state = 'destroyed';
-    let failure = stopAutomaticTrigger();
+    let failure = cancelRefreshObservation();
+    const triggerFailure = stopAutomaticTrigger();
+    failure ??= triggerFailure;
     for (let index = annotations.length - 1; index >= 0; index -= 1) {
       try {
         annotations[index].destroy();

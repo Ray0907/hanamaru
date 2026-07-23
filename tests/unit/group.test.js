@@ -6,7 +6,7 @@ import {
   HanamaruStateError,
   HanamaruTargetError,
 } from '../../src/errors.js';
-import { createGroup } from '../../src/group.js';
+import { createGroup, group } from '../../src/group.js';
 
 function deferred() {
   let resolve;
@@ -24,6 +24,38 @@ function definitions() {
     { target: 'second', mark: 'highlight', note: 'Together' },
     { target: 'third', mark: 'underline', duration: 25 },
   ];
+}
+
+function minimalDocumentRealm(name) {
+  class RealmDocument {}
+  class RealmElement {
+    constructor(ownerDocument) {
+      this.isConnected = true;
+      this.ownerDocument = ownerDocument;
+    }
+
+    getRootNode() {
+      return this.ownerDocument;
+    }
+  }
+  class RealmRange {}
+
+  const document = new RealmDocument();
+  const leaseFailure = new Error(`${name} document resources reached`);
+  document.name = name;
+  document.nodeType = 9;
+  document.defaultView = {
+    Document: RealmDocument,
+    Element: RealmElement,
+    Object,
+    Range: RealmRange,
+  };
+  document.createElement = () => { throw leaseFailure; };
+  return {
+    document,
+    leaseFailure,
+    target: new RealmElement(document),
+  };
 }
 
 function fakeEnvironment({ readyState = 'loading' } = {}) {
@@ -60,6 +92,7 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
   const finishedFailures = new Map();
   const hideFailures = new Map();
   const refreshFailures = new Map();
+  const asyncRefreshFailures = new Map();
   const destroyFailures = new Map();
   let createFailure = null;
   let eventHandler = null;
@@ -69,6 +102,10 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
   let triggerCleanupFailure = null;
   const intersections = [];
   const registeredTriggers = new Set();
+  const memberRefreshErrors = new Map();
+  const pendingRefreshWrites = [];
+  const pendingRefreshChecks = [];
+  let asyncRefresh = false;
 
   function createAnnotation(target, options) {
     const index = annotations.length;
@@ -77,6 +114,7 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
 
     let state = 'idle';
     let run = null;
+    let operation = 0;
     liveLeases += 1;
     outputs.add(target);
     const annotation = {
@@ -91,6 +129,7 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
         calls.push(['annotation:show', target]);
         if (showFailures.has(target)) throw showFailures.get(target);
         if (state === 'showing' || state === 'visible') return annotation;
+        operation += 1;
         run = deferred();
         if (finishedFailures.has(target)) run.promise.catch(() => {});
         state = 'showing';
@@ -110,6 +149,7 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
       },
       hide() {
         calls.push(['annotation:hide', target]);
+        operation += 1;
         if (run !== null && !run.settled) {
           run.settled = true;
           run.reject(new DOMException('Annotation hidden', 'AbortError'));
@@ -125,12 +165,32 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
       refresh() {
         calls.push(['annotation:refresh', target]);
         if (refreshFailures.has(target)) throw refreshFailures.get(target);
-        if (state === 'suspended' || state === 'hidden') state = 'visible';
+        if (asyncRefresh) {
+          operation += 1;
+          const refreshOperation = operation;
+          const activeRun = run;
+          pendingRefreshWrites.push(() => {
+            if (refreshOperation !== operation) return;
+            const error = asyncRefreshFailures.get(target);
+            if (error !== undefined) {
+              memberRefreshErrors.set(annotation, error);
+              if (activeRun !== null && !activeRun.settled) annotation.fail(error);
+              else state = 'suspended';
+              return;
+            }
+            annotation.finish();
+            state = 'visible';
+          });
+          return annotation;
+        }
+        if (state === 'showing') annotation.finish();
+        else if (state === 'suspended' || state === 'hidden') state = 'visible';
         return annotation;
       },
       destroy() {
         calls.push(['annotation:destroy', target]);
         if (state === 'destroyed') return annotation;
+        operation += 1;
         state = 'destroyed';
         outputs.delete(target);
         liveLeases -= 1;
@@ -167,12 +227,22 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
     failFinished(target, error) { finishedFailures.set(target, error); },
     failHide(target, error) { hideFailures.set(target, error); },
     failRefresh(target, error) { refreshFailures.set(target, error); },
+    failRefreshAsync(target, error) { asyncRefreshFailures.set(target, error); },
     failResolve(target, error) { resolveFailures.set(target, error); },
     failShow(target, error) { showFailures.set(target, error); },
     clearRefreshFailure(target) { refreshFailures.delete(target); },
+    clearRefreshFailureAsync(target) { asyncRefreshFailures.delete(target); },
     clearShowFailure(target) { showFailures.delete(target); },
     setEventHandler(handler) { eventHandler = handler; },
     setRoot(target, targetRoot) { roots.set(target, targetRoot); },
+    useAsyncRefresh() { asyncRefresh = true; },
+    async flushRefreshFrame() {
+      const writes = pendingRefreshWrites.splice(0);
+      for (const write of writes) write();
+      const checks = pendingRefreshChecks.splice(0);
+      for (const check of checks) check();
+      await flushMicrotasks();
+    },
     env: {
       root,
       document: root,
@@ -225,6 +295,15 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
         eventHandler?.(event);
       },
       eventOwner(record) { return record.ownerElement; },
+      afterRefresh(callback) {
+        let active = true;
+        pendingRefreshChecks.push(() => {
+          if (active) callback();
+        });
+        return () => { active = false; };
+      },
+      clearMemberError(annotation) { memberRefreshErrors.delete(annotation); },
+      memberError(annotation) { return memberRefreshErrors.get(annotation); },
       microtask(callback) { queueMicrotask(callback); },
       resolveTarget(target) {
         calls.push(['resolveTarget', target]);
@@ -265,6 +344,61 @@ test('group construction validates and resolves every member before creating ann
     ['createAnnotation', 'third'],
   ]);
   assert.equal(controller.size, 3);
+});
+
+test('public group uses the current native Document realm by default', () => {
+  const realm = minimalDocumentRealm('top');
+  const hadDocument = Object.hasOwn(globalThis, 'document');
+  const previousDocument = globalThis.document;
+  globalThis.document = realm.document;
+  try {
+    assert.throws(
+      () => group([{ target: realm.target, mark: 'circle' }]),
+      (error) => error === realm.leaseFailure,
+    );
+  } finally {
+    if (hadDocument) globalThis.document = previousDocument;
+    else delete globalThis.document;
+  }
+});
+
+test('public group accepts and uses the exact iframe Document realm', () => {
+  const top = minimalDocumentRealm('top');
+  const iframe = minimalDocumentRealm('iframe');
+  const hadDocument = Object.hasOwn(globalThis, 'document');
+  const previousDocument = globalThis.document;
+  globalThis.document = top.document;
+  try {
+    assert.throws(
+      () => group(
+        [{ target: iframe.target, mark: 'underline' }],
+        {},
+        { root: iframe.document },
+      ),
+      (error) => error === iframe.leaseFailure,
+    );
+  } finally {
+    if (hadDocument) globalThis.document = previousDocument;
+    else delete globalThis.document;
+  }
+});
+
+test('public group rejects invalid context shapes, roots, and unknown context keys', () => {
+  const invalidContexts = [
+    null,
+    [],
+    { root: null },
+    { root: { nodeType: 9, defaultView: null } },
+    { root: { nodeType: 11, host: {} } },
+    { extra: true },
+  ];
+  for (const context of invalidContexts) {
+    assert.throws(
+      () => group(definitions(), {}, context),
+      (error) => error instanceof HanamaruConfigError
+        && error.code === 'HANA_CONFIG_INVALID',
+    );
+  }
 });
 
 test('group construction validates every definition before resolving the first target', () => {
@@ -557,6 +691,30 @@ test('hide transition aborts a pending run, hides all members, and is a no-op el
   assert.equal(environment.calls.length, callCount);
 });
 
+test('hide accepts visible and suspended states and dispatches cancel from the first owner', async () => {
+  const visibleEnvironment = fakeEnvironment();
+  const visible = createGroup(definitions(), {}, visibleEnvironment.env);
+  visible.show();
+  for (const annotation of visibleEnvironment.annotations) annotation.finish();
+  await visible.finished;
+  visibleEnvironment.events.length = 0;
+  visible.hide();
+  assert.equal(visible.state, 'hidden');
+  assert.equal(visibleEnvironment.events.at(-1).type, 'hana:cancel');
+  assert.equal(visibleEnvironment.events.at(-1).owner.target, 'first');
+
+  const suspendedEnvironment = fakeEnvironment();
+  const suspended = createGroup(definitions(), {}, suspendedEnvironment.env);
+  suspended.show();
+  suspendedEnvironment.annotations[1].fail(new Error('suspend'));
+  await assert.rejects(suspended.finished, HanamaruStateError);
+  suspendedEnvironment.events.length = 0;
+  suspended.hide();
+  assert.equal(suspended.state, 'hidden');
+  assert.equal(suspendedEnvironment.events.at(-1).type, 'hana:cancel');
+  assert.equal(suspendedEnvironment.events.at(-1).owner.target, 'first');
+});
+
 test('replay preflights all members before superseding and starts a fresh run', async () => {
   const environment = fakeEnvironment();
   const controller = createGroup(definitions(), {}, environment.env);
@@ -583,6 +741,43 @@ test('replay preflights all members before superseding and starts a fresh run', 
     environment.events.filter(({ type }) => type === 'hana:cancel').at(-1).detail.reason,
     'replay',
   );
+});
+
+test('replay is accepted from idle, hidden, visible, and suspended states', async () => {
+  for (const desiredState of ['idle', 'hidden', 'visible', 'suspended']) {
+    const environment = fakeEnvironment();
+    const controller = createGroup(definitions(), {}, environment.env);
+    if (desiredState !== 'idle') controller.show();
+    if (desiredState === 'hidden') {
+      const pending = controller.finished;
+      controller.hide();
+      await assert.rejects(pending, (error) => error?.name === 'AbortError');
+    }
+    if (desiredState === 'visible') {
+      for (const annotation of environment.annotations) annotation.finish();
+      await controller.finished;
+    }
+    if (desiredState === 'suspended') {
+      environment.annotations[0].fail(new Error('suspended'));
+      await assert.rejects(controller.finished, HanamaruStateError);
+    }
+    assert.equal(controller.state, desiredState);
+    const previous = controller.finished;
+    environment.events.length = 0;
+
+    assert.equal(controller.replay(), controller);
+    assert.equal(controller.state, 'showing');
+    assert.ok(controller.finished instanceof Promise);
+    assert.notEqual(controller.finished, previous);
+    assert.equal(environment.events.at(-1).type, 'hana:start');
+    assert.equal(environment.events.at(-1).owner.target, 'first');
+    if (desiredState !== 'idle') {
+      const cancel = environment.events.find(({ type }) => type === 'hana:cancel');
+      if (desiredState === 'hidden') assert.equal(cancel, undefined);
+      else assert.equal(cancel.owner.target, 'first');
+    }
+    controller.destroy();
+  }
 });
 
 test('replay preflight failure preserves state, output, and finished identity', async () => {
@@ -644,6 +839,27 @@ test('refresh transition redraws every active member without replacing finished'
   );
 });
 
+test('refresh is a strict no-op from idle and hidden', async () => {
+  const idleEnvironment = fakeEnvironment();
+  const idle = createGroup(definitions(), {}, idleEnvironment.env);
+  idleEnvironment.calls.length = 0;
+  assert.equal(idle.refresh(), idle);
+  assert.equal(idle.state, 'idle');
+  assert.equal(idle.finished, null);
+  assert.equal(idleEnvironment.calls.length, 0);
+
+  const hiddenEnvironment = fakeEnvironment();
+  const hidden = createGroup(definitions(), {}, hiddenEnvironment.env);
+  hidden.show();
+  const run = hidden.finished;
+  hidden.hide();
+  await assert.rejects(run, (error) => error?.name === 'AbortError');
+  hiddenEnvironment.calls.length = 0;
+  assert.equal(hidden.refresh(), hidden);
+  assert.equal(hidden.state, 'hidden');
+  assert.equal(hiddenEnvironment.calls.length, 0);
+});
+
 test('destroy aborts once, tears down in reverse, and makes every control a no-op', async () => {
   const environment = fakeEnvironment();
   const controller = createGroup(definitions(), {}, environment.env);
@@ -668,6 +884,55 @@ test('destroy aborts once, tears down in reverse, and makes every control a no-o
   }
   assert.equal(controller.finished, finished);
   assert.equal(environment.calls.length, calls);
+});
+
+test('destroy accepts idle, hidden, visible, and suspended with reverse teardown', async () => {
+  for (const desiredState of ['idle', 'hidden', 'visible', 'suspended']) {
+    const environment = fakeEnvironment();
+    const controller = createGroup(definitions(), {}, environment.env);
+    if (desiredState !== 'idle') controller.show();
+    if (desiredState === 'hidden') {
+      const pending = controller.finished;
+      controller.hide();
+      await assert.rejects(pending, (error) => error?.name === 'AbortError');
+    }
+    if (desiredState === 'visible') {
+      for (const annotation of environment.annotations) annotation.finish();
+      await controller.finished;
+    }
+    if (desiredState === 'suspended') {
+      environment.annotations[2].fail(new Error('suspended'));
+      await assert.rejects(controller.finished, HanamaruStateError);
+    }
+    environment.calls.length = 0;
+
+    assert.equal(controller.destroy(), controller);
+    assert.equal(controller.state, 'destroyed');
+    assert.deepEqual(
+      environment.calls
+        .filter(([name]) => name === 'annotation:destroy')
+        .map(([, target]) => target),
+      ['third', 'second', 'first'],
+    );
+  }
+});
+
+test('complete, cancel, and error always dispatch from the exact first member owner', async () => {
+  const environment = fakeEnvironment();
+  const controller = createGroup(definitions(), {}, environment.env);
+  controller.show();
+  for (const annotation of environment.annotations) annotation.finish();
+  await controller.finished;
+  controller.hide();
+  controller.show();
+  environment.annotations[1].fail(new Error('owner check'));
+  await assert.rejects(controller.finished, HanamaruStateError);
+
+  for (const type of ['hana:complete', 'hana:cancel', 'hana:error']) {
+    const matching = environment.events.filter((event) => event.type === type);
+    assert.ok(matching.length > 0, type);
+    assert.ok(matching.every(({ owner }) => owner.target === 'first'), type);
+  }
 });
 
 test('synchronous start and cancel listeners can reenter without stale member starts', async () => {
@@ -908,6 +1173,7 @@ test('refresh failure after settlement preserves finished identity and supports 
 
   environment.clearRefreshFailure('second');
   assert.equal(controller.refresh(), controller);
+  await environment.flushRefreshFrame();
   assert.equal(controller.state, 'visible');
   assert.equal(controller.finished, settledRun);
 
@@ -915,6 +1181,118 @@ test('refresh failure after settlement preserves finished identity and supports 
   controller.show();
   assert.notEqual(controller.finished, settledRun);
   assert.equal(controller.state, 'showing');
+});
+
+test('post-settlement async refresh failure suspends after the later frame without replacing finished', async () => {
+  const environment = fakeEnvironment();
+  environment.useAsyncRefresh();
+  const controller = createGroup(definitions(), {}, environment.env);
+  controller.show();
+  for (const annotation of environment.annotations) annotation.finish();
+  const settledRun = controller.finished;
+  await settledRun;
+  const cause = new HanamaruTargetError('HANA_TARGET_MISSING', 'async target loss');
+  environment.failRefreshAsync('second', cause);
+
+  controller.refresh();
+  assert.equal(controller.state, 'visible');
+  assert.equal(controller.finished, settledRun);
+  await environment.flushRefreshFrame();
+
+  assert.equal(controller.state, 'suspended');
+  assert.equal(controller.finished, settledRun);
+  await settledRun;
+  assert.deepEqual(environment.annotations.map(({ state }) => state), [
+    'hidden', 'hidden', 'hidden',
+  ]);
+  const errorEvent = environment.events.filter(({ type }) => type === 'hana:error').at(-1);
+  assert.equal(errorEvent.detail.index, 1);
+  assert.equal(errorEvent.detail.error.code, 'HANA_STATE_GROUP_MEMBER');
+  assert.equal(errorEvent.detail.error.details.error, cause);
+});
+
+test('pending async refresh failure rejects the existing run after every member refresh was attempted', async () => {
+  const environment = fakeEnvironment();
+  environment.useAsyncRefresh();
+  const controller = createGroup(definitions(), {}, environment.env);
+  controller.show();
+  const run = controller.finished;
+  environment.failRefreshAsync('third', new Error('async draw failed'));
+  environment.calls.length = 0;
+
+  controller.refresh();
+  assert.equal(controller.finished, run);
+  assert.equal(controller.state, 'showing');
+  assert.deepEqual(
+    environment.calls.filter(([name]) => name === 'annotation:refresh'),
+    definitions().map(({ target }) => ['annotation:refresh', target]),
+  );
+  await environment.flushRefreshFrame();
+
+  await assert.rejects(run, (error) => {
+    assert.equal(error.code, 'HANA_STATE_GROUP_MEMBER');
+    assert.equal(error.details.index, 2);
+    return true;
+  });
+  assert.equal(controller.state, 'suspended');
+  assert.equal(controller.finished, run);
+});
+
+test('requested-visible suspended refresh recovers only after every async member recovers', async () => {
+  const environment = fakeEnvironment();
+  environment.useAsyncRefresh();
+  const controller = createGroup(definitions(), {}, environment.env);
+  controller.show();
+  for (const annotation of environment.annotations) annotation.finish();
+  const settledRun = controller.finished;
+  await settledRun;
+  environment.failRefreshAsync('first', new Error('temporary loss'));
+  controller.refresh();
+  await environment.flushRefreshFrame();
+  assert.equal(controller.state, 'suspended');
+
+  environment.clearRefreshFailureAsync('first');
+  const finishedIdentity = controller.finished;
+  controller.refresh();
+  assert.equal(controller.state, 'suspended');
+  assert.equal(controller.finished, finishedIdentity);
+  await environment.flushRefreshFrame();
+
+  assert.equal(controller.state, 'visible');
+  assert.equal(controller.finished, finishedIdentity);
+  assert.equal(controller.finished, settledRun);
+  assert.deepEqual(environment.annotations.map(({ state }) => state), [
+    'visible', 'visible', 'visible',
+  ]);
+});
+
+test('a superseded async refresh cannot overwrite a later hide or replay', async () => {
+  const hideEnvironment = fakeEnvironment();
+  hideEnvironment.useAsyncRefresh();
+  const hideController = createGroup(definitions(), {}, hideEnvironment.env);
+  hideController.show();
+  for (const annotation of hideEnvironment.annotations) annotation.finish();
+  await hideController.finished;
+  hideEnvironment.failRefreshAsync('first', new Error('stale failure'));
+  hideController.refresh();
+  hideController.hide();
+  await hideEnvironment.flushRefreshFrame();
+  assert.equal(hideController.state, 'hidden');
+
+  const replayEnvironment = fakeEnvironment();
+  replayEnvironment.useAsyncRefresh();
+  const replayController = createGroup(definitions(), {}, replayEnvironment.env);
+  replayController.show();
+  for (const annotation of replayEnvironment.annotations) annotation.finish();
+  await replayController.finished;
+  replayEnvironment.failRefreshAsync('second', new Error('stale replay failure'));
+  replayController.refresh();
+  replayEnvironment.clearRefreshFailureAsync('second');
+  replayController.replay();
+  const replayRun = replayController.finished;
+  await replayEnvironment.flushRefreshFrame();
+  assert.equal(replayController.state, 'showing');
+  assert.equal(replayController.finished, replayRun);
 });
 
 test('an error listener can replay without stale member-failure cleanup winning', async () => {
