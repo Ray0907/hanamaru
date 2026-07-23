@@ -44,6 +44,8 @@ const OUTPUT_LABELS = Object.freeze({
   javascript: 'JavaScript',
   json: 'JSON',
 });
+const COMPACT_VISUAL_WIDTH = 720;
+const NARROW_VISUAL_WIDTH = 320;
 
 function sameRange(first, second) {
   return first !== null
@@ -224,13 +226,13 @@ export function createAnnotationInspector(root = document) {
   let listenersAttached = false;
   let selectionFrame = 0;
   let positionFrame = 0;
+  let visualViewportSignature = '';
   let activeMarkIndex = 0;
   let outputExpanded = false;
   let unregisterFlower = null;
   let disposed = false;
   const uiAbort = new AbortController();
   const draft = { ...DEFAULT_OPTIONS };
-  const mobileQuery = window.matchMedia('(max-width: 560px)');
 
   function announce(message) {
     status.textContent = message;
@@ -273,10 +275,34 @@ export function createAnnotationInspector(root = document) {
     if (focus) markButtons[activeMarkIndex].focus();
   }
 
-  function syncOutputDisclosure() {
-    const mobile = mobileQuery.matches;
-    const expanded = !mobile || outputExpanded;
-    outputToggle.hidden = !mobile;
+  function visualViewportSnapshot() {
+    const visual = window.visualViewport;
+    const height = visual?.height ?? window.innerHeight;
+    const left = visual?.offsetLeft ?? 0;
+    const scale = visual?.scale ?? 1;
+    const top = visual?.offsetTop ?? 0;
+    const width = visual?.width ?? window.innerWidth;
+    return {
+      bottom: top + height,
+      bottomInset: Math.max(0, window.innerHeight - top - height),
+      height,
+      left,
+      right: left + width,
+      rightInset: Math.max(0, window.innerWidth - left - width),
+      scale,
+      top,
+      width,
+    };
+  }
+
+  function isCompactVisualViewport(viewport = visualViewportSnapshot()) {
+    return viewport.width <= COMPACT_VISUAL_WIDTH;
+  }
+
+  function syncOutputDisclosure(viewport = visualViewportSnapshot()) {
+    const compact = isCompactVisualViewport(viewport);
+    const expanded = !compact || outputExpanded;
+    outputToggle.hidden = !compact;
     outputToggle.setAttribute('aria-expanded', String(expanded));
     outputToggle.textContent = expanded ? 'Collapse output' : 'Expand output';
     outputBody.hidden = !expanded;
@@ -286,19 +312,25 @@ export function createAnnotationInspector(root = document) {
   function setOutputExpanded(expanded) {
     outputExpanded = expanded;
     syncOutputDisclosure();
-    positionToolbar();
+    syncInspectorLayout();
   }
 
   function ensureActiveRangeVisible() {
-    if (!mobileQuery.matches || activeRange === null || toolbar.hidden) return;
+    if (
+      inspector.dataset.inspectorCompact !== 'true'
+      || activeRange === null
+      || toolbar.hidden
+    ) return;
     const selection = activeRange.getBoundingClientRect();
     const header = inspector.querySelector(':scope > header').getBoundingClientRect();
     const statusRect = status.getBoundingClientRect();
-    const lowerLayer = output.hidden
-      ? toolbar.getBoundingClientRect()
-      : output.getBoundingClientRect();
+    const lowerLayers = [
+      toolbar.getBoundingClientRect(),
+      ...(output.hidden ? [] : [output.getBoundingClientRect()]),
+      ...(noteEditor.hidden ? [] : [noteEditor.getBoundingClientRect()]),
+    ];
     const upper = Math.max(header.bottom, statusRect.bottom) + 12;
-    const lower = lowerLayer.top - 12;
+    const lower = Math.min(...lowerLayers.map((layer) => layer.top)) - 12;
     if (selection.bottom > lower) {
       window.scrollBy({ behavior: 'instant', top: selection.bottom - lower });
     } else if (selection.top < upper) {
@@ -306,19 +338,84 @@ export function createAnnotationInspector(root = document) {
     }
   }
 
-  function scheduleToolbarPosition() {
+  function scheduleInspectorLayout() {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
-    positionFrame = requestAnimationFrame(positionToolbar);
+    positionFrame = requestAnimationFrame(syncInspectorLayout);
   }
 
-  function positionToolbar() {
+  function settleChangedVisualViewport(changed) {
+    if (
+      changed
+      && positionFrame === 0
+      && inspector.isConnected
+      && model.state !== 'closed'
+    ) {
+      positionFrame = requestAnimationFrame(syncInspectorLayout);
+    }
+  }
+
+  function syncInspectorLayout() {
+    if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
     positionFrame = 0;
+    const viewport = visualViewportSnapshot();
+    const nextViewportSignature = [
+      viewport.bottomInset,
+      viewport.height,
+      viewport.left,
+      viewport.rightInset,
+      viewport.scale,
+      viewport.top,
+      viewport.width,
+    ].join(':');
+    const viewportChanged = visualViewportSignature !== ''
+      && visualViewportSignature !== nextViewportSignature;
+    visualViewportSignature = nextViewportSignature;
+    const compact = isCompactVisualViewport(viewport);
+    inspector.style.setProperty('--inspector-vv-bottom', `${viewport.bottomInset}px`);
+    inspector.style.setProperty(
+      '--inspector-vv-center-x',
+      `${viewport.left + (viewport.width / 2)}px`,
+    );
+    inspector.style.setProperty(
+      '--inspector-vv-center-y',
+      `${viewport.top + (viewport.height / 2)}px`,
+    );
+    inspector.style.setProperty('--inspector-vv-height', `${viewport.height}px`);
+    inspector.style.setProperty('--inspector-vv-left', `${viewport.left}px`);
+    inspector.style.setProperty('--inspector-vv-right', `${viewport.rightInset}px`);
+    inspector.style.setProperty('--inspector-vv-scale', String(viewport.scale));
+    inspector.style.setProperty('--inspector-vv-top', `${viewport.top}px`);
+    inspector.style.setProperty('--inspector-vv-width', `${viewport.width}px`);
+    inspector.dataset.inspectorCompact = String(compact);
+    inspector.dataset.inspectorNarrow = String(viewport.width <= NARROW_VISUAL_WIDTH);
+    syncOutputDisclosure(viewport);
+
+    let outputSide = 'none';
+    if (!output.hidden && activeRange !== null) {
+      const rangeRect = activeRange.getBoundingClientRect();
+      outputSide = compact
+        ? 'sheet'
+        : rangeRect.left + (rangeRect.width / 2)
+          > viewport.left + (viewport.width / 2)
+          ? 'left'
+          : 'right';
+    }
+    inspector.dataset.inspectorOutputSide = outputSide;
+    if (outputSide === 'left' || outputSide === 'right') {
+      output.dataset.inspectorSide = outputSide;
+    } else {
+      output.removeAttribute('data-inspector-side');
+    }
+
     const inspectorHeader = inspector.querySelector(':scope > header');
     if (inspector.isConnected && inspectorHeader !== null) {
       status.style.top = `${Math.ceil(inspectorHeader.getBoundingClientRect().bottom + 6)}px`;
     }
-    if (toolbar.hidden || activeRange === null || model.state === 'closed') return;
-    if (mobileQuery.matches) {
+    if (toolbar.hidden || activeRange === null || model.state === 'closed') {
+      settleChangedVisualViewport(viewportChanged);
+      return;
+    }
+    if (compact) {
       toolbar.style.removeProperty('left');
       toolbar.style.removeProperty('top');
       toolbar.style.removeProperty('max-width');
@@ -326,24 +423,27 @@ export function createAnnotationInspector(root = document) {
         '--inspector-toolbar-height',
         `${Math.ceil(toolbar.getBoundingClientRect().height)}px`,
       );
+      inspector.style.setProperty(
+        '--inspector-output-height',
+        output.hidden ? '0px' : `${Math.ceil(output.getBoundingClientRect().height)}px`,
+      );
       ensureActiveRangeVisible();
+      settleChangedVisualViewport(viewportChanged);
       return;
     }
-    const visual = window.visualViewport;
-    const viewport = {
-      bottom: (visual?.offsetTop ?? 0) + (visual?.height ?? window.innerHeight),
-      left: visual?.offsetLeft ?? 0,
-      right: (visual?.offsetLeft ?? 0) + (visual?.width ?? window.innerWidth),
-      top: visual?.offsetTop ?? 0,
-    };
+    inspector.style.setProperty('--inspector-toolbar-height', '0px');
+    inspector.style.setProperty('--inspector-output-height', '0px');
     const margin = 12;
     const gap = 12;
     const selection = activeRange.getBoundingClientRect();
     const rail = output.hidden ? null : output.getBoundingClientRect();
-    const availableRight = rail === null
-      ? viewport.right - margin
-      : Math.min(viewport.right - margin, rail.left - gap);
-    const availableWidth = Math.max(280, availableRight - viewport.left - (margin * 2));
+    const availableLeft = rail !== null && outputSide === 'left'
+      ? rail.right + gap
+      : viewport.left + margin;
+    const availableRight = rail !== null && outputSide === 'right'
+      ? rail.left - gap
+      : viewport.right - margin;
+    const availableWidth = Math.max(0, availableRight - availableLeft);
     toolbar.style.maxWidth = `${availableWidth}px`;
     const rect = toolbar.getBoundingClientRect();
     const headerBottom = Math.max(
@@ -352,8 +452,8 @@ export function createAnnotationInspector(root = document) {
     );
     const minimumTop = Math.max(viewport.top + margin, headerBottom + gap);
     const left = Math.min(
-      Math.max(viewport.left + margin, selection.left),
-      Math.max(viewport.left + margin, availableRight - rect.width),
+      Math.max(availableLeft, selection.left),
+      Math.max(availableLeft, availableRight - rect.width),
     );
     const above = selection.top - rect.height - gap;
     const below = selection.bottom + gap;
@@ -362,6 +462,7 @@ export function createAnnotationInspector(root = document) {
       : Math.min(below, viewport.bottom - rect.height - margin);
     toolbar.style.left = `${Math.round(left)}px`;
     toolbar.style.top = `${Math.round(Math.max(minimumTop, top))}px`;
+    settleChangedVisualViewport(viewportChanged);
   }
 
   function ensureFlowerPlugin() {
@@ -494,10 +595,10 @@ export function createAnnotationInspector(root = document) {
     root.addEventListener('keyup', scheduleSelection);
     root.addEventListener('keydown', onInspectorKeydown);
     window.addEventListener('hashchange', closeForNavigation);
-    window.addEventListener('resize', scheduleToolbarPosition);
-    window.addEventListener('scroll', scheduleToolbarPosition, true);
-    window.visualViewport?.addEventListener('resize', scheduleToolbarPosition);
-    window.visualViewport?.addEventListener('scroll', scheduleToolbarPosition);
+    window.addEventListener('resize', scheduleInspectorLayout);
+    window.addEventListener('scroll', scheduleInspectorLayout, true);
+    window.visualViewport?.addEventListener('resize', scheduleInspectorLayout);
+    window.visualViewport?.addEventListener('scroll', scheduleInspectorLayout);
   }
 
   function removeListeners() {
@@ -508,10 +609,10 @@ export function createAnnotationInspector(root = document) {
     root.removeEventListener('keyup', scheduleSelection);
     root.removeEventListener('keydown', onInspectorKeydown);
     window.removeEventListener('hashchange', closeForNavigation);
-    window.removeEventListener('resize', scheduleToolbarPosition);
-    window.removeEventListener('scroll', scheduleToolbarPosition, true);
-    window.visualViewport?.removeEventListener('resize', scheduleToolbarPosition);
-    window.visualViewport?.removeEventListener('scroll', scheduleToolbarPosition);
+    window.removeEventListener('resize', scheduleInspectorLayout);
+    window.removeEventListener('scroll', scheduleInspectorLayout, true);
+    window.visualViewport?.removeEventListener('resize', scheduleInspectorLayout);
+    window.visualViewport?.removeEventListener('scroll', scheduleInspectorLayout);
     if (selectionFrame !== 0) cancelAnimationFrame(selectionFrame);
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
     selectionFrame = 0;
@@ -572,7 +673,7 @@ export function createAnnotationInspector(root = document) {
         break;
       case 'show-toolbar':
         toolbar.hidden = false;
-        scheduleToolbarPosition();
+        scheduleInspectorLayout();
         announce('Selection ready. Choose an annotation mark.');
         break;
       case 'clear-selection':
@@ -609,12 +710,16 @@ export function createAnnotationInspector(root = document) {
       case 'show-output':
         output.hidden = false;
         syncOutputDisclosure();
-        scheduleToolbarPosition();
+        scheduleInspectorLayout();
         break;
       case 'hide-output':
         output.hidden = true;
         break;
       case 'open-note':
+        if (isCompactVisualViewport()) {
+          outputExpanded = false;
+          syncOutputDisclosure();
+        }
         noteEditor.hidden = false;
         addNote.setAttribute('aria-expanded', 'true');
         break;
@@ -704,7 +809,7 @@ export function createAnnotationInspector(root = document) {
     for (const effect of result.effects) interpret(effect, context);
     model = result.model;
     updateState();
-    positionToolbar();
+    syncInspectorLayout();
   }
 
   function chooseMark(mark) {
@@ -903,10 +1008,6 @@ export function createAnnotationInspector(root = document) {
   outputToggle.addEventListener('click', () => {
     setOutputExpanded(!outputExpanded);
   }, listenerOptions);
-  mobileQuery.addEventListener('change', () => {
-    syncOutputDisclosure();
-    scheduleToolbarPosition();
-  }, listenerOptions);
 
   palette.addEventListener('cancel', (event) => {
     event.preventDefault();
@@ -947,6 +1048,7 @@ export function createAnnotationInspector(root = document) {
   syncOutputDisclosure();
   selectOutput('javascript', { announceChange: false });
   updateState();
+  syncInspectorLayout();
 
   return function destroyInspector() {
     if (disposed) return;

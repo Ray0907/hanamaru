@@ -47,6 +47,169 @@ async function installDeferredClipboard(page) {
   });
 }
 
+const INSPECTOR_FIXED_LAYERS = [
+  ['header', '[data-inspector-root] > header'],
+  ['status', '[data-inspector-status]'],
+  ['toolbar', '[data-inspector-toolbar]'],
+  ['output', '[data-inspector-output]'],
+  ['note', '[data-inspector-note-editor]'],
+  ['palette', '[data-inspector-palette][open]'],
+];
+
+function rectsIntersect(first, second) {
+  return first.left < second.right
+    && first.right > second.left
+    && first.top < second.bottom
+    && first.bottom > second.top;
+}
+
+async function readInspectorVisualGeometry(page) {
+  return page.evaluate((layerSelectors) => {
+    const viewport = visualViewport;
+    const toRect = (rect) => ({
+      bottom: rect.bottom,
+      height: rect.height,
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      width: rect.width,
+    });
+    const layers = layerSelectors.flatMap(([name, selector]) => {
+      const node = document.querySelector(selector);
+      if (node === null || node.hidden || getComputedStyle(node).display === 'none') return [];
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return [];
+      return [{
+        name,
+        position: getComputedStyle(node).position,
+        rect: toRect(rect),
+      }];
+    });
+    const selection = getSelection();
+    const range = selection !== null && selection.rangeCount === 1
+      ? toRect(selection.getRangeAt(0).getBoundingClientRect())
+      : null;
+    const inspector = document.querySelector('[data-inspector-root]');
+    return {
+      body: {
+        overflow: getComputedStyle(document.body).overflow,
+        position: getComputedStyle(document.body).position,
+      },
+      compact: inspector?.dataset.inspectorCompact,
+      layers,
+      range,
+      variables: {
+        height: inspector?.style.getPropertyValue('--inspector-vv-height'),
+        left: inspector?.style.getPropertyValue('--inspector-vv-left'),
+        scale: inspector?.style.getPropertyValue('--inspector-vv-scale'),
+        top: inspector?.style.getPropertyValue('--inspector-vv-top'),
+        width: inspector?.style.getPropertyValue('--inspector-vv-width'),
+      },
+      viewport: {
+        bottom: viewport.offsetTop + viewport.height,
+        height: viewport.height,
+        left: viewport.offsetLeft,
+        right: viewport.offsetLeft + viewport.width,
+        scale: viewport.scale,
+        top: viewport.offsetTop,
+        width: viewport.width,
+      },
+    };
+  }, INSPECTOR_FIXED_LAYERS);
+}
+
+function expectInspectorGeometryContained(geometry) {
+  expect(geometry.layers.length).toBeGreaterThan(0);
+  for (const layer of geometry.layers) {
+    expect(layer.position, `${layer.name} uses fixed visual-viewport geometry`).toBe('fixed');
+    expect(layer.rect.left, `${layer.name} left`).toBeGreaterThanOrEqual(
+      geometry.viewport.left - 1,
+    );
+    expect(layer.rect.right, `${layer.name} right`).toBeLessThanOrEqual(
+      geometry.viewport.right + 1,
+    );
+    expect(layer.rect.top, `${layer.name} top`).toBeGreaterThanOrEqual(
+      geometry.viewport.top - 1,
+    );
+    expect(layer.rect.bottom, `${layer.name} bottom`).toBeLessThanOrEqual(
+      geometry.viewport.bottom + 1,
+    );
+    if (geometry.range !== null) {
+      expect(
+        rectsIntersect(layer.rect, geometry.range),
+        `${layer.name} does not occlude the active Range`,
+      ).toBe(false);
+    }
+  }
+  for (let first = 0; first < geometry.layers.length; first += 1) {
+    for (let second = first + 1; second < geometry.layers.length; second += 1) {
+      expect(
+        rectsIntersect(geometry.layers[first].rect, geometry.layers[second].rect),
+        `${geometry.layers[first].name} does not overlap ${geometry.layers[second].name}`,
+      ).toBe(false);
+    }
+  }
+  expect(geometry.body.position).not.toBe('fixed');
+  expect(geometry.body.overflow).not.toBe('hidden');
+}
+
+async function expectInspectorControlsReachable(page, inspector) {
+  const controls = [
+    inspector.getByRole('button', { name: 'Exit Inspector' }),
+    inspector.locator('[data-inspector-mark][tabindex="0"]'),
+    inspector.getByRole('button', { name: /note/u }),
+    inspector.getByRole('button', { name: 'Apply annotation' }),
+    inspector.getByRole('button', { name: 'Cancel preview' }),
+    inspector.locator('[data-inspector-output-toggle]:visible'),
+  ];
+  for (const control of controls) {
+    if (await control.count() === 0 || !await control.isVisible()) continue;
+    await control.scrollIntoViewIfNeeded();
+    await control.focus();
+    await expect(control).toBeFocused();
+    const contained = await control.evaluate((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.left >= visualViewport.offsetLeft - 1
+        && rect.right <= visualViewport.offsetLeft + visualViewport.width + 1
+        && rect.top >= visualViewport.offsetTop - 1
+        && rect.bottom <= visualViewport.offsetTop + visualViewport.height + 1;
+    });
+    expect(contained, `reachable control ${await control.getAttribute('data-inspector-mark') ?? await control.textContent()}`)
+      .toBe(true);
+  }
+}
+
+async function selectFarthestInspectorCharacter(page) {
+  const selected = await page.evaluate(() => {
+    const scope = document.querySelector('#inspector-document');
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+    let best = null;
+    while (walker.nextNode()) {
+      const text = walker.currentNode.textContent;
+      for (let index = 0; index < text.length; index += 1) {
+        if (/\s/u.test(text[index])) continue;
+        const range = document.createRange();
+        range.setStart(walker.currentNode, index);
+        range.setEnd(walker.currentNode, index + 1);
+        const rect = range.getBoundingClientRect();
+        if (rect.width > 0 && (best === null || rect.right > best.right)) {
+          best = { index, node: walker.currentNode, right: rect.right, text: text[index] };
+        }
+      }
+    }
+    const range = document.createRange();
+    range.setStart(best.node, best.index);
+    range.setEnd(best.node, best.index + 1);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+    return { right: best.right, text: best.text };
+  });
+  expect(selected.text.trim()).not.toBe('');
+  return selected;
+}
+
 test('five-second path authors one real annotation and closes without disturbing the demo', async ({
   page,
 }) => {
@@ -753,6 +916,104 @@ test('desktop Inspector keeps the Range toolbar and fixed output rail inside the
   )).toBe(true);
 });
 
+test('600x900 Inspector uses a compact non-occluding visual viewport layout', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 600, height: 900 });
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  const geometry = await readInspectorVisualGeometry(page);
+
+  expect(geometry.viewport).toMatchObject({ height: 900, scale: 1, width: 600 });
+  expect(geometry.compact).toBe('true');
+  expectInspectorGeometryContained(geometry);
+  await expectInspectorControlsReachable(page, inspector);
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+  )).toBe(true);
+});
+
+test('far-right Range makes the desktop output rail choose the opposite side', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/');
+  const inspector = await openInspector(page);
+  const selected = await selectFarthestInspectorCharacter(page);
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'selected');
+  expect(selected.right).toBeGreaterThan(640);
+
+  await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
+  const output = inspector.locator('[data-inspector-output]');
+  await expect(output).toBeVisible();
+  await expect(output).toHaveAttribute('data-inspector-side', 'left');
+  const geometry = await readInspectorVisualGeometry(page);
+  expectInspectorGeometryContained(geometry);
+  expect(rectsIntersect(
+    geometry.layers.find(({ name }) => name === 'output').rect,
+    geometry.range,
+  )).toBe(false);
+});
+
+test('Chromium page scale 2 syncs Inspector layers to 1280 and 390 layout visual viewports', async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(30_000);
+  const cdp = await context.newCDPSession(page);
+  try {
+    for (const layout of [
+      { height: 900, width: 1280 },
+      { height: 844, width: 390 },
+    ]) {
+      await cdp.send('Emulation.resetPageScaleFactor');
+      await page.setViewportSize(layout);
+      await page.goto('/');
+      const inspector = await openInspector(page);
+      await selectInspectorWord(page);
+      await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
+      await expect(inspector.locator('[data-inspector-output]')).toBeVisible();
+      await cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 2 });
+      await expect.poll(() => page.evaluate(() => visualViewport.scale)).toBe(2);
+      await expect(inspector).toHaveAttribute('data-inspector-compact', 'true');
+      await expect.poll(() => inspector.evaluate((node) => (
+        Math.abs(
+          Number.parseFloat(node.style.getPropertyValue('--inspector-vv-width'))
+          - visualViewport.width
+        ) < 0.001
+      ))).toBe(true);
+      const geometry = await readInspectorVisualGeometry(page);
+
+      expect(geometry.compact).toBe('true');
+      expect(Number.parseFloat(geometry.variables.left)).toBeCloseTo(
+        geometry.viewport.left,
+        3,
+      );
+      expect(Number.parseFloat(geometry.variables.top)).toBeCloseTo(
+        geometry.viewport.top,
+        3,
+      );
+      expect(Number.parseFloat(geometry.variables.width)).toBeCloseTo(
+        geometry.viewport.width,
+        3,
+      );
+      expect(Number.parseFloat(geometry.variables.height)).toBeCloseTo(
+        geometry.viewport.height,
+        3,
+      );
+      expect(Number.parseFloat(geometry.variables.scale)).toBe(2);
+      expectInspectorGeometryContained(geometry);
+      await expectInspectorControlsReachable(page, inspector);
+      expect(await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      )).toBe(true);
+      await inspector.getByRole('button', { name: 'Exit Inspector' }).click();
+    }
+  } finally {
+    await cdp.send('Emulation.resetPageScaleFactor');
+  }
+});
+
 test('roving seven marks support arrows Home End and activation with one tab stop', async ({
   page,
 }) => {
@@ -1207,6 +1468,8 @@ test('axe finds no Inspector violations in idle selected editing and applied sta
     await expect(inspector).toHaveAttribute('data-inspector-state', state);
     const results = await new AxeBuilder({ page })
       .include('[data-inspector-root]')
+      .include('.hana-annotation:not([hidden])')
+      .include('.hana-note-layer')
       .analyze();
     expect(results.violations, `axe violations in ${state}`).toEqual([]);
   };
@@ -1216,8 +1479,25 @@ test('axe finds no Inspector violations in idle selected editing and applied sta
   await analyze('selected');
   await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
   await analyze('editing');
+  await inspector.getByRole('button', { name: 'Add note' }).click();
+  await inspector.getByRole('textbox', { name: 'Annotation note' })
+    .fill('Accessible Inspector note');
+  await page.keyboard.press('Escape');
+  const visibleNote = page.locator('.hana-note:not(.hana-is-hidden)', {
+    hasText: 'Accessible Inspector note',
+  });
+  await expect(visibleNote).toBeVisible();
   await inspector.getByRole('button', { name: 'Apply annotation' }).click();
   await analyze('applied');
+  await expect(visibleNote).toBeVisible();
+
+  const circle = inspector.getByRole('button', { name: 'Circle', exact: true });
+  await circle.focus();
+  await page.keyboard.press('Control+K');
+  await expect(page.getByRole('dialog', { name: 'Inspector commands' })).toBeVisible();
+  await analyze('applied');
+  await page.keyboard.press('Escape');
+  await expect(circle).toBeFocused();
 });
 
 test('mobile bottom sheet axe state remains valid when collapsed and expanded', async ({
@@ -1229,6 +1509,8 @@ test('mobile bottom sheet axe state remains valid when collapsed and expanded', 
   const analyze = async (state) => {
     const results = await new AxeBuilder({ page })
       .include('[data-inspector-root]')
+      .include('.hana-annotation:not([hidden])')
+      .include('.hana-note-layer')
       .analyze();
     expect(results.violations, `mobile sheet ${state}`).toEqual([]);
   };
