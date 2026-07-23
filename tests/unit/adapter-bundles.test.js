@@ -23,18 +23,29 @@ const entries = Object.freeze({
 const adapterContract = Object.freeze({
   react: Object.freeze({
     peer: 'react',
+    externalImports: Object.freeze(['react']),
     exports: Object.freeze(['useAnnotation']),
   }),
   vue: Object.freeze({
     peer: 'vue',
+    externalImports: Object.freeze(['vue']),
     exports: Object.freeze(['useAnnotation']),
   }),
   svelte: Object.freeze({
     peer: 'svelte',
+    externalImports: Object.freeze([]),
     exports: Object.freeze(['annotation']),
   }),
 });
+const frameworkPeerUniverse = Object.freeze([
+  'react',
+  'react-dom',
+  'vue',
+  'svelte',
+]);
+const domGlobalNames = Object.freeze(['document', 'window']);
 const adapterBudget = 4_096;
+let nextSsrImport = 0;
 
 function absoluteMetafilePath(file) {
   return path.normalize(path.isAbsolute(file) ? file : path.resolve(projectRoot, file));
@@ -89,6 +100,51 @@ function sourceInputs(outputs, closure) {
   return inputs;
 }
 
+function allSourceInputs(outputs, closure) {
+  const inputs = new Set();
+  for (const output of closure) {
+    for (const input of Object.keys(outputs.get(output).inputs)) {
+      inputs.add(absoluteMetafilePath(input));
+    }
+  }
+  return inputs;
+}
+
+function externalImports(outputs, closure) {
+  const imports = new Set();
+  for (const output of closure) {
+    for (const imported of outputs.get(output).imports) {
+      if (imported.external) imports.add(imported.path);
+    }
+  }
+  return imports;
+}
+
+function frameworkPeerRoot(imported) {
+  return frameworkPeerUniverse.find((peer) => (
+    imported === peer || imported.startsWith(`${peer}/`)
+  ));
+}
+
+function assertExternalContract(label, imports, expectedImports) {
+  const actual = [...imports].sort();
+  const expected = [...expectedImports].sort();
+  assert.deepEqual(actual, expected, `${label} external imports changed`);
+  assert.deepEqual(
+    [...new Set(actual.map(frameworkPeerRoot).filter(Boolean))].sort(),
+    [...new Set(expected.map(frameworkPeerRoot).filter(Boolean))].sort(),
+    `${label} framework peer external set changed`,
+  );
+}
+
+function insideDirectory(file, directory) {
+  const relative = path.relative(directory, file);
+  return relative !== ''
+    && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
 async function gzipClosure(closure) {
   const members = [];
   for (const file of [...closure].sort()) {
@@ -140,107 +196,251 @@ async function installPeerStub(temporaryRoot, peer) {
   await writeFile(path.join(packageDirectory, 'index.js'), source);
 }
 
-test('framework adapter bundles remain isolated, peer-external, server-safe, and within budget', async (t) => {
-  const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hanamaru-adapters-'));
-  t.after(() => rm(temporaryRoot, { recursive: true, force: true }));
-  const outputDirectory = path.join(temporaryRoot, 'out');
+function appendSourcePlugin(entryPoint, suffix, name) {
+  const expected = path.normalize(entryPoint);
+  return {
+    name,
+    setup(buildApi) {
+      buildApi.onLoad({ filter: /.*/ }, async (arguments_) => {
+        if (path.normalize(arguments_.path) !== expected) return undefined;
+        const source = await readFile(arguments_.path, 'utf8');
+        return { contents: `${source}\n${suffix}\n`, loader: 'js' };
+      });
+    },
+  };
+}
 
-  const result = await build({
-    absWorkingDir: projectRoot,
-    bundle: true,
-    entryNames: '[name]',
-    entryPoints: entries,
-    external: Object.values(adapterContract).map(({ peer }) => peer),
-    format: 'esm',
-    metafile: true,
-    minify: true,
-    outdir: outputDirectory,
-    platform: 'neutral',
-    splitting: true,
-    target: 'es2020',
-    write: true,
-  });
+function restoreGlobalDescriptor(name, descriptor) {
+  if (descriptor === undefined) Reflect.deleteProperty(globalThis, name);
+  else Reflect.defineProperty(globalThis, name, descriptor);
+}
 
-  const outputs = new Map(
-    Object.entries(result.metafile.outputs).map(([file, metadata]) => [
-      absoluteMetafilePath(file),
-      metadata,
+function readDomGlobalDescriptors() {
+  return new Map(
+    domGlobalNames.map((name) => [
+      name,
+      Reflect.getOwnPropertyDescriptor(globalThis, name),
     ]),
   );
-  const mainOutput = findEntryOutput(outputs, entries.main);
-  const mainClosure = outputClosure(outputs, mainOutput);
-  const mainInputs = sourceInputs(outputs, mainClosure);
+}
 
-  for (const peer of Object.values(adapterContract).map(({ peer }) => peer)) {
-    await installPeerStub(temporaryRoot, peer);
-  }
-
-  const report = {};
-  for (const [adapter, contract] of Object.entries(adapterContract)) {
-    const entryOutput = findEntryOutput(outputs, entries[adapter]);
-    const completeClosure = outputClosure(outputs, entryOutput);
+function assertDomGlobalsUnavailable(descriptors, label) {
+  for (const [name, descriptor] of descriptors) {
     assert.ok(
-      [...completeClosure].some((file) => mainClosure.has(file)),
-      `${adapter} does not share its core runtime with the main entry`,
+      descriptor === undefined
+        || (Object.hasOwn(descriptor, 'value') && descriptor.value === undefined),
+      `${label} ${name} must be absent or undefined`,
     );
-    const optionalClosure = new Set(
-      [...completeClosure].filter((file) => !mainClosure.has(file)),
-    );
-    const optionalInputs = sourceInputs(outputs, optionalClosure);
-    const duplicateInputs = [...optionalInputs].filter((input) => mainInputs.has(input));
-    assert.deepEqual(
-      duplicateInputs.map((file) => path.relative(projectRoot, file)),
-      [],
-      `${adapter} duplicates source already charged to the main runtime`,
-    );
+  }
+}
 
-    const bundledPeerInputs = [...optionalInputs].filter((input) => (
-      input.includes(`${path.sep}node_modules${path.sep}${contract.peer}${path.sep}`)
+function restoreDomGlobalDescriptors(descriptors) {
+  for (const [name, descriptor] of descriptors) {
+    restoreGlobalDescriptor(name, descriptor);
+  }
+}
+
+async function importServerSafe(adapter, entryOutput) {
+  const before = readDomGlobalDescriptors();
+  assertDomGlobalsUnavailable(before, `${adapter} SSR import before`);
+  let module;
+  try {
+    nextSsrImport += 1;
+    module = await import(
+      `${pathToFileURL(entryOutput).href}?adapter-isolation=${adapter}-${nextSsrImport}`
+    );
+    const after = readDomGlobalDescriptors();
+    assert.deepEqual(
+      [...after],
+      [...before],
+      `${adapter} SSR import changed DOM globals`,
+    );
+    assertDomGlobalsUnavailable(after, `${adapter} SSR import after`);
+  } finally {
+    restoreDomGlobalDescriptors(before);
+  }
+  return module;
+}
+
+async function verifyAdapterBuild({
+  plugins = [],
+  extraExternal = [],
+} = {}) {
+  const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hanamaru-adapters-'));
+  const outputDirectory = path.join(temporaryRoot, 'out');
+
+  try {
+    const result = await build({
+      absWorkingDir: projectRoot,
+      bundle: true,
+      entryNames: '[name]',
+      entryPoints: entries,
+      external: [
+        ...frameworkPeerUniverse,
+        ...extraExternal,
+      ],
+      format: 'esm',
+      metafile: true,
+      minify: true,
+      outdir: outputDirectory,
+      platform: 'neutral',
+      plugins,
+      splitting: true,
+      target: 'es2020',
+      write: true,
+    });
+
+    const outputs = new Map(
+      Object.entries(result.metafile.outputs).map(([file, metadata]) => [
+        absoluteMetafilePath(file),
+        metadata,
+      ]),
+    );
+    const mainOutput = findEntryOutput(outputs, entries.main);
+    const mainClosure = outputClosure(outputs, mainOutput);
+    const mainInputs = sourceInputs(outputs, mainClosure);
+    const mainAdapterInputs = [...allSourceInputs(outputs, mainClosure)].filter((input) => (
+      insideDirectory(input, path.join(sourceRoot, 'adapters'))
     ));
-    assert.deepEqual(bundledPeerInputs, [], `${adapter} bundled its ${contract.peer} peer`);
-
-    const externalImports = new Set();
-    for (const output of completeClosure) {
-      for (const imported of outputs.get(output).imports) {
-        if (imported.external) externalImports.add(imported.path);
-      }
-    }
-    if (adapter !== 'svelte') {
-      assert.equal(
-        externalImports.has(contract.peer),
-        true,
-        `${adapter} did not preserve its peer as an external import`,
-      );
-    }
-
-    const metrics = await gzipClosure(optionalClosure);
-    assert.ok(metrics.members.length > 0, `${adapter} optional closure is empty`);
-    assert.ok(
-      metrics.gzip <= adapterBudget,
-      `${adapter} optional closure is ${metrics.gzip} gzip bytes (cap ${adapterBudget})`,
-    );
-
-    assert.equal(typeof globalThis.document, 'undefined');
-    assert.equal(typeof globalThis.window, 'undefined');
-    const module = await import(
-      `${pathToFileURL(entryOutput).href}?adapter-isolation=${adapter}`
-    );
     assert.deepEqual(
-      Object.keys(module).sort(),
-      [...contract.exports],
-      `${adapter} adapter export surface changed`,
+      mainAdapterInputs.map((file) => path.relative(projectRoot, file)).sort(),
+      [],
+      'main closure contains adapter source',
     );
+    assertExternalContract('main', externalImports(outputs, mainClosure), []);
 
-    report[adapter] = {
-      gzip: metrics.gzip,
-      raw: metrics.raw,
-      members: metrics.members.map((member) => ({
-        file: path.relative(outputDirectory, member.file),
-        gzip: member.gzip,
-        raw: member.raw,
-      })),
-    };
+    const stubbedExternals = new Set([
+      ...frameworkPeerUniverse,
+      ...extraExternal,
+    ]);
+    for (const peer of stubbedExternals) {
+      await installPeerStub(temporaryRoot, peer);
+    }
+
+    const report = {};
+    for (const [adapter, contract] of Object.entries(adapterContract)) {
+      const entryOutput = findEntryOutput(outputs, entries[adapter]);
+      const completeClosure = outputClosure(outputs, entryOutput);
+      assert.ok(
+        [...completeClosure].some((file) => mainClosure.has(file)),
+        `${adapter} does not share its core runtime with the main entry`,
+      );
+      const optionalClosure = new Set(
+        [...completeClosure].filter((file) => !mainClosure.has(file)),
+      );
+      const optionalInputs = sourceInputs(outputs, optionalClosure);
+      const duplicateInputs = [...optionalInputs].filter((input) => mainInputs.has(input));
+      assert.deepEqual(
+        duplicateInputs.map((file) => path.relative(projectRoot, file)),
+        [],
+        `${adapter} duplicates source already charged to the main runtime`,
+      );
+
+      const bundledPeerInputs = [...optionalInputs].filter((input) => (
+        input.includes(`${path.sep}node_modules${path.sep}${contract.peer}${path.sep}`)
+      ));
+      assert.deepEqual(
+        bundledPeerInputs,
+        [],
+        `${adapter} bundled its ${contract.peer} peer`,
+      );
+
+      assertExternalContract(
+        adapter,
+        externalImports(outputs, completeClosure),
+        contract.externalImports,
+      );
+
+      const metrics = await gzipClosure(optionalClosure);
+      assert.ok(metrics.members.length > 0, `${adapter} optional closure is empty`);
+      assert.ok(
+        metrics.gzip <= adapterBudget,
+        `${adapter} optional closure is ${metrics.gzip} gzip bytes (cap ${adapterBudget})`,
+      );
+
+      const module = await importServerSafe(adapter, entryOutput);
+      assert.deepEqual(
+        Object.keys(module).sort(),
+        [...contract.exports],
+        `${adapter} adapter export surface changed`,
+      );
+
+      report[adapter] = {
+        gzip: metrics.gzip,
+        raw: metrics.raw,
+        members: metrics.members.map((member) => ({
+          file: path.relative(outputDirectory, member.file),
+          gzip: member.gzip,
+          raw: member.raw,
+        })),
+      };
+    }
+
+    return report;
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
   }
+}
 
+test('framework adapter bundles remain isolated, peer-external, server-safe, and within budget', async (t) => {
+  const report = await verifyAdapterBuild();
   t.diagnostic(`adapter closure bytes ${JSON.stringify(report)}`);
+});
+
+test('mutation: a side-effect adapter import cannot enter the main closure', async () => {
+  await assert.rejects(
+    verifyAdapterBuild({
+      plugins: [
+        appendSourcePlugin(
+          entries.main,
+          'import "./adapters/svelte.js";',
+          'mutate-main-adapter-import',
+        ),
+      ],
+    }),
+    /main closure contains adapter source/,
+  );
+});
+
+test('mutation: an adapter cannot add an undeclared framework external', async () => {
+  await assert.rejects(
+    verifyAdapterBuild({
+      extraExternal: ['react-dom'],
+      plugins: [
+        appendSourcePlugin(
+          entries.react,
+          'import "react-dom";',
+          'mutate-react-peer-import',
+        ),
+      ],
+    }),
+    /react external imports changed/,
+  );
+});
+
+test('mutation: an SSR adapter import cannot poison DOM globals', async () => {
+  const descriptors = new Map(
+    ['document', 'window'].map((name) => [
+      name,
+      Reflect.getOwnPropertyDescriptor(globalThis, name),
+    ]),
+  );
+  try {
+    await assert.rejects(
+      verifyAdapterBuild({
+        plugins: [
+          appendSourcePlugin(
+            entries.svelte,
+            'globalThis.document = {}; globalThis.window = {};',
+            'mutate-svelte-dom-globals',
+          ),
+        ],
+      }),
+      /svelte SSR import changed DOM globals/,
+    );
+  } finally {
+    for (const [name, descriptor] of descriptors) {
+      restoreGlobalDescriptor(name, descriptor);
+    }
+  }
 });
