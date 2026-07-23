@@ -515,7 +515,13 @@ export function createGroup(members, rawOptions = {}, env) {
       failTrigger(failures[0]);
       return;
     }
-    if (automaticCanRun(epoch)) installViewportIntersection(epoch);
+    if (automaticCanRun(epoch)) {
+      try {
+        installViewportIntersection(epoch);
+      } catch (error) {
+        failTrigger(error);
+      }
+    }
   }
 
   function installViewportTrigger(epoch) {

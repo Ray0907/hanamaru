@@ -1690,6 +1690,41 @@ test('viewport trigger rebinds to a replacement first owner and cleans stale obs
   assert.equal(environment.triggerLeases, 0);
 });
 
+test('viewport owner rebind contains a replacement observer installation failure', () => {
+  const environment = fakeEnvironment();
+  const controller = createGroup(definitions(), { trigger: 'viewport' }, environment.env);
+  const oldIntersection = environment.intersections[0];
+  const oldLayout = environment.layouts[0];
+  const cause = new Error('replacement observer install failed');
+  environment.failTriggerInstall(cause);
+  const replacement = environment.replaceOwner('first', 'replacement-first');
+
+  assert.doesNotThrow(() => oldLayout.write(oldLayout.read()));
+
+  assert.equal(controller.state, 'suspended');
+  assert.equal(
+    environment.calls.filter(([name]) => name === 'trigger:observe').length,
+    2,
+  );
+  assert.equal(oldIntersection.disconnects, 1);
+  assert.equal(environment.intersections.every(({ active }) => !active), true);
+  assert.equal(environment.layouts.every(({ active }) => !active), true);
+  assert.equal(environment.triggerLeases, 0);
+  const errors = environment.events.filter(({ type }) => type === 'hana:error');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].detail.index, undefined);
+  assert.equal(errors[0].detail.error.code, 'HANA_STATE_RUNTIME');
+  assert.equal(errors[0].detail.error.details.cause, cause);
+
+  const staleReboundLayout = environment.layouts[1];
+  oldIntersection.onEnter({ isIntersecting: true, intersectionRatio: 1 });
+  oldLayout.write(replacement);
+  staleReboundLayout.onError(new Error('stale layout failure'));
+  staleReboundLayout.write(replacement);
+  assert.equal(controller.state, 'suspended');
+  assert.equal(errors.length, 1);
+});
+
 test('viewport trigger destroy-before-entry disconnects and releases idempotently', async () => {
   const environment = fakeEnvironment();
   const controller = createGroup(definitions(), { trigger: 'viewport' }, environment.env);

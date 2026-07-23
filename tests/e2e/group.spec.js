@@ -159,3 +159,80 @@ test('viewport trigger follows a replacement first selector target before entry'
     visibleMarks: 2,
   });
 });
+
+test('viewport replacement observer install failure suspends once and cleans the old observer', async ({ page }) => {
+  await page.evaluate(async () => {
+    class FailingIntersectionObserver {
+      static attempts = 0;
+
+      static instances = [];
+
+      constructor() {
+        FailingIntersectionObserver.attempts += 1;
+        if (FailingIntersectionObserver.attempts === 2) {
+          throw new Error('replacement observer install failed');
+        }
+        this.active = false;
+        FailingIntersectionObserver.instances.push(this);
+      }
+
+      observe(target) {
+        this.target = target;
+        this.active = true;
+      }
+
+      unobserve(target) {
+        if (target === this.target) this.active = false;
+      }
+
+      disconnect() {
+        this.active = false;
+      }
+    }
+
+    window.IntersectionObserver = FailingIntersectionObserver;
+    const { group } = await import('/src/group.js');
+    const errors = [];
+    let controller;
+    document.body.addEventListener('hana:error', (event) => {
+      if (event.detail.controller !== controller) return;
+      errors.push({
+        code: event.detail.error.code,
+        index: event.detail.index,
+        cause: event.detail.error.details?.cause?.message,
+      });
+    });
+    controller = group([
+      { target: '#viewport-first', mark: 'underline' },
+      { target: '#group-second', mark: 'circle' },
+    ], { trigger: 'viewport', motion: 'never' });
+    const original = document.querySelector('#viewport-first');
+    const replacement = document.createElement('p');
+    replacement.id = 'viewport-first';
+    replacement.className = 'target';
+    replacement.textContent = 'Replacement viewport target';
+    original.remove();
+    document.querySelector('#replacement-slot').append(replacement);
+    window.groupController = controller;
+    window.groupErrors = errors;
+    window.groupIntersectionObserver = FailingIntersectionObserver;
+  });
+
+  await page.waitForFunction(() => window.groupController.state === 'suspended');
+  expect(await page.evaluate(() => ({
+    state: window.groupController.state,
+    errors: window.groupErrors,
+    attempts: window.groupIntersectionObserver.attempts,
+    activeObservers: window.groupIntersectionObserver.instances
+      .filter(({ active }) => active).length,
+  }))).toEqual({
+    state: 'suspended',
+    errors: [{
+      code: 'HANA_STATE_RUNTIME',
+      index: undefined,
+      cause: 'replacement observer install failed',
+    }],
+    attempts: 2,
+    activeObservers: 0,
+  });
+});
