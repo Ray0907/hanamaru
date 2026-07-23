@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { reduceInspector } from '../../demo/inspector-state.js';
+import {
+  createInspectorEffectContext,
+  reduceInspector,
+} from '../../demo/inspector-state.js';
 
 const CLOSED = Object.freeze({ state: 'closed', transient: null });
 
@@ -25,15 +28,15 @@ test('open enters idle and schedules the exact entry effects', () => {
 
 test('valid selection enters selected without mutating native Selection', () => {
   const range = { id: 'plain-range-token' };
-  const model = transition(
-    { state: 'idle', transient: null },
-    { type: 'valid-selection', range },
-    'selected',
-    ['clone-selection', 'show-toolbar'],
-  );
+  const previous = { state: 'idle', transient: null };
+  const event = { type: 'valid-selection', range };
+  const result = reduceInspector(previous, event);
 
-  assert.equal(model.transient, null);
-  assert.ok(!['clone-selection', 'show-toolbar'].includes('mutate-native-selection'));
+  assert.equal(result.model.state, 'selected');
+  assert.equal(result.model.transient, null);
+  assert.ok(!Object.hasOwn(result.model, 'range'));
+  assert.deepEqual(result.effects, ['clone-selection', 'show-toolbar']);
+  assert.ok(result.effects.every((effect) => !effect.includes('native-selection')));
 });
 
 test('invalid selection returns selected Inspector to idle', () => {
@@ -170,23 +173,26 @@ test('applied Edit reuses the same controller', () => {
 });
 
 test('applied new selection validates its clone before destroying the controller', () => {
-  const effects = [
+  const result = reduceInspector(
+    { state: 'applied', transient: null, mark: 'underline', options: {} },
+    { type: 'new-valid-selection', range: { id: 'next-range' } },
+  );
+
+  assert.equal(result.model.state, 'selected');
+  assert.deepEqual(result.effects, [
     'clone-selection',
     'validate-clone',
     'destroy-owned',
     'replace-range',
     'show-toolbar',
-  ];
-  const model = transition(
-    { state: 'applied', transient: null, mark: 'underline', options: {} },
-    { type: 'new-valid-selection', range: { id: 'next-range' } },
-    'selected',
-    effects,
+  ]);
+  assert.ok(
+    result.effects.indexOf('clone-selection') < result.effects.indexOf('destroy-owned'),
   );
-
-  assert.ok(effects.indexOf('clone-selection') < effects.indexOf('destroy-owned'));
-  assert.ok(effects.indexOf('validate-clone') < effects.indexOf('destroy-owned'));
-  assert.equal(model.mark, 'underline');
+  assert.ok(
+    result.effects.indexOf('validate-clone') < result.effects.indexOf('destroy-owned'),
+  );
+  assert.equal(result.model.mark, 'underline');
 });
 
 test('repeated self-transition editing inputs are reference-idempotent', () => {
@@ -262,4 +268,245 @@ test('a second transient cannot replace the topmost transient', () => {
 
   assert.equal(result.model, model);
   assert.deepEqual(result.effects, []);
+});
+
+const OPEN_STATES = ['idle', 'selected', 'editing', 'applied'];
+const UNDERLYING_EVENTS = [
+  { type: 'open', invoker: 'open-button' },
+  { type: 'valid-selection', range: { id: 'range' } },
+  { type: 'invalid-selection' },
+  { type: 'choose-mark', mark: 'circle' },
+  { type: 'change-mark', mark: 'circle' },
+  { type: 'valid-option', name: 'placement', value: 'right' },
+  { type: 'add-note', opener: 'add-note-button' },
+  { type: 'open-palette', opener: 'shortcut' },
+  { type: 'apply' },
+  { type: 'cancel' },
+  { type: 'edit' },
+  { type: 'new-valid-selection', range: { id: 'new-range' } },
+];
+
+for (const kind of ['note', 'palette']) {
+  for (const state of OPEN_STATES) {
+    for (const event of UNDERLYING_EVENTS) {
+      test(`${kind} transient gates ${event.type} while Inspector is ${state}`, () => {
+        const model = {
+          state,
+          transient: { kind, opener: `${kind}-button` },
+          mark: 'underline',
+          options: { placement: 'auto' },
+        };
+        const result = reduceInspector(model, event);
+
+        assert.equal(result.model, model);
+        assert.deepEqual(result.effects, []);
+      });
+    }
+  }
+}
+
+for (const kind of ['note', 'palette']) {
+  for (const state of OPEN_STATES) {
+    for (const type of ['close', 'navigation']) {
+      test(`${type} tears down ${state} Inspector with a ${kind} transient`, () => {
+        const previous = {
+          state,
+          transient: { kind, opener: `${kind}-button` },
+          mark: 'underline',
+          options: {},
+        };
+        const result = reduceInspector(previous, { type });
+
+        assert.equal(result.model.state, 'closed');
+        assert.equal(result.model.transient, null);
+        assert.deepEqual(result.effects, [
+          'destroy-owned',
+          'close-layers',
+          'remove-listeners',
+          'unmount',
+          'focus-connected-invoker',
+        ]);
+      });
+    }
+  }
+}
+
+test('effect context keeps open invoker payload beside the exact reducer result', () => {
+  const previous = CLOSED;
+  const event = { type: 'open', invoker: 'open-button' };
+  const result = reduceInspector(previous, event);
+  const context = createInspectorEffectContext(previous, event, result);
+
+  assert.equal(context.previous, previous);
+  assert.equal(context.event, event);
+  assert.equal(context.event.invoker, 'open-button');
+  assert.equal(context.next, result.model);
+  assert.deepEqual(context.effects, [
+    'capture-invoker',
+    'mount',
+    'attach-listeners',
+    'focus-exit',
+  ]);
+  assert.ok(Object.isFrozen(context));
+  assert.ok(Object.isFrozen(context.effects));
+});
+
+test('effect context keeps the valid Range token in the event, not the next model', () => {
+  const previous = { state: 'idle', transient: null };
+  const range = { id: 'range-token' };
+  const event = { type: 'valid-selection', range };
+  const result = reduceInspector(previous, event);
+  const context = createInspectorEffectContext(previous, event, result);
+
+  assert.equal(context.event.range, range);
+  assert.ok(!Object.hasOwn(context.next, 'range'));
+  assert.deepEqual(context.effects, ['clone-selection', 'show-toolbar']);
+});
+
+test('effect context keeps the transient opener in previous during Escape', () => {
+  const previous = {
+    state: 'editing',
+    transient: { kind: 'note', opener: 'add-note-button' },
+    mark: 'underline',
+    options: {},
+  };
+  const event = { type: 'escape' };
+  const result = reduceInspector(previous, event);
+  const context = createInspectorEffectContext(previous, event, result);
+
+  assert.equal(context.previous.transient.opener, 'add-note-button');
+  assert.equal(context.next.transient, null);
+  assert.deepEqual(context.effects, ['close-transient', 'focus-transient-opener']);
+});
+
+test('effect context rejects malformed reducer inputs and results', () => {
+  const previous = { state: 'idle', transient: null };
+  const event = { type: 'escape' };
+  const result = reduceInspector(previous, event);
+
+  for (const args of [
+    [null, event, result],
+    [previous, null, result],
+    [previous, event, null],
+    [previous, event, { model: null, effects: [] }],
+    [previous, event, { model: previous, effects: 'mount' }],
+    [previous, event, { model: previous, effects: [''] }],
+  ]) {
+    assert.throws(() => createInspectorEffectContext(...args), TypeError);
+  }
+});
+
+function assertRejected(model, event) {
+  const result = reduceInspector(model, event);
+  assert.equal(result.model, model);
+  assert.deepEqual(result.effects, []);
+}
+
+test('open and transient events reject missing or malformed string tokens', () => {
+  for (const token of [undefined, null, '', '   ', 0, {}, Symbol('token')]) {
+    assertRejected(CLOSED, { type: 'open', invoker: token });
+    assertRejected(
+      { state: 'selected', transient: null },
+      { type: 'open-palette', opener: token },
+    );
+    assertRejected(
+      { state: 'editing', transient: null },
+      { type: 'add-note', opener: token },
+    );
+  }
+});
+
+test('selection transitions reject missing or null Range tokens', () => {
+  for (const range of [undefined, null]) {
+    assertRejected(
+      { state: 'idle', transient: null },
+      { type: 'valid-selection', range },
+    );
+    assertRejected(
+      { state: 'applied', transient: null },
+      { type: 'new-valid-selection', range },
+    );
+  }
+});
+
+test('mark transitions accept plugin names but reject malformed mark values', () => {
+  const selected = { state: 'selected', transient: null, mark: null, options: {} };
+  const plugin = reduceInspector(selected, {
+    type: 'choose-mark',
+    mark: 'hanamaru-flower',
+  });
+  assert.equal(plugin.model.mark, 'hanamaru-flower');
+
+  for (const mark of [undefined, null, '', '  ', 0, {}, Symbol('mark')]) {
+    assertRejected(selected, { type: 'choose-mark', mark });
+    assertRejected(
+      { state: 'editing', transient: null, mark: 'underline', options: {} },
+      { type: 'change-mark', mark },
+    );
+  }
+});
+
+test('advanced options accept only their exact public domains', () => {
+  const model = {
+    state: 'editing',
+    transient: null,
+    mark: 'underline',
+    options: {},
+  };
+  const accepted = [
+    ['placement', 'auto'],
+    ['placement', 'top'],
+    ['placement', 'right'],
+    ['placement', 'bottom'],
+    ['placement', 'left'],
+    ['accessible', true],
+    ['accessible', false],
+    ['duration', 0],
+    ['duration', 650],
+    ['motion', 'system'],
+    ['motion', 'never'],
+    ['seed', ''],
+    ['seed', 'stable-seed'],
+  ];
+
+  for (const [name, value] of accepted) {
+    const result = reduceInspector(model, { type: 'valid-option', name, value });
+    assert.deepEqual(result.effects, ['update-preview', 'refresh-output']);
+    assert.equal(result.model.options[name], value);
+  }
+
+  const rejected = [
+    ['placement', 'start'],
+    ['accessible', 1],
+    ['duration', -1],
+    ['duration', 1.5],
+    ['duration', '650'],
+    ['motion', 'always'],
+    ['seed', 1],
+    ['unknown', 'value'],
+    [undefined, 'value'],
+  ];
+  for (const [name, value] of rejected) {
+    assertRejected(model, { type: 'valid-option', name, value });
+  }
+});
+
+test('hostile event payload access is contained as an idempotent rejection', () => {
+  const hostile = new Proxy({}, {
+    get() {
+      throw new Error('payload trap');
+    },
+  });
+
+  assert.doesNotThrow(() => assertRejected(CLOSED, hostile));
+  assert.doesNotThrow(() => assertRejected(
+    { state: 'editing', transient: null, mark: 'underline', options: {} },
+    {
+      type: 'valid-option',
+      name: 'duration',
+      get value() {
+        throw new Error('value getter');
+      },
+    },
+  ));
 });
