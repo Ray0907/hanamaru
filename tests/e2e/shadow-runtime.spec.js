@@ -917,6 +917,13 @@ test('standalone scan rejects empty open and retained closed ShadowRoots upfront
     const { createShadowScope } = await import('/src/shadow.js');
     const { runtimeState } = await import('/src/runtime-state.js');
     const state = window.__shadowRuntime;
+    for (const root of [state.openRoot, state.closedRoot]) {
+      Object.defineProperty(root, 'ownerDocument', {
+        configurable: true,
+        value: null,
+      });
+    }
+    const documentScan = scan(document);
     const failures = [];
     for (const root of [state.openRoot, state.closedRoot]) {
       try {
@@ -932,6 +939,8 @@ test('standalone scan rejects empty open and retained closed ShadowRoots upfront
       runtimeState.shadows.has(state.openRoot),
       runtimeState.shadows.has(state.closedRoot),
     ];
+    delete state.closedRoot.ownerDocument;
+    delete state.openRoot.ownerDocument;
     const openScope = createShadowScope(state.openRoot);
     const closedScope = createShadowScope(state.closedRoot);
     const scoped = [openScope.scan(), closedScope.scan()].map((value) => ({
@@ -941,6 +950,10 @@ test('standalone scan rejects empty open and retained closed ShadowRoots upfront
     closedScope.destroy();
     openScope.destroy();
     return {
+      documentScan: {
+        annotations: documentScan.annotations.length,
+        errors: documentScan.errors.length,
+      },
       failures,
       resourcesAfterStandalone,
       scoped,
@@ -949,6 +962,7 @@ test('standalone scan rejects empty open and retained closed ShadowRoots upfront
   });
 
   expect(result).toEqual({
+    documentScan: { annotations: 0, errors: 0 },
     failures: [
       {
         name: 'HanamaruTargetError',

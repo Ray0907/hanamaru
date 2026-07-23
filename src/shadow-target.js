@@ -45,6 +45,17 @@ function initialOwnerDocument(value) {
   return propertyReader(NodeConstructor.prototype, 'ownerDocument')(value);
 }
 
+export function isNativeShadowRoot(root) {
+  try {
+    const document = initialOwnerDocument(root);
+    const ShadowRootConstructor = document?.defaultView?.ShadowRoot;
+    return typeof ShadowRootConstructor === 'function'
+      && root instanceof ShadowRootConstructor;
+  } catch {
+    return false;
+  }
+}
+
 function shadowContext(root) {
   try {
     const document = initialOwnerDocument(root);

@@ -4,6 +4,7 @@ import {
   HanamaruError,
   HanamaruTargetError,
 } from './errors.js';
+import { isNativeShadowRoot } from './shadow-target.js';
 
 const ATTRIBUTES = [
   ['hanaNote', 'note'],
@@ -66,9 +67,7 @@ export function scanDeclarative(root, createAnnotation = annotate) {
 }
 
 export function scan(root = document) {
-  const ShadowRootConstructor = root?.ownerDocument?.defaultView?.ShadowRoot;
-  if (typeof ShadowRootConstructor === 'function'
-    && root instanceof ShadowRootConstructor) {
+  if (isNativeShadowRoot(root)) {
     throw new HanamaruTargetError(
       'HANA_TARGET_SHADOW_UNSCOPED',
       'Scanning a ShadowRoot requires an explicit Shadow scope',
