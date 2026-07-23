@@ -32,17 +32,17 @@ The complete signature is:
 function group(
   members: readonly GroupMemberDefinition[],
   options?: GroupOptions,
-  context?: { root?: Document | ShadowRoot },
+  context?: { root?: Document },
 ): GroupController
 ```
 
-Group members are definition objects with `target` plus annotation options except `trigger` and `motion`, which Group owns. Group options are `trigger: manual | load | viewport` and `motion: system | never`. `context.root` defaults to the current document and is an execution environment, not serialized configuration. A viewport Group uses the first member as its trigger target, starts once, and remains visible after exit, matching a viewport annotation.
+Group members are definition objects with `target` plus annotation options except `trigger` and `motion`, which Group owns. Group options are `trigger: manual | load | viewport` and `motion: system | never`. `context.root` defaults to the current document, may be an iframe Document, and is an execution environment rather than serialized configuration. ShadowRoot Groups are created only through `createShadowScope(root).group()`, which supplies the package-private scoped environment and owns teardown. A viewport Group uses the first member as its trigger target, starts once, and remains visible after exit, matching a viewport annotation.
 
 Group accepts neither existing controllers, Stories, nor nested Groups. It owns every annotation it creates.
 
 ## Construction and State
 
-Construction validates every member, resolves every initial target, and creates no visible or partial output on failure. Empty groups are invalid. Every resolved member must have the same resource root and that root must equal `context.root`; mixed documents, Document-plus-ShadowRoot groups, and two different ShadowRoots throw `HanamaruTargetError` before acquiring a lease.
+Construction validates every member, resolves every initial target, and creates no visible or partial output on failure. Empty groups are invalid. Every standalone member must belong to `context.root`. A Shadow-rooted target passed to standalone `group()` throws `HANA_TARGET_SHADOW_UNSCOPED`. A scoped Group requires every member to belong to that exact scope root. Mixed documents, Document-plus-ShadowRoot groups, and two different ShadowRoots throw `HanamaruTargetError` before acquiring a lease.
 
 States are `idle`, `showing`, `visible`, `hidden`, `suspended`, and `destroyed`. The controller exposes:
 
@@ -83,12 +83,23 @@ If any member fails during a Group run:
 4. Group enters `suspended`;
 5. `finished` rejects with `HanamaruStateError` code `HANA_STATE_GROUP_MEMBER`, whose details include `index` and the typed member error.
 
-`refresh()` attempts every member and reports the lowest-index failure after containing all member errors. `destroy()` tears members down in reverse order and reaches `destroyed` even when cleanup throws; the first normalized teardown error is reported through `hana:error`.
+`refresh()` attempts every member and reports the lowest-index failure after containing all member errors. On any refresh failure, it hides every member, sets `requestedVisible` from the pre-refresh state, enters `suspended`, and dispatches one aggregate `hana:error`. If a Group run is pending, that existing `finished` rejects with the aggregate error. If the prior run was already settled, `finished` identity and settlement remain unchanged; refresh never creates a Promise. A later `show()` may preflight and recover.
+
+`destroy()` tears members down in reverse order and reaches `destroyed` even when cleanup throws; the first normalized teardown error is reported through `hana:error`.
 
 ## Events
 
-Group dispatches existing `hana:start`, `hana:complete`, `hana:cancel`, and `hana:error` events from the first member owner. Detail includes `{ controller, state }` and adds `index` only for member failure. Group does not dispatch `hana:step`; parallel members have no logical step order.
+Group dispatches existing events from the first member owner with these exact payloads:
+
+| Event | Detail |
+| --- | --- |
+| `hana:start` | `{ controller, state }` |
+| `hana:complete` | `{ controller, state }` |
+| `hana:cancel` | `{ controller, reason }` |
+| `hana:error` | `{ controller, error, index? }` |
+
+`index` is present for a member-attributable failure and absent for aggregate teardown or trigger failures. Group does not dispatch `hana:step` or `hana:pause`; parallel members have no logical step order.
 
 ## Verification
 
-Unit and browser tests cover the complete transition table, preflight atomicity, parallel start, scheduler ordering, `finished` identity and aborts, suspended recovery, replay-preflight preservation, automatic-trigger teardown, viewport trigger, reduced motion, a failure at every member index, synchronous reentrant listeners, target replacement before replay, cleanup errors, no unhandled rejections, serialization metadata, and the absence of nested ownership. Root tests cover one Document, one ShadowRoot through `context.root`, and every mixed-root rejection. Type tests enforce member, option, and context boundaries.
+Unit and browser tests cover the complete transition table, preflight atomicity, parallel start, scheduler ordering, `finished` identity and aborts, refresh failure with pending and settled runs, suspended recovery, replay-preflight preservation, automatic-trigger teardown, viewport trigger, reduced motion, every exact event payload, a failure at every member index, synchronous reentrant listeners, target replacement before replay, cleanup errors, no unhandled rejections, serialization metadata, and the absence of nested ownership. Root tests cover a top Document, iframe Document, one ShadowRoot through `scope.group()`, standalone Shadow rejection, and every mixed-root rejection. Type tests enforce member, option, and context boundaries.

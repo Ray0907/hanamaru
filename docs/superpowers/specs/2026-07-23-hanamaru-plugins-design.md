@@ -52,7 +52,25 @@ interface MarkHelpers {
 }
 ```
 
-`jitter()` returns a deterministic finite offset in the inclusive range `[-amplitude, amplitude]`; `amplitude` must be finite and non-negative. Its seed is the factory input seed and its semantic label is caller-supplied. `line()` requires finite points, defaults to label `line` and wobble `1`, and returns one open `M…Q…` path whose control-point offset is derived from `jitter()`. `closedPath()` requires at least three finite points, defaults to label `closed` and wobble `1`, jitters each indexed point independently, connects them in input order, and closes with `Z`. For identical seed, coordinates, labels, and options, helper output is byte-identical. Helpers never mutate input.
+The helper algorithms are normative:
+
+- `format(value)` rounds to two decimal places, normalizes negative zero to zero, and removes trailing decimal zeros.
+- `jitter(label, amplitude)` computes unsigned 32-bit FNV-1a over the UTF-16 code units of `` `${seed}:${label}` `` with offset basis `2166136261` and prime `16777619`, maps `hash / 0xffffffff` linearly to `[-amplitude, amplitude]`, rounds to two decimals with `format` semantics, and returns a number. `amplitude` must be finite and non-negative.
+- `line(start, end, { label = 'line', wobble = 1 } = {})` uses the following exact calculation and formats every path coordinate:
+
+```text
+sx = start.x + jitter(label + ':start:x', wobble)
+sy = start.y + jitter(label + ':start:y', wobble)
+ex = end.x   + jitter(label + ':end:x', wobble)
+ey = end.y   + jitter(label + ':end:y', wobble)
+cx = ((sx + ex) / 2) + jitter(label + ':control:x', wobble)
+cy = ((sy + ey) / 2) + jitter(label + ':control:y', wobble)
+output = "M {sx} {sy} Q {cx} {cy} {ex} {ey}"
+```
+
+- `closedPath(points, { label = 'closed', wobble = 1 } = {})` requires at least three points. Point `i` becomes `{ x + jitter(label + ':' + i + ':x', wobble), y + jitter(label + ':' + i + ':y', wobble) }`. It returns exactly `M {p0} L {p1} … L {pn} Z`, formatting every coordinate.
+
+Every point and option number must be finite. For identical seed, coordinates, labels, and options, helper output is byte-identical. Helpers never mutate input.
 
 The factory returns `{ paths }`, where `paths` is a non-empty array of SVG path-data strings. Path count is capped at 32 and each string at 16,384 code units. Empty, non-finite, or syntactically invalid path data is rejected before DOM write.
 

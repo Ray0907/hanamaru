@@ -5,7 +5,7 @@
 
 ## Objective
 
-Support explicit ShadowRoot annotation without implicit deep traversal, cross-root ARIA references, or document-global overlay leakage.
+Support explicit ShadowRoot annotation without implicit deep traversal, cross-root ARIA references, duplicate runtime singletons, or ambiguous resource ownership. Visual output intentionally uses root-scoped document portals to preserve viewport geometry and escape host clipping.
 
 ## Public API
 
@@ -24,11 +24,23 @@ const scanned = scope.scan()
 const walkthrough = scope.story(steps)
 const simultaneous = scope.group(members)
 const selected = scope.annotateSelection(options)
+const restored = scope.restore(definition)
 
 scope.destroy()
 ```
 
-`createShadowScope(root, options?)` accepts a native connected `ShadowRoot`. It returns scoped `annotate`, `annotateSelection`, `scan`, `story`, `group`, and `destroy`. These facade methods call the same shared Selection and Group implementations with the exact scope root and register every returned controller for scope-owned teardown.
+`createShadowScope(root, options?)` accepts a native connected `ShadowRoot`. It returns scoped `annotate`, `annotateSelection`, `scan`, `story`, `group`, `restore`, `resolveSerializedTarget`, and `destroy`. These facade methods call the same shared implementations with the exact scope root and register every returned controller for scope-owned teardown.
+
+The root-support matrix is normative:
+
+| Operation | Standalone Document or iframe Document | Standalone ShadowRoot | Active Shadow scope |
+| --- | --- | --- | --- |
+| Annotation, Story, scan | supported | rejected as `HANA_TARGET_SHADOW_UNSCOPED` | scoped facade |
+| Selection | supported | rejected as `HANA_TARGET_SHADOW_UNSCOPED` | `scope.annotateSelection()` |
+| Group | supported with Document context | rejected as `HANA_TARGET_SHADOW_UNSCOPED` | `scope.group()` |
+| restore/serialized target resolution | supported with Document context | rejected as `HANA_TARGET_SHADOW_UNSCOPED` | scoped facade |
+
+Direct Element and Range targets inside a ShadowRoot follow the same scope-only rule even though their owner Document is discoverable.
 
 ## Root and Target Rules
 
@@ -38,13 +50,13 @@ Hanamaru never enumerates or automatically enters open roots. Closed roots work 
 
 ## Visual and Accessible Output
 
-Visual SVG marks, connectors, and visible notes use the owner Document's shared top-level overlay. This is required because `getBoundingClientRect()` and visual-viewport placement are viewport coordinates, while a fixed descendant of a transformed, contained, or clipped shadow host may use a different containing block or be clipped by host overflow.
+Visual SVG marks, connectors, and visible notes use a root-scoped portal appended to the owner Document outside the shadow host. One portal exists per active ShadowRoot and contains its SVG and note layers. This is required because `getBoundingClientRect()` and visual-viewport placement are viewport coordinates, while a fixed descendant of a transformed, contained, or clipped shadow host may use a different containing block or be clipped by host overflow.
 
 For `accessible: true`, the visible document-overlay note remains `aria-hidden="true"` and an owned visually-hidden description mirror with the same text is created inside the target ShadowRoot. The owner element's `aria-describedby` references only that in-root mirror. Generated IDs are unique per Document and root. Teardown removes the visual note, mirror, and only the token Hanamaru owns.
 
-The scoped renderer reads the canonical theme custom properties from the target owner or shadow host during its scheduler read and writes those resolved values onto the visual overlay group and note. Shadow styling therefore remains caller-controlled without relying on inheritance across the root boundary.
+The scoped renderer reads the canonical theme custom properties from the target owner or shadow host during its scheduler read. Mark, note, stroke, padding, note gap, font, duration, and color values are written onto the annotation group and note. `--hana-z-index` is reconciled at the root portal: the current computed value of the scope root's host sets that portal's concrete `z-index`, so different ShadowRoots may use different stacking values without changing the Document runtime portal or each other.
 
-Document-overlay output prevents transformed-containing-block drift and host clipping while keeping accessible relationships inside the root. Geometry remains in visual-viewport coordinates and needs no host-local conversion.
+Document-portal output prevents transformed-containing-block drift and host clipping while keeping accessible relationships inside the root. Geometry remains in visual-viewport coordinates and needs no host-local conversion.
 
 ## Styles
 
@@ -65,12 +77,20 @@ type ShadowStyles =
 
 Hanamaru never removes an author sheet or style. It removes its owned sheet or adoption after the final scope and controller release. In `preinstalled` mode, scope creation verifies the required marker custom property on a temporary mirror probe before registration. A missing marker or stylesheet install failure rolls back registration and owned nodes before throwing `HanamaruStateError`.
 
+The first live scope for a root records one normalized style configuration. Later scopes on the same root are compatible only when:
+
+- both use `auto` with the same nonce value;
+- both use `sheet` with the same `CSSStyleSheet` object; or
+- both use `preinstalled`.
+
+Any mismatch throws `HanamaruConfigError` before incrementing the reference count or creating controllers. In `sheet` mode, the registry records whether Hanamaru added the sheet to `adoptedStyleSheets`; final release removes only an adoption it added. A sheet already adopted by the author remains adopted. In `auto`, the one owned sheet/style is shared until the final compatible scope releases it.
+
 ## Resource Isolation
 
-Document resource management gains an explicit target-root channel. Window, visual-viewport listeners, visual overlay, note reservations, IDs, and frame scheduler remain shared at the Document level. MutationObserver target scopes, selector resolution, mirror ownership, and controller ownership are isolated per ShadowRoot. The single shared ESM singleton owns both maps. Events remain bubbling and composed, so host applications may observe them outside the root.
+Document resource management gains an explicit target-root channel. Window and visual-viewport listeners, note reservations, IDs, and frame scheduler remain shared at the Document level. Each ShadowRoot owns one root-scoped Document portal, MutationObserver target scope, selector resolver, mirror registry, style record, and controller ownership set. The single shared ESM singleton owns both Document and ShadowRoot maps. Events remain bubbling and composed, so host applications may observe them outside the root.
 
 `scope.destroy()` destroys all Annotation, Story, Group, and Selection controllers created by that scope in reverse order, releases its mirror-style reference, and rejects further creation. Controllers are not transferable between scopes. Standalone helpers never borrow an active scope implicitly.
 
 ## Verification
 
-Tests cover open and retained closed roots, scoped selector and locator resolution, declarative scan, Group and Selection facade ownership, nested-root rejection, Range targets, accessible in-root mirrors, visual-note `aria-hidden`, theme-value copying, transformed hosts, `contain`, clipped host overflow, style auto/sheet/preinstalled modes, nonce propagation, strict-CSP preinstallation, two scopes sharing one root, two roots in one document, teardown order, stylesheet failure rollback, mutation/reflow observation, visual viewport placement, reduced motion, and one shared Document visual overlay without ShadowRoot-owned visual layers. Firefox and WebKit smoke include one open-root annotation.
+Tests cover every row in the root-support matrix, open and retained closed roots, scoped selector and locator resolution, declarative scan, Group, Selection, and restore facade ownership, nested-root rejection, Range targets, accessible in-root mirrors, visual-note `aria-hidden`, theme-value copying, per-root z-index, transformed hosts, `contain`, clipped host overflow, style auto/sheet/preinstalled modes, same and conflicting style configurations, author-preinstalled sheet retention, nonce propagation, strict-CSP preinstallation, two scopes sharing one root, two roots in one document with distinct portals, teardown order, stylesheet failure rollback, mutation/reflow observation, visual viewport placement, and reduced motion. Firefox and WebKit smoke include one open-root annotation.

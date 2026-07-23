@@ -94,9 +94,10 @@ The demo's authorable article has one stable scope selector, `#inspector-documen
 
 1. reads the selected text and normalized occurrence inside that scope;
 2. constructs a locator `{ within: '#inspector-document', text, occurrence }`;
-3. resolves it through the public runtime;
-4. compares its cloned boundaries with the active selected Range;
-5. enables JSON and the `restore()` recipe only when the boundaries match exactly.
+3. calls public `resolveSerializedTarget()` on the serialized locator target;
+4. compares the returned cloned Range boundaries with the Inspector's active cloned Range;
+5. when they match, atomically calls the owned annotation's public `update({ target: locator })`;
+6. calls public `serialize(controller)` and enables JSON plus the `restore()` recipe only after that update succeeds.
 
 If the selection cannot round-trip exactly—for example, a partial boundary that normalization cannot reproduce—the JSON tab remains present but shows an accessible “Unavailable for this Range” explanation. It never emits an ephemeral target key or claims persistence. HTML follows the same honesty rule and is available only for an existing element target.
 

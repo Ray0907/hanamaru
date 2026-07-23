@@ -10,7 +10,11 @@ Provide a versioned, JSON-safe representation for Annotation, Story, and Group c
 ## Public API
 
 ```js
-import { serialize, restore } from 'hanamaru-annotations/serialize'
+import {
+  resolveSerializedTarget,
+  restore,
+  serialize,
+} from 'hanamaru-annotations/serialize'
 
 const definition = serialize(controller, {
   keyForTarget(target, context) {
@@ -27,6 +31,8 @@ const restored = restore(definition, {
 ```
 
 `serialize()` returns a fresh plain object. `restore()` accepts a parsed object, not a JSON string, validates it synchronously, and returns the controller kind encoded by the definition.
+
+`resolveSerializedTarget(target, context?)` validates and resolves one serialized target without creating a controller. It returns a connected Element or a cloned native Range. This is the public primitive used by Inspector to prove locator boundary equality.
 
 ## Schema
 
@@ -140,7 +146,11 @@ Story and Group metadata is assembled from the successfully constructed member A
 
 ## Restore Rules
 
-`restore(definition, { root = document, resolveTarget } = {})`:
+Standalone `restore(definition, { root = document, resolveTarget } = {})` and `resolveSerializedTarget(target, { root = document, resolveTarget } = {})` accept a native Document root, including an iframe Document. They reject a ShadowRoot with `HANA_TARGET_SHADOW_UNSCOPED`.
+
+`createShadowScope(root)` exposes `scope.restore(definition, { resolveTarget } = {})` and `scope.resolveSerializedTarget(target, { resolveTarget } = {})`. Those methods use the exact active root-scoped environment, install or verify mirror styling through scope creation, and register a restored controller for scope-owned teardown.
+
+Both restore paths:
 
 - validates plain own-data objects and rejects accessors, unexpected prototypes, unknown keys, and cyclic input;
 - rejects unknown schema versions and kinds;
@@ -159,4 +169,4 @@ Malformed data, unsupported versions, unknown keys, non-finite numbers, and a mi
 
 ## Verification
 
-Tests cover canonical byte stability, all target forms, callback failures, update metadata, generated seeds, nested Story and Group definitions, schema pollution attempts, accessors, cyclic objects, unknown versions, atomic aggregate restore, cross-root restoration, destroyed controllers, and round trips that reproduce final SVG paths and lifecycle behavior. Type tests prove the definition union narrows by `kind` and target `type`.
+Tests cover canonical byte stability, every exact wire shape and key order, all target forms, callback failures, update metadata, generated seeds, nested Story and Group definitions, schema pollution attempts, accessors, cyclic objects, unknown versions, atomic aggregate restore, standalone Document and iframe restoration, standalone Shadow rejection, scoped open/closed Shadow restoration and teardown, `resolveSerializedTarget()` boundary clones, destroyed controllers, and round trips that reproduce final SVG paths and lifecycle behavior. Type tests prove the definition union narrows by `kind` and target `type`.

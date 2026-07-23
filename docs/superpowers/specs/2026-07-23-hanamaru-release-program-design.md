@@ -66,6 +66,8 @@ dist/
   hanamaru.iife.js
   hanamaru.css
   index.d.ts
+  _chunks/
+    *.js
   selection/index.js
   selection/index.d.ts
   serialize/index.js
@@ -76,6 +78,7 @@ dist/
   plugins/index.d.ts
   shadow/index.js
   shadow/index.d.ts
+  shadow/hanamaru-shadow.css
   react/index.js
   react/index.d.ts
   vue/index.js
@@ -93,6 +96,54 @@ React, Vue, and Svelte are optional peer dependencies:
 - Svelte: `>=5.0.0 <6`, verified against `5.56.7`.
 
 They are development dependencies only for adapter verification. Runtime production dependencies remain absent.
+
+The normative export map shape is:
+
+```json
+{
+  ".": {
+    "types": "./dist/index.d.ts",
+    "import": "./dist/hanamaru.esm.js"
+  },
+  "./style.css": "./dist/hanamaru.css",
+  "./selection": {
+    "types": "./dist/selection/index.d.ts",
+    "import": "./dist/selection/index.js"
+  },
+  "./serialize": {
+    "types": "./dist/serialize/index.d.ts",
+    "import": "./dist/serialize/index.js"
+  },
+  "./group": {
+    "types": "./dist/group/index.d.ts",
+    "import": "./dist/group/index.js"
+  },
+  "./plugins": {
+    "types": "./dist/plugins/index.d.ts",
+    "import": "./dist/plugins/index.js"
+  },
+  "./shadow": {
+    "types": "./dist/shadow/index.d.ts",
+    "import": "./dist/shadow/index.js"
+  },
+  "./shadow/style.css": "./dist/shadow/hanamaru-shadow.css",
+  "./react": {
+    "types": "./dist/react/index.d.ts",
+    "import": "./dist/react/index.js"
+  },
+  "./vue": {
+    "types": "./dist/vue/index.d.ts",
+    "import": "./dist/vue/index.js"
+  },
+  "./svelte": {
+    "types": "./dist/svelte/index.d.ts",
+    "import": "./dist/svelte/index.js"
+  },
+  "./package.json": "./package.json"
+}
+```
+
+`dist/_chunks/*.js` is package-internal, included by the tarball allowlist through `dist`, and intentionally absent from public exports. Tarball and import tests prove every emitted relative chunk import resolves after packing.
 
 ## Size Budgets
 
@@ -157,7 +208,7 @@ Because Inspector acceptance includes visual layout and motion, Computer Use is 
 
 .github/workflows/ci.yml runs the fixed verification on pushes and pull requests with `permissions: { contents: read }`. On `main`, it runs `npm pack --json`, records the tarball SHA-512, and uploads the exact `.tgz` plus digest as a workflow artifact.
 
-`.github/workflows/release.yml` runs on `v*` tags with `permissions: { contents: read }`, checks out the tagged commit, repeats the full verification, creates the exact pack tarball once, records its SHA-512, and uploads both as a workflow artifact. It has no `id-token: write`, `packages: write`, npm token, persisted npm configuration, or release-write permission. Future trusted publishing may be configured as a separate reviewed change.
+`.github/workflows/release.yml` runs on `v*` tags with `permissions: { contents: read }`. Its first script reads the triggering ref, parses the text after `v` with the development-only `semver` package's `valid()` function, and requires the original tag to equal `v${package.json.version}` byte-for-byte. A malformed, normalized-but-not-identical, or mismatched tag fails before install or build. The workflow then checks out the tagged commit, repeats the full verification, creates the exact pack tarball once, records its SHA-512, and uploads both as a workflow artifact. It has no `id-token: write`, `packages: write`, npm token, persisted npm configuration, or release-write permission. Future trusted publishing may be configured as a separate reviewed change.
 
 The first public release is executed in this order:
 
