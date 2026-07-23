@@ -217,24 +217,31 @@ export class FrameQueue {
 
 const resourcesByDocument = runtimeState.documents;
 const resourceInternals = new WeakMap();
+const INSTALLING_PORTAL = Symbol('installing default Document portal');
 
 function createOverlay(doc) {
-  const overlay = doc.createElement('div');
-  overlay.className = 'hana-overlay';
-  overlay.setAttribute('data-hana-overlay', '');
+  let overlay;
+  try {
+    overlay = doc.createElement('div');
+    overlay.className = 'hana-overlay';
+    overlay.setAttribute('data-hana-overlay', '');
 
-  const svgLayer = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svgLayer.setAttribute('class', 'hana-svg-layer');
-  svgLayer.setAttribute('data-hana-svg-layer', '');
-  svgLayer.setAttribute('aria-hidden', 'true');
+    const svgLayer = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svgLayer.setAttribute('class', 'hana-svg-layer');
+    svgLayer.setAttribute('data-hana-svg-layer', '');
+    svgLayer.setAttribute('aria-hidden', 'true');
 
-  const noteLayer = doc.createElement('div');
-  noteLayer.className = 'hana-note-layer';
-  noteLayer.setAttribute('data-hana-note-layer', '');
+    const noteLayer = doc.createElement('div');
+    noteLayer.className = 'hana-note-layer';
+    noteLayer.setAttribute('data-hana-note-layer', '');
 
-  overlay.append(svgLayer, noteLayer);
-  (doc.body ?? doc.documentElement).append(overlay);
-  return { noteLayer, overlay, svgLayer };
+    overlay.append(svgLayer, noteLayer);
+    (doc.body ?? doc.documentElement).append(overlay);
+    return { noteLayer, overlay, svgLayer };
+  } catch (error) {
+    try { overlay?.remove(); } catch {}
+    throw error;
+  }
 }
 
 class SharedDocumentResources {
@@ -844,20 +851,42 @@ class SharedDocumentResources {
     if (internal === undefined) {
       throw new TypeError('Unknown Document resources');
     }
+    if (internal.defaultPortal === INSTALLING_PORTAL) {
+      throw new TypeError('Default Document resource portal is being installed');
+    }
     if (internal.defaultPortal !== null) {
       return;
     }
-    const portal = createOverlay(shared.#doc);
-    internal.defaultPortal = portal;
-    internal.ignoredPortals.add(portal.overlay);
-    shared.overlay = portal.overlay;
-    shared.svgLayer = portal.svgLayer;
-    shared.noteLayer = portal.noteLayer;
+    internal.defaultPortal = INSTALLING_PORTAL;
+    let portal;
+    try {
+      portal = createOverlay(shared.#doc);
+      if (resourceInternals.get(shared) !== internal
+        || internal.defaultPortal !== INSTALLING_PORTAL) {
+        throw new TypeError('Document resources changed while the portal was being installed');
+      }
+      internal.defaultPortal = portal;
+      internal.ignoredPortals.add(portal.overlay);
+      shared.overlay = portal.overlay;
+      shared.svgLayer = portal.svgLayer;
+      shared.noteLayer = portal.noteLayer;
+    } catch (error) {
+      if (resourceInternals.get(shared) === internal
+        && internal.defaultPortal === INSTALLING_PORTAL) {
+        internal.defaultPortal = null;
+      }
+      try { portal?.overlay.remove(); } catch {}
+      throw error;
+    }
   }
 
   static detachDefaultPortal(shared) {
     const internal = resourceInternals.get(shared);
     const portal = internal?.defaultPortal;
+    if (portal === INSTALLING_PORTAL) {
+      internal.defaultPortal = null;
+      return;
+    }
     if (portal === null || portal === undefined) {
       return;
     }
@@ -945,21 +974,32 @@ function assertDocument(doc) {
 function documentEntry(doc, requireDefaultPortal = false) {
   assertDocument(doc);
   let entry = resourcesByDocument.get(doc);
-  if (entry === undefined) {
-    let initialPortal = null;
-    if (requireDefaultPortal) initialPortal = createOverlay(doc);
-    entry = {
-      refs: 0,
-      documentRefs: 0,
-      shared: null,
-    };
-    try {
-      entry.shared = new SharedDocumentResources(doc, initialPortal);
-    } catch (error) {
-      try { initialPortal?.overlay.remove(); } catch {}
-      throw error;
+  if (entry !== undefined) {
+    if (entry.phase !== 'active') {
+      throw new TypeError('Document resources are being installed');
     }
-    resourcesByDocument.set(doc, entry);
+    return entry;
+  }
+
+  entry = {
+    refs: 0,
+    documentRefs: 0,
+    phase: 'installing',
+    shared: null,
+  };
+  resourcesByDocument.set(doc, entry);
+  let initialPortal = null;
+  try {
+    if (requireDefaultPortal) initialPortal = createOverlay(doc);
+    entry.shared = new SharedDocumentResources(doc, initialPortal);
+    entry.phase = 'active';
+  } catch (error) {
+    entry.phase = 'failed';
+    try { initialPortal?.overlay.remove(); } catch {}
+    if (resourcesByDocument.get(doc) === entry) {
+      resourcesByDocument.delete(doc);
+    }
+    throw error;
   }
   return entry;
 }
@@ -972,7 +1012,9 @@ function releaseEntry(doc, entry) {
   try {
     SharedDocumentResources.destroy(entry.shared);
   } finally {
-    resourcesByDocument.delete(doc);
+    if (resourcesByDocument.get(doc) === entry) {
+      resourcesByDocument.delete(doc);
+    }
   }
 }
 
@@ -986,7 +1028,9 @@ export function acquireDocumentResources(doc) {
         try {
           SharedDocumentResources.destroy(entry.shared);
         } finally {
-          resourcesByDocument.delete(doc);
+          if (resourcesByDocument.get(doc) === entry) {
+            resourcesByDocument.delete(doc);
+          }
         }
       }
       throw error;

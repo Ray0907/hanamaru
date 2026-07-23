@@ -24,6 +24,7 @@ const SHADOW_CSS = `.hana-shadow-mirror {
 `;
 const INTERNAL_CONFIG_ERRORS = new WeakSet();
 const INSTALL_DETAILS = new WeakMap();
+const STYLE_LEASE_BRANDS = new WeakMap();
 
 function configError(message, details) {
   const error = new HanamaruConfigError(
@@ -401,12 +402,18 @@ function validateInstall(raw, mode) {
 
 function leaseFor(root, record) {
   let released = false;
-  return Object.freeze({
+  const brand = {
+    active: true,
+    record,
+    root,
+  };
+  const lease = Object.freeze({
     config: record.config,
     owned: record.install.owned,
     release() {
       if (released) return;
       released = true;
+      brand.active = false;
       record.count -= 1;
       if (record.count !== 0) return;
       record.phase = 'releasing';
@@ -424,6 +431,23 @@ function leaseFor(root, record) {
       }
     },
   });
+  STYLE_LEASE_BRANDS.set(lease, brand);
+  return lease;
+}
+
+export function assertShadowStyleLease(root, lease) {
+  const brand = STYLE_LEASE_BRANDS.get(lease);
+  if (brand === undefined
+    || !brand.active
+    || brand.root !== root
+    || brand.record.phase !== 'active'
+    || runtimeState.shadows.get(root)?.styles !== brand.record) {
+    throw stateError(
+      new TypeError('Shadow style lease is not live for this root'),
+      { operation: 'validate lease' },
+    );
+  }
+  return brand.record.config;
 }
 
 export function acquireShadowStyles(root, value = undefined, adapter = undefined) {

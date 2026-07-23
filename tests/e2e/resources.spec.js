@@ -112,6 +112,109 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/tests/fixtures/resources.html');
 });
 
+for (const startingState of ['initial', 'lazy']) {
+  for (const catchesReentrant of [true, false]) {
+    const handling = catchesReentrant ? 'caught' : 'uncaught';
+    test(`${startingState} default portal reservation contains a ${handling} synchronous reentrant acquire`, async ({ page }) => {
+      await installInstrumentation(page);
+
+      const result = await page.evaluate(async ({ lazy, catches }) => {
+        const {
+          acquireDocumentResources,
+          acquireDocumentScheduler,
+        } = await import('/src/scheduler.js');
+        const { runtimeState } = await import('/src/runtime-state.js');
+        const state = window.__resources;
+        const schedulerLease = lazy ? acquireDocumentScheduler(document) : null;
+        const nativeCreateElement = document.createElement;
+        let armed = true;
+        let reentrantLease = null;
+        let reentrantError = null;
+        document.createElement = function createElement(...args) {
+          const element = Reflect.apply(nativeCreateElement, this, args);
+          if (armed && args[0] === 'div') {
+            armed = false;
+            if (catches) {
+              try {
+                reentrantLease = acquireDocumentResources(document);
+              } catch (error) {
+                reentrantError = error.message;
+              }
+            } else {
+              reentrantLease = acquireDocumentResources(document);
+            }
+          }
+          return element;
+        };
+
+        let outerLease = null;
+        let outerError = null;
+        try {
+          outerLease = acquireDocumentResources(document);
+        } catch (error) {
+          outerError = error.message;
+        } finally {
+          document.createElement = nativeCreateElement;
+        }
+        const during = {
+          outer: outerLease !== null,
+          outerError,
+          reentrant: reentrantLease !== null,
+          reentrantError,
+          overlays: document.querySelectorAll('[data-hana-overlay]').length,
+        };
+
+        try { outerLease?.release(); } catch {}
+        try { reentrantLease?.release(); } catch {}
+        try { schedulerLease?.release(); } catch {}
+        const resizeAdds = state.listeners.filter(
+          ({ target, type }) => target === 'window' && type === 'resize',
+        ).length;
+        const resizeRemovals = state.removals.filter(
+          ({ target, type }) => target === 'window' && type === 'resize',
+        ).length;
+        return {
+          during,
+          after: {
+            activeResizeListeners: resizeAdds - resizeRemovals,
+            mutationObserversDisconnected: state.mutationObservers.every(
+              ({ disconnected }) => disconnected,
+            ),
+            overlays: document.querySelectorAll('[data-hana-overlay]').length,
+            resizeObserversDisconnected: state.resizeObservers.every(
+              ({ disconnected }) => disconnected,
+            ),
+            stateReserved: runtimeState.documents.has(document),
+          },
+        };
+      }, { lazy: startingState === 'lazy', catches: catchesReentrant });
+
+      expect(result.during).toEqual(catchesReentrant
+        ? {
+          outer: true,
+          outerError: null,
+          reentrant: false,
+          reentrantError: expect.stringContaining('being installed'),
+          overlays: 1,
+        }
+        : {
+          outer: false,
+          outerError: expect.stringContaining('being installed'),
+          reentrant: false,
+          reentrantError: null,
+          overlays: 0,
+        });
+      expect(result.after).toEqual({
+        activeResizeListeners: 0,
+        mutationObserversDisconnected: true,
+        overlays: 0,
+        resizeObserversDisconnected: true,
+        stateReserved: false,
+      });
+    });
+  }
+}
+
 test('shared ownership keeps one document root and observer set until the final lease releases', async ({ page }) => {
   await installInstrumentation(page);
 

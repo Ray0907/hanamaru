@@ -129,10 +129,12 @@ test.afterEach(async ({ page }) => {
 test('resource portals are one per open or retained closed root and escape clipped hosts', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
     const state = window.__shadowRuntime;
-    const styles = { release() {} };
-    const open = acquireShadowResources(state.openRoot, styles);
-    const closed = acquireShadowResources(state.closedRoot, styles);
+    const openStyles = acquireShadowStyles(state.openRoot);
+    const closedStyles = acquireShadowStyles(state.closedRoot);
+    const open = acquireShadowResources(state.openRoot, openStyles);
+    const closed = acquireShadowResources(state.closedRoot, closedStyles);
     const openPortal = open.environment.portal;
     const closedPortal = closed.environment.portal;
     const before = {
@@ -159,6 +161,8 @@ test('resource portals are one per open or retained closed root and escape clipp
       closedConnected: closedPortal.isConnected,
     };
     closed.release();
+    openStyles.release();
+    closedStyles.release();
     return {
       before,
       afterOpen,
@@ -183,10 +187,12 @@ test('resource portals are one per open or retained closed root and escape clipp
 test('resource roots share one Document scheduler and listeners but own exact observers', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
     const state = window.__shadowRuntime;
-    const styles = { release() {} };
-    const first = acquireShadowResources(state.openRoot, styles);
-    const second = acquireShadowResources(state.otherRoot, styles);
+    const firstStyles = acquireShadowStyles(state.openRoot);
+    const secondStyles = acquireShadowStyles(state.otherRoot);
+    const first = acquireShadowResources(state.openRoot, firstStyles);
+    const second = acquireShadowResources(state.otherRoot, secondStyles);
     first.environment.shared.registerController('shared-scheduler-proof');
     let sharedScheduler = false;
     try {
@@ -218,6 +224,8 @@ test('resource roots share one Document scheduler and listeners but own exact ob
     };
     first.release();
     second.release();
+    firstStyles.release();
+    secondStyles.release();
     return {
       before,
       rootDisconnected: rootObservers.every(({ disconnected }) => disconnected),
@@ -253,9 +261,11 @@ test('resource roots share one Document scheduler and listeners but own exact ob
 test('resource root and standalone Document leases share one core with independent portals', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
     const { acquireDocumentResources } = await import('/src/scheduler.js');
     const state = window.__shadowRuntime;
-    const shadow = acquireShadowResources(state.openRoot, { release() {} });
+    const styles = acquireShadowStyles(state.openRoot);
+    const shadow = acquireShadowResources(state.openRoot, styles);
     const standalone = acquireDocumentResources(document);
     const before = {
       sameCore: shadow.environment.documentShared === standalone.shared,
@@ -275,6 +285,7 @@ test('resource root and standalone Document leases share one core with independe
       ).length,
     };
     shadow.release();
+    styles.release();
     return {
       before,
       afterDocument,
@@ -345,10 +356,12 @@ test('resource and style slots release independently and delete root state only 
 test('resource observers route mutation work only inside their exact ShadowRoot', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
     const state = window.__shadowRuntime;
-    const styles = { release() {} };
-    const first = acquireShadowResources(state.openRoot, styles);
-    const second = acquireShadowResources(state.otherRoot, styles);
+    const firstStyles = acquireShadowStyles(state.openRoot);
+    const secondStyles = acquireShadowStyles(state.otherRoot);
+    const first = acquireShadowResources(state.openRoot, firstStyles);
+    const second = acquireShadowResources(state.otherRoot, secondStyles);
     const firstTarget = state.openRoot.querySelector('#open-target');
     const secondTarget = state.otherRoot.querySelector('#other-target');
     const writes = { first: 0, second: 0 };
@@ -406,6 +419,8 @@ test('resource observers route mutation work only inside their exact ShadowRoot'
     second.environment.shared.releaseController('root-mutation-second');
     first.release();
     second.release();
+    firstStyles.release();
+    secondStyles.release();
     return { afterFirst, afterSecond };
   });
 
@@ -418,10 +433,12 @@ test('resource observers route mutation work only inside their exact ShadowRoot'
 test('resource mirror registries stay in-root and cleanup only their owned aria tokens', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
     const state = window.__shadowRuntime;
-    const styles = { release() {} };
-    const first = acquireShadowResources(state.openRoot, styles);
-    const second = acquireShadowResources(state.otherRoot, styles);
+    const firstStyles = acquireShadowStyles(state.openRoot);
+    const secondStyles = acquireShadowStyles(state.otherRoot);
+    const first = acquireShadowResources(state.openRoot, firstStyles);
+    const second = acquireShadowResources(state.otherRoot, secondStyles);
     const firstOwner = state.openRoot.querySelector('#open-target');
     const secondOwner = state.otherRoot.querySelector('#other-target');
     firstOwner.setAttribute('aria-describedby', 'author-owned');
@@ -444,6 +461,8 @@ test('resource mirror registries stay in-root and cleanup only their owned aria 
       secondToken: secondOwner.getAttribute('aria-describedby'),
     };
     second.release();
+    firstStyles.release();
+    secondStyles.release();
     return {
       before,
       afterFirst,
@@ -471,11 +490,105 @@ test('resource mirror registries stay in-root and cleanup only their owned aria 
   expect(result.secondToken).toBe(null);
 });
 
+test('resource mirror ownership and aria/event writes ignore masked Element instance methods', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
+    const state = window.__shadowRuntime;
+    const styles = acquireShadowStyles(state.openRoot);
+    const resources = acquireShadowResources(state.openRoot, styles);
+    const owner = state.openRoot.querySelector('#open-target');
+    const foreign = state.otherRoot.querySelector('#other-target');
+    const masked = (element, root) => {
+      Object.defineProperties(element, {
+        isConnected: { configurable: true, value: false },
+        getRootNode: { configurable: true, value: () => root },
+        getAttribute: {
+          configurable: true,
+          value: () => { throw new Error('masked getAttribute invoked'); },
+        },
+        setAttribute: {
+          configurable: true,
+          value: () => { throw new Error('masked setAttribute invoked'); },
+        },
+        removeAttribute: {
+          configurable: true,
+          value: () => { throw new Error('masked removeAttribute invoked'); },
+        },
+        dispatchEvent: {
+          configurable: true,
+          value: () => { throw new Error('masked dispatchEvent invoked'); },
+        },
+      });
+    };
+    masked(owner, state.otherRoot);
+    masked(foreign, state.openRoot);
+
+    let observed = null;
+    document.addEventListener('hana:masked-proof', (event) => {
+      observed = {
+        composed: event.composed,
+        detail: event.detail,
+        targetIsHost: event.target === state.openHost,
+      };
+    }, { once: true });
+    const mirror = resources.environment.createMirror(owner, 'Native ownership');
+    const token = Element.prototype.getAttribute.call(owner, 'aria-describedby');
+    resources.environment.createEvent('hana:masked-proof', { native: true }, owner);
+    let foreignError;
+    try {
+      resources.environment.createMirror(foreign, 'Must reject');
+    } catch (error) {
+      foreignError = {
+        name: error.name,
+        message: error.message,
+      };
+    }
+    const foreignToken = Element.prototype.getAttribute.call(
+      foreign,
+      'aria-describedby',
+    );
+    resources.environment.removeMirror(mirror);
+    const after = Element.prototype.getAttribute.call(owner, 'aria-describedby');
+    const mirrors = state.openRoot.querySelectorAll(
+      '[data-hana-shadow-mirror]',
+    ).length;
+    resources.release();
+    styles.release();
+    return {
+      token,
+      observed,
+      foreignError,
+      foreignToken,
+      after,
+      mirrors,
+    };
+  });
+
+  expect(result).toEqual({
+    token: expect.stringMatching(/^hana-shadow-/),
+    observed: {
+      composed: true,
+      detail: { native: true },
+      targetIsHost: true,
+    },
+    foreignError: {
+      name: 'TypeError',
+      message: 'mirror owner must belong to the exact ShadowRoot',
+    },
+    foreignToken: null,
+    after: null,
+    mirrors: 0,
+  });
+});
+
 test('resource composed event dispatch crosses the Shadow boundary with exact detail', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
     const state = window.__shadowRuntime;
-    const lease = acquireShadowResources(state.openRoot, { release() {} });
+    const styles = acquireShadowStyles(state.openRoot);
+    const lease = acquireShadowResources(state.openRoot, styles);
     const owner = state.openRoot.querySelector('#open-target');
     let observed = null;
     document.addEventListener('hana:resource-proof', (event) => {
@@ -492,6 +605,7 @@ test('resource composed event dispatch crosses the Shadow boundary with exact de
       owner,
     );
     lease.release();
+    styles.release();
     return { dispatched, observed };
   });
 
@@ -509,9 +623,12 @@ test('resource composed event dispatch crosses the Shadow boundary with exact de
 test('resource iframe root uses its owner Document portal and isolated scheduler', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
     const state = window.__shadowRuntime;
-    const main = acquireShadowResources(state.openRoot, { release() {} });
-    const frame = acquireShadowResources(state.frameRoot, { release() {} });
+    const mainStyles = acquireShadowStyles(state.openRoot);
+    const frameStyles = acquireShadowStyles(state.frameRoot);
+    const main = acquireShadowResources(state.openRoot, mainStyles);
+    const frame = acquireShadowResources(state.frameRoot, frameStyles);
     const frameDocument = state.frameRoot.ownerDocument;
     const before = {
       separateScheduler: main.environment.documentShared
@@ -524,6 +641,8 @@ test('resource iframe root uses its owner Document portal and isolated scheduler
     };
     main.release();
     frame.release();
+    mainStyles.release();
+    frameStyles.release();
     return {
       before,
       mainAfter: document.querySelectorAll('[data-hana-shadow-overlay]').length,
@@ -548,12 +667,14 @@ test('resource iframe root uses its owner Document portal and isolated scheduler
 test('resource observer install failure disconnects partial work and rolls back every slot and portal', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
     const { runtimeState } = await import('/src/runtime-state.js');
     const state = window.__shadowRuntime;
     state.failShadowObserve();
+    const styles = acquireShadowStyles(state.openRoot);
     let error;
     try {
-      acquireShadowResources(state.openRoot, { release() {} });
+      acquireShadowResources(state.openRoot, styles);
     } catch (cause) {
       error = {
         name: cause.name,
@@ -561,6 +682,7 @@ test('resource observer install failure disconnects partial work and rolls back 
         message: cause.details?.cause?.message,
       };
     }
+    styles.release();
     return {
       error,
       portals: document.querySelectorAll('[data-hana-shadow-overlay]').length,

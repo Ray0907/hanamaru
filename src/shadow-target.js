@@ -98,6 +98,40 @@ export function assertShadowRoot(root) {
   return root;
 }
 
+export function shadowDomIntrinsics(root) {
+  const context = shadowContext(root);
+  const elementPrototype = context.realm.Element.prototype;
+  const eventTargetPrototype = context.realm.EventTarget.prototype;
+  const getAttribute = methodReader(elementPrototype, 'getAttribute');
+  const setAttribute = methodReader(elementPrototype, 'setAttribute');
+  const removeAttribute = methodReader(elementPrototype, 'removeAttribute');
+  const dispatchEvent = methodReader(eventTargetPrototype, 'dispatchEvent');
+  return Object.freeze({
+    document: context.document,
+    assertElement(element) {
+      assertExactElement(element, context);
+      return element;
+    },
+    getAttribute(element, name) {
+      return getAttribute(element, name);
+    },
+    setAttribute(element, name, value) {
+      return setAttribute(element, name, value);
+    },
+    removeAttribute(element, name) {
+      return removeAttribute(element, name);
+    },
+    dispatch(element, type, detail) {
+      assertExactElement(element, context);
+      return dispatchEvent(element, new context.realm.CustomEvent(type, {
+        detail,
+        bubbles: true,
+        composed: true,
+      }));
+    },
+  });
+}
+
 function assertExactElement(element, context) {
   const { document, realm, readers, root } = context;
   try {

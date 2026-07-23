@@ -11,6 +11,7 @@ import {
 } from '../../src/runtime-state.js';
 import {
   acquireShadowStyles,
+  assertShadowStyleLease,
   normalizeShadowStyles,
 } from '../../src/shadow-styles.js';
 
@@ -253,6 +254,47 @@ test('compatible auto leases share one exact fallback installation until final r
   second.release();
   assert.equal(adapter.installs[0].releases, 1);
   assert.equal(runtimeState.shadows.has(root), false);
+});
+
+test('style lease brand is live, exact-root, per-lease, and rejects duck identities', () => {
+  const root = {};
+  const otherRoot = {};
+  const adapter = fakeAdapter();
+  const first = acquireShadowStyles(root, undefined, adapter);
+  const second = acquireShadowStyles(root, undefined, adapter);
+
+  assert.deepEqual(assertShadowStyleLease(root, first), {
+    mode: 'auto',
+    nonce: undefined,
+  });
+  assert.strictEqual(assertShadowStyleLease(root, first), first.config);
+  assert.throws(
+    () => assertShadowStyleLease(otherRoot, first),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_STYLES',
+  );
+  assert.throws(
+    () => assertShadowStyleLease(root, {
+      config: first.config,
+      release() {},
+    }),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_STYLES',
+  );
+
+  first.release();
+  assert.throws(
+    () => assertShadowStyleLease(root, first),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_STYLES',
+  );
+  assert.strictEqual(assertShadowStyleLease(root, second), second.config);
+  second.release();
+  assert.throws(
+    () => assertShadowStyleLease(root, second),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_STYLES',
+  );
 });
 
 test('empty nonce is propagated exactly and compatible only with the same empty nonce', () => {

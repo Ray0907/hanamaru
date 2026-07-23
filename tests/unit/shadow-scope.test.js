@@ -4,10 +4,10 @@ import test from 'node:test';
 import { HanamaruStateError } from '../../src/errors.js';
 import {
   getShadowRootState,
-  releaseShadowRootSlot,
   runtimeState,
 } from '../../src/runtime-state.js';
 import { acquireShadowResources } from '../../src/shadow-resources.js';
+import { acquireShadowStyles } from '../../src/shadow-styles.js';
 
 function owner(root, describedBy = null) {
   return {
@@ -132,21 +132,25 @@ function resourceHarness(options = {}) {
     createMirror(root, id, text) {
       calls.push(['createMirror', root, id, text]);
       if (options.mirrorError !== undefined) throw options.mirrorError;
-      return {
+      const mirror = {
         id,
         kind: 'mirror',
         removed: false,
         root,
         text,
       };
+      options.onCreateMirror?.(mirror);
+      return mirror;
     },
     updateMirror(mirror, text) {
       calls.push(['updateMirror', mirror, text]);
       mirror.text = text;
+      options.onUpdateMirror?.(mirror);
     },
     removeMirror(mirror) {
       calls.push(['removeMirror', mirror]);
       mirror.removed = true;
+      options.onRemoveMirror?.(mirror);
       if (options.mirrorReleaseError !== undefined) {
         throw options.mirrorReleaseError;
       }
@@ -157,6 +161,7 @@ function resourceHarness(options = {}) {
     setDescription(ownerElement, value) {
       calls.push(['setDescription', ownerElement, value]);
       ownerElement.attributes.set('aria-describedby', value);
+      options.onSetDescription?.(ownerElement, value);
       if (options.setDescriptionError !== undefined) {
         throw options.setDescriptionError;
       }
@@ -194,8 +199,28 @@ function styleLease(name = 'styles') {
   return Object.freeze({ name, release() {} });
 }
 
+function authenticStyleLease(rootValue) {
+  return acquireShadowStyles(rootValue, undefined, {
+    installAuto() {
+      return { owned: true, release() {} };
+    },
+    adoptSheet() {
+      throw new Error('unused');
+    },
+    verifyMarker() {},
+    rollback(_root, install) {
+      install?.release();
+    },
+  });
+}
+
 function acquire(rootValue, styles, harness) {
-  return acquireShadowResources(rootValue, styles, harness.adapter);
+  const authentic = authenticStyleLease(rootValue);
+  try {
+    return acquireShadowResources(rootValue, authentic, harness.adapter);
+  } finally {
+    authentic.release();
+  }
 }
 
 function expectStateError(action, cause, operation) {
@@ -246,6 +271,47 @@ test('resource lease creates one portal, observer, mirror registry, and environm
   second.release();
   assert.equal(first.environment.portal.removed, true);
   assert.equal(runtimeState.shadows.has(shadow), false);
+});
+
+test('resource acquisition requires a live authentic same-root style lease for every ref', () => {
+  const document = {};
+  const shadow = root(document, 'style-brand');
+  const other = root(document, 'other-style-brand');
+  const harness = resourceHarness();
+  const firstStyle = authenticStyleLease(shadow);
+  const secondStyle = authenticStyleLease(shadow);
+  const foreignStyle = authenticStyleLease(other);
+
+  assert.throws(
+    () => acquireShadowResources(shadow, styleLease(), harness.adapter),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_STYLES',
+  );
+  assert.throws(
+    () => acquireShadowResources(shadow, foreignStyle, harness.adapter),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_STYLES',
+  );
+
+  const first = acquireShadowResources(shadow, firstStyle, harness.adapter);
+  assert.deepEqual(first.environment.styleConfig, {
+    mode: 'auto',
+    nonce: undefined,
+  });
+  assert.equal(Object.hasOwn(first.environment, 'styleLease'), false);
+  firstStyle.release();
+  assert.throws(
+    () => acquireShadowResources(shadow, firstStyle, harness.adapter),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_STYLES',
+  );
+  const second = acquireShadowResources(shadow, secondStyle, harness.adapter);
+  first.release();
+  assert.equal(second.environment.portal.removed, false);
+  secondStyle.release();
+  second.release();
+  assert.equal(second.environment.portal.removed, true);
+  foreignStyle.release();
 });
 
 test('two roots share Document scheduler/listeners but own distinct portals and observers', () => {
@@ -405,14 +471,103 @@ test('mirror association failure rolls back both the node and a partially writte
   lease.release();
 });
 
+test('reentrant final release during mirror creation rolls back the pending mirror without touching replacement resources', () => {
+  const document = {};
+  const shadow = root(document, 'mirror-create-reentrant');
+  let lease;
+  let replacement;
+  const harness = resourceHarness({
+    onCreateMirror() {
+      lease.release();
+      replacement = acquire(shadow, styleLease('replacement'), harness);
+    },
+  });
+  lease = acquire(shadow, styleLease(), harness);
+  const target = owner(shadow, 'author-token');
+
+  assert.throws(
+    () => lease.environment.createMirror(target, 'Reentrant create'),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_RESOURCES',
+  );
+  assert.equal(
+    harness.calls.filter(([name]) => name === 'removeMirror').length,
+    1,
+  );
+  assert.equal(target.attributes.get('aria-describedby'), 'author-token');
+  assert.strictEqual(
+    getShadowRootState(shadow).resources.environment,
+    replacement.environment,
+  );
+  assert.equal(replacement.environment.portal.removed, false);
+  replacement.release();
+  assert.equal(runtimeState.shadows.has(shadow), false);
+});
+
+test('reentrant final release during aria association removes the pending token and mirror', () => {
+  const document = {};
+  const shadow = root(document, 'mirror-token-reentrant');
+  let lease;
+  const harness = resourceHarness({
+    onSetDescription() {
+      lease.release();
+    },
+  });
+  lease = acquire(shadow, styleLease(), harness);
+  const target = owner(shadow, 'author-token');
+
+  assert.throws(
+    () => lease.environment.createMirror(target, 'Reentrant association'),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SHADOW_RESOURCES',
+  );
+  assert.equal(target.attributes.get('aria-describedby'), 'author-token');
+  assert.equal(
+    harness.calls.filter(([name]) => name === 'removeMirror').length,
+    1,
+  );
+  assert.equal(runtimeState.shadows.has(shadow), false);
+});
+
+test('reentrant release during mirror update or removal leaves no registry, node, or token', () => {
+  for (const operation of ['update', 'remove']) {
+    const document = {};
+    const shadow = root(document, `mirror-${operation}-reentrant`);
+    let lease;
+    const harness = resourceHarness({
+      onUpdateMirror() {
+        if (operation === 'update') lease.release();
+      },
+      onRemoveMirror() {
+        if (operation === 'remove') lease.release();
+      },
+    });
+    lease = acquire(shadow, styleLease(), harness);
+    const target = owner(shadow, 'author-token');
+    const mirror = lease.environment.createMirror(target, 'Initial');
+
+    assert.throws(
+      () => operation === 'update'
+        ? lease.environment.updateMirror(mirror, 'Updated')
+        : lease.environment.removeMirror(mirror),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_SHADOW_RESOURCES',
+      operation,
+    );
+    assert.equal(mirror.removed, true, operation);
+    assert.equal(target.attributes.get('aria-describedby'), 'author-token', operation);
+    assert.equal(runtimeState.shadows.has(shadow), false, operation);
+  }
+});
+
 test('resource release is idempotent and keeps the independent styles slot alive', () => {
   const document = {};
   const shadow = root(document, 'independent');
   const harness = resourceHarness();
-  const styles = {};
-  getShadowRootState(shadow).styles = styles;
-  const first = acquire(shadow, styleLease(), harness);
-  const second = acquire(shadow, styleLease(), harness);
+  const firstStyle = authenticStyleLease(shadow);
+  const secondStyle = authenticStyleLease(shadow);
+  const first = acquireShadowResources(shadow, firstStyle, harness.adapter);
+  const second = acquireShadowResources(shadow, secondStyle, harness.adapter);
 
   first.release();
   first.release();
@@ -420,10 +575,12 @@ test('resource release is idempotent and keeps the independent styles slot alive
   second.release();
   second.release();
   const state = getShadowRootState(shadow);
-  assert.strictEqual(state.styles, styles);
+  assert.notEqual(state.styles, null);
   assert.equal(state.resources, null);
   assert.equal(runtimeState.shadows.has(shadow), true);
-  assert.equal(releaseShadowRootSlot(shadow, 'styles', styles), true);
+  firstStyle.release();
+  assert.equal(runtimeState.shadows.has(shadow), true);
+  secondStyle.release();
   assert.equal(runtimeState.shadows.has(shadow), false);
 });
 
@@ -449,13 +606,12 @@ test('portal creation failure rolls back the Document lease and leaves no resour
 test('observer creation failure removes the portal, releases Document resources, and keeps styles', () => {
   const document = {};
   const shadow = root(document, 'observer-failure');
-  const styles = {};
-  getShadowRootState(shadow).styles = styles;
+  const styles = authenticStyleLease(shadow);
   const cause = new Error('observer creation failed');
   const harness = resourceHarness({ observerError: cause });
 
   expectStateError(
-    () => acquire(shadow, styleLease(), harness),
+    () => acquireShadowResources(shadow, styles, harness.adapter),
     cause,
     'acquire',
   );
@@ -466,9 +622,126 @@ test('observer creation failure removes the portal, releases Document resources,
     harness.calls.filter(([name]) => name === 'releasePortal').length,
     1,
   );
-  assert.strictEqual(getShadowRootState(shadow).styles, styles);
+  assert.notEqual(getShadowRootState(shadow).styles, null);
   assert.equal(getShadowRootState(shadow).resources, null);
-  releaseShadowRootSlot(shadow, 'styles', styles);
+  styles.release();
+});
+
+test('malformed Document, portal, and observer records avoid getters and roll back exact raw identities', () => {
+  const cases = [
+    {
+      kind: 'Document',
+      malformed: 'shared',
+      install(harness, raw, rollback) {
+        harness.adapter.acquireDocumentResources = () => raw;
+        harness.adapter.rollbackDocumentResources = (_document, value) => {
+          rollback(value);
+        };
+      },
+    },
+    {
+      kind: 'portal',
+      malformed: 'overlay',
+      install(harness, raw, rollback) {
+        harness.adapter.createPortal = () => raw;
+        harness.adapter.rollbackPortal = (_root, value) => {
+          rollback(value);
+        };
+      },
+    },
+    {
+      kind: 'MutationObserver',
+      malformed: 'observer',
+      install(harness, raw, rollback) {
+        harness.adapter.createMutationObserver = () => raw;
+        harness.adapter.rollbackObserver = (_root, value) => {
+          rollback(value);
+        };
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    const document = {};
+    const shadow = root(document, `malformed-${entry.kind}`);
+    const harness = resourceHarness();
+    let getterCalls = 0;
+    let rollbackRaw;
+    const raw = {
+      shared: {},
+      overlay: {},
+      svgLayer: {},
+      noteLayer: {},
+      observer: {},
+      release() {},
+    };
+    Object.defineProperty(raw, entry.malformed, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error(`${entry.kind} getter must not run`);
+      },
+    });
+    entry.install(harness, raw, (value) => {
+      rollbackRaw = value;
+    });
+
+    assert.throws(
+      () => acquire(shadow, styleLease(), harness),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_SHADOW_RESOURCES'
+        && error.details.cause instanceof TypeError
+        && error.details.cause.message.includes(entry.kind),
+      entry.kind,
+    );
+    assert.equal(getterCalls, 0, entry.kind);
+    assert.strictEqual(rollbackRaw, raw, entry.kind);
+    assert.equal(harness.entry(document).refs, 0, entry.kind);
+    assert.equal(runtimeState.shadows.has(shadow), false, entry.kind);
+  }
+});
+
+test('validated portal and observer installs snapshot fields and keep the raw release receiver', () => {
+  const document = {};
+  const shadow = root(document, 'install-snapshot');
+  const harness = resourceHarness();
+  const overlay = { name: 'original-overlay' };
+  const svgLayer = { name: 'original-svg' };
+  const noteLayer = { name: 'original-notes' };
+  const observer = { name: 'original-observer' };
+  let portalReceiver;
+  let observerReceiver;
+  const rawPortal = {
+    overlay,
+    svgLayer,
+    noteLayer,
+    release() {
+      portalReceiver = this;
+    },
+  };
+  const rawObserver = {
+    observer,
+    release() {
+      observerReceiver = this;
+    },
+  };
+  harness.adapter.createPortal = () => rawPortal;
+  harness.adapter.createMutationObserver = () => rawObserver;
+
+  const lease = acquire(shadow, styleLease(), harness);
+  rawPortal.overlay = { name: 'replacement-overlay' };
+  rawPortal.svgLayer = { name: 'replacement-svg' };
+  rawPortal.noteLayer = { name: 'replacement-notes' };
+  rawObserver.observer = { name: 'replacement-observer' };
+
+  assert.strictEqual(lease.environment.portal, overlay);
+  assert.strictEqual(lease.environment.svgLayer, svgLayer);
+  assert.strictEqual(lease.environment.noteLayer, noteLayer);
+  assert.strictEqual(lease.environment.observer, observer);
+  lease.release();
+  assert.strictEqual(portalReceiver, rawPortal);
+  assert.strictEqual(observerReceiver, rawObserver);
 });
 
 test('final release contains every cleanup error, clears the exact slot, and removes mirrors', () => {
