@@ -3,10 +3,15 @@ import test from 'node:test';
 
 import { createAnnotation } from '../../src/annotation.js';
 import { readControllerMetadata } from '../../src/controller-metadata.js';
-import { HanamaruStateError } from '../../src/errors.js';
+import {
+  HanamaruConfigError,
+  HanamaruStateError,
+  HanamaruTargetError,
+} from '../../src/errors.js';
 import { createGroup } from '../../src/group.js';
 import { registerMark } from '../../src/plugins.js';
 import { runtimeState } from '../../src/runtime-state.js';
+import { restore, resolveSerializedTarget, serialize } from '../../src/serialize.js';
 import { createStory } from '../../src/story.js';
 
 function annotationEnvironment({ id = 'generated-seed' } = {}) {
@@ -162,7 +167,16 @@ function aggregateEnvironment({ failCreateAt = -1 } = {}) {
       },
       createEvent() {},
       reducedMotion() { return true; },
-      resolveTarget(target) { return target.record; },
+      resolveTarget(target) {
+        const ownerElement = { target };
+        return target?.record ?? {
+          element: ownerElement,
+          kind: 'element',
+          ownerElement,
+          range: null,
+          refresh() { return this; },
+        };
+      },
     },
   };
 }
@@ -279,6 +293,588 @@ class UpdatingSetWeakMap extends WeakMap {
     return super.set(key, value);
   }
 }
+
+function serializedMember(target, patch = {}) {
+  return {
+    target,
+    options: {
+      mark: 'underline',
+      note: null,
+      placement: 'auto',
+      accessible: false,
+      seed: 'member-seed',
+      duration: 650,
+      ...patch,
+    },
+  };
+}
+
+function serializedAnnotation(target, patch = {}) {
+  return {
+    schema: 'hanamaru/v1',
+    kind: 'annotation',
+    target,
+    options: {
+      mark: 'underline',
+      note: null,
+      placement: 'auto',
+      trigger: 'manual',
+      accessible: false,
+      seed: 'annotation-seed',
+      duration: 650,
+      motion: 'system',
+      ...patch,
+    },
+  };
+}
+
+function minimalNativeRealm(name = 'document') {
+  class RealmDocument {}
+  class RealmElement {
+    constructor(ownerDocument) {
+      this.ownerDocument = ownerDocument;
+      this.isConnected = true;
+      this.parentElement = null;
+    }
+
+    getRootNode() { return this.ownerDocument; }
+  }
+  class RealmRange {
+    constructor(ownerDocument, startContainer, endContainer = startContainer) {
+      this.ownerDocument = ownerDocument;
+      this.startContainer = startContainer;
+      this.endContainer = endContainer;
+      this.commonAncestorContainer = startContainer;
+      this.startOffset = 1;
+      this.endOffset = 3;
+    }
+
+    cloneRange() {
+      const clone = new RealmRange(
+        this.ownerDocument,
+        this.startContainer,
+        this.endContainer,
+      );
+      clone.commonAncestorContainer = this.commonAncestorContainer;
+      clone.startOffset = this.startOffset;
+      clone.endOffset = this.endOffset;
+      return clone;
+    }
+  }
+
+  const document = new RealmDocument();
+  document.name = name;
+  document.nodeType = 9;
+  document.defaultView = {
+    Document: RealmDocument,
+    Element: RealmElement,
+    Range: RealmRange,
+    Object,
+  };
+  document.documentElement = new RealmElement(document);
+  const element = new RealmElement(document);
+  document.querySelectorAll = (selector) => (
+    selector === '#target' ? [element] : []
+  );
+  return { document, element, RealmElement, RealmRange };
+}
+
+test('serialize emits the exact canonical annotation v1 wire shape', () => {
+  const environment = annotationEnvironment({ id: 'wire-seed' });
+  const controller = createAnnotation('#accepted', {
+    mark: 'underline',
+    note: 'Remember',
+    placement: 'left',
+    trigger: 'manual',
+    accessible: true,
+    duration: 25,
+    motion: 'never',
+  }, environment.env);
+
+  const definition = serialize(controller);
+
+  assert.equal(
+    JSON.stringify(definition),
+    '{"schema":"hanamaru/v1","kind":"annotation","target":{"type":"selector","selector":"#accepted"},"options":{"mark":"underline","note":"Remember","placement":"left","trigger":"manual","accessible":true,"seed":"wire-seed","duration":25,"motion":"never"}}',
+  );
+  assert.deepEqual(Object.keys(definition), ['schema', 'kind', 'target', 'options']);
+  assert.deepEqual(Object.keys(definition.target), ['type', 'selector']);
+  assert.deepEqual(Object.keys(definition.options), [
+    'mark', 'note', 'placement', 'trigger', 'accessible', 'seed', 'duration', 'motion',
+  ]);
+
+  controller.destroy();
+});
+
+test('serialize emits exact story and group aggregate key order and viewport once omission rules', () => {
+  const storyEnvironment = aggregateEnvironment();
+  const storyController = createStory([
+    { target: '#first', mark: 'circle', note: 'One' },
+    { target: { within: '#scope', text: 'Second', occurrence: 0 }, mark: 'box' },
+  ], { trigger: 'viewport', gap: 25, motion: 'never', once: false }, storyEnvironment.env);
+  const storyWire = serialize(storyController);
+
+  assert.deepEqual(Object.keys(storyWire), ['schema', 'kind', 'options', 'steps']);
+  assert.deepEqual(Object.keys(storyWire.options), ['trigger', 'gap', 'motion', 'once']);
+  assert.deepEqual(Object.keys(storyWire.steps[0]), ['target', 'options']);
+  assert.deepEqual(Object.keys(storyWire.steps[0].options), [
+    'mark', 'note', 'placement', 'accessible', 'seed', 'duration',
+  ]);
+  assert.deepEqual(Object.keys(storyWire.steps[1].target), [
+    'type', 'within', 'text', 'occurrence',
+  ]);
+  assert.equal(storyWire.steps[1].target.occurrence, 0);
+
+  const groupEnvironment = aggregateEnvironment();
+  const groupController = createGroup([
+    { target: '#first', mark: 'highlight' },
+  ], { trigger: 'manual', motion: 'system' }, groupEnvironment.env);
+  const groupWire = serialize(groupController);
+
+  assert.deepEqual(Object.keys(groupWire), ['schema', 'kind', 'options', 'members']);
+  assert.deepEqual(Object.keys(groupWire.options), ['trigger', 'motion']);
+  assert.equal('once' in groupWire.options, false);
+  assert.equal('occurrence' in storyWire.steps[0].target, false);
+
+  storyController.destroy();
+  groupController.destroy();
+});
+
+test('serialize returns fresh deterministic trees without metadata or target aliases', () => {
+  const environment = annotationEnvironment();
+  const controller = createAnnotation('#stable', { mark: 'underline' }, environment.env);
+
+  const first = serialize(controller);
+  const second = serialize(controller);
+
+  assert.notEqual(first, second);
+  assert.notEqual(first.target, second.target);
+  assert.notEqual(first.options, second.options);
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  assert.equal(first.target === readControllerMetadata(controller).target, false);
+
+  controller.destroy();
+});
+
+test('serialize reads controller metadata before rejecting unrelated options', () => {
+  assert.throws(
+    () => serialize({}, { unknown: true }),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SERIALIZE_CONTROLLER',
+  );
+});
+
+test('serialize passes exact original native targets and fixed-order contexts to keyForTarget', () => {
+  const realm = minimalNativeRealm();
+  const environment = annotationEnvironment();
+  const controller = createAnnotation(realm.element, { mark: 'underline' }, environment.env);
+  const calls = [];
+
+  const wire = serialize(controller, {
+    keyForTarget(target, context) {
+      calls.push([target, context]);
+      return 'hero';
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], realm.element);
+  assert.deepEqual(Object.keys(calls[0][1]), [
+    'role', 'controllerKind', 'ownerElement', 'index',
+  ]);
+  assert.deepEqual(calls[0][1], {
+    role: 'target',
+    controllerKind: 'annotation',
+    ownerElement: realm.element,
+    index: null,
+  });
+  assert.deepEqual(wire.target, {
+    type: 'key',
+    key: 'hero',
+    targetKind: 'element',
+  });
+
+  controller.destroy();
+});
+
+test('serialize reports exact aggregate indexes and locator-within roles to keyForTarget', () => {
+  const realm = minimalNativeRealm();
+  const storyEnvironment = aggregateEnvironment();
+  const storyController = createStory([
+    { target: realm.element, mark: 'underline' },
+    { target: { within: realm.element, text: 'Scoped text' }, mark: 'circle' },
+  ], {}, storyEnvironment.env);
+  const storyCalls = [];
+
+  const storyWire = serialize(storyController, {
+    keyForTarget(target, context) {
+      storyCalls.push([target, context]);
+      return context.role === 'within' ? 'scope' : `step-${context.index}`;
+    },
+  });
+
+  assert.equal(storyCalls[0][0], realm.element);
+  assert.deepEqual(storyCalls[0][1], {
+    role: 'target',
+    controllerKind: 'story',
+    ownerElement: realm.element,
+    index: 0,
+  });
+  assert.equal(storyCalls[1][0], realm.element);
+  assert.deepEqual(storyCalls[1][1], {
+    role: 'within',
+    controllerKind: 'story',
+    ownerElement: realm.element,
+    index: 1,
+  });
+  assert.deepEqual(storyWire.steps[1].target.within, {
+    type: 'key',
+    key: 'scope',
+    targetKind: 'element',
+  });
+
+  const groupEnvironment = aggregateEnvironment();
+  const groupController = createGroup([
+    { target: realm.element, mark: 'box' },
+  ], {}, groupEnvironment.env);
+  const groupCalls = [];
+  serialize(groupController, {
+    keyForTarget(target, context) {
+      groupCalls.push([target, context]);
+      return 'member-0';
+    },
+  });
+  assert.deepEqual(groupCalls[0][1], {
+    role: 'target',
+    controllerKind: 'group',
+    ownerElement: realm.element,
+    index: 0,
+  });
+
+  storyController.destroy();
+  groupController.destroy();
+});
+
+test('serialize contains keyForTarget failures with the stable config code and original cause', () => {
+  const realm = minimalNativeRealm();
+  const environment = annotationEnvironment();
+  const controller = createAnnotation(realm.element, { mark: 'underline' }, environment.env);
+  const cause = new Error('key storage failed');
+
+  assert.throws(
+    () => serialize(controller, {
+      keyForTarget() { throw cause; },
+    }),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.role === 'target'
+      && error.details.controllerKind === 'annotation'
+      && error.details.index === null
+      && error.details.cause === cause,
+  );
+
+  controller.destroy();
+});
+
+test('late malformed private aggregate metadata prevents every key callback', () => {
+  const realm = minimalNativeRealm();
+  const controller = {};
+  const options = Object.freeze({
+    mark: 'underline',
+    note: null,
+    placement: 'auto',
+    trigger: 'manual',
+    accessible: false,
+    seed: 'seed',
+    duration: 650,
+    motion: 'system',
+  });
+  runtimeState.metadata.set(controller, Object.freeze({
+    kind: 'story',
+    options: Object.freeze({ trigger: 'manual', gap: 180, motion: 'system' }),
+    steps: Object.freeze([
+      Object.freeze({ kind: 'annotation', target: realm.element, options }),
+      Object.freeze({ kind: 'annotation', target: { bad: true }, options }),
+    ]),
+  }));
+  let calls = 0;
+
+  assert.throws(
+    () => serialize(controller, { keyForTarget() { calls += 1; return 'key'; } }),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_SERIALIZE_CONTROLLER',
+  );
+  assert.equal(calls, 0);
+  runtimeState.metadata.delete(controller);
+});
+
+test('hostile serialized graphs reject accessors, symbols, cycles, sparse arrays, and unknown keys', () => {
+  const target = { type: 'selector', selector: '#target' };
+  const base = serializedAnnotation(target);
+  const cases = [];
+
+  let getterCalls = 0;
+  const accessor = serializedAnnotation(target);
+  Object.defineProperty(accessor.options, 'note', {
+    get() { getterCalls += 1; return null; },
+    enumerable: true,
+  });
+  cases.push(accessor);
+
+  const symbol = serializedAnnotation(target);
+  symbol.options[Symbol('hidden')] = true;
+  cases.push(symbol);
+
+  const cycle = serializedAnnotation(target);
+  cycle.target = cycle;
+  cases.push(cycle);
+
+  const story = {
+    schema: 'hanamaru/v1',
+    kind: 'story',
+    options: { trigger: 'manual', gap: 180, motion: 'system' },
+    steps: new Array(1),
+  };
+  cases.push(story);
+
+  const unknown = serializedAnnotation({ type: 'selector', selector: '#target', extra: true });
+  cases.push(unknown);
+
+  for (const definition of cases) {
+    assert.throws(
+      () => restore(definition, { root: null }),
+      (error) => error instanceof HanamaruConfigError
+        && error.code === 'HANA_CONFIG_SERIALIZED_DEFINITION',
+    );
+  }
+  assert.equal(getterCalls, 0);
+});
+
+test('late invalid locator text is rejected before a within-key resolver callback', () => {
+  const realm = minimalNativeRealm();
+  let calls = 0;
+  const target = {
+    type: 'locator',
+    within: { type: 'key', key: 'scope', targetKind: 'element' },
+    text: ' \t\u00a0 ',
+  };
+
+  assert.throws(
+    () => resolveSerializedTarget(target, {
+      root: realm.document,
+      resolveTarget() { calls += 1; return realm.element; },
+    }),
+    (error) => error instanceof HanamaruConfigError,
+  );
+  assert.equal(calls, 0);
+});
+
+test('resolveSerializedTarget uses exact key contexts and clones resolved ranges', () => {
+  const realm = minimalNativeRealm();
+  const textNode = {
+    nodeType: 3,
+    ownerDocument: realm.document,
+    isConnected: true,
+    parentElement: realm.element,
+    getRootNode() { return realm.document; },
+  };
+  const range = new realm.RealmRange(realm.document, textNode);
+  const calls = [];
+
+  const resolved = resolveSerializedTarget({
+    type: 'key',
+    key: 'selection',
+    targetKind: 'range',
+  }, {
+    root: realm.document,
+    resolveTarget(key, context) {
+      calls.push([key, context]);
+      return range;
+    },
+  });
+
+  assert.notEqual(resolved, range);
+  assert.equal(resolved.startContainer, range.startContainer);
+  assert.equal(resolved.endContainer, range.endContainer);
+  assert.equal(resolved.startOffset, range.startOffset);
+  assert.equal(resolved.endOffset, range.endOffset);
+  assert.deepEqual(calls, [[
+    'selection',
+    { targetKind: 'range', role: 'target', controllerKind: null, index: null },
+  ]]);
+});
+
+test('resolveSerializedTarget rejects a connected Range whose boundaries are in a ShadowRoot', () => {
+  const realm = minimalNativeRealm();
+  const shadow = { nodeType: 11, host: realm.element };
+  const textNode = {
+    nodeType: 3,
+    ownerDocument: realm.document,
+    isConnected: true,
+    parentElement: realm.element,
+    getRootNode() { return shadow; },
+  };
+  const range = new realm.RealmRange(realm.document, textNode);
+
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'key',
+      key: 'shadow-selection',
+      targetKind: 'range',
+    }, {
+      root: realm.document,
+      resolveTarget() { return range; },
+    }),
+    (error) => error instanceof HanamaruTargetError
+      && error.code === 'HANA_TARGET_INVALID',
+  );
+});
+
+test('resolveSerializedTarget preserves resolver causes and rejects ShadowRoot scope', () => {
+  const realm = minimalNativeRealm();
+  const cause = new Error('lookup failed');
+
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'key',
+      key: 'missing',
+      targetKind: 'element',
+    }, {
+      root: realm.document,
+      resolveTarget() { throw cause; },
+    }),
+    (error) => error instanceof HanamaruTargetError
+      && error.code === 'HANA_TARGET_RESOLVER'
+      && error.details.key === 'missing'
+      && error.details.cause === cause
+      && Object.keys(error.details.context).join(',') === 'targetKind,role,controllerKind,index',
+  );
+
+  assert.throws(
+    () => resolveSerializedTarget(
+      { type: 'selector', selector: '#target' },
+      { root: { nodeType: 11, host: realm.element } },
+    ),
+    (error) => error instanceof HanamaruTargetError
+      && error.code === 'HANA_TARGET_SHADOW_UNSCOPED',
+  );
+});
+
+test('restore rejects an unregistered mark before resolving any target', () => {
+  const realm = minimalNativeRealm();
+  let calls = 0;
+  const definition = serializedAnnotation({
+    type: 'key',
+    key: 'target',
+    targetKind: 'element',
+  }, { mark: 'not-registered' });
+
+  assert.throws(
+    () => restore(definition, {
+      root: realm.document,
+      resolveTarget() { calls += 1; return realm.element; },
+    }),
+    (error) => error instanceof HanamaruConfigError,
+  );
+  assert.equal(calls, 0);
+});
+
+test('restore supplies exact aggregate and locator-within resolver contexts before creation', () => {
+  const realm = minimalNativeRealm();
+  const storyCalls = [];
+  const story = {
+    schema: 'hanamaru/v1',
+    kind: 'story',
+    options: { trigger: 'manual', gap: 180, motion: 'system' },
+    steps: [
+      serializedMember(
+        { type: 'key', key: 'first', targetKind: 'element' },
+        { seed: 'one' },
+      ),
+      serializedMember(
+        { type: 'selector', selector: '#missing' },
+        { seed: 'two' },
+      ),
+    ],
+  };
+
+  assert.throws(
+    () => restore(story, {
+      root: realm.document,
+      resolveTarget(key, context) {
+        storyCalls.push([key, context]);
+        return realm.element;
+      },
+    }),
+    (error) => error instanceof HanamaruTargetError
+      && error.code === 'HANA_TARGET_MISSING',
+  );
+  assert.deepEqual(storyCalls, [[
+    'first',
+    { targetKind: 'element', role: 'target', controllerKind: 'story', index: 0 },
+  ]]);
+
+  const withinCalls = [];
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'locator',
+      within: { type: 'key', key: 'scope', targetKind: 'element' },
+      text: 'present',
+    }, {
+      root: realm.document,
+      resolveTarget(key, context) {
+        withinCalls.push([key, context]);
+        return realm.element;
+      },
+    }),
+  );
+  assert.deepEqual(withinCalls, [[
+    'scope',
+    { targetKind: 'element', role: 'within', controllerKind: null, index: null },
+  ]]);
+});
+
+test('late aggregate resolver failure leaves controller metadata untouched', () => {
+  class TrackingWeakMap extends WeakMap {
+    setCalls = 0;
+
+    set(key, value) {
+      this.setCalls += 1;
+      return super.set(key, value);
+    }
+  }
+
+  const realm = minimalNativeRealm();
+  const disconnected = new realm.RealmElement(realm.document);
+  disconnected.isConnected = false;
+  const definition = {
+    schema: 'hanamaru/v1',
+    kind: 'story',
+    options: { trigger: 'manual', gap: 180, motion: 'system' },
+    steps: [
+      serializedMember({ type: 'selector', selector: '#target' }, { seed: 'one' }),
+      serializedMember(
+        { type: 'key', key: 'late', targetKind: 'element' },
+        { seed: 'two' },
+      ),
+    ],
+  };
+  const originalMetadata = runtimeState.metadata;
+  const trackingMetadata = new TrackingWeakMap();
+  runtimeState.metadata = trackingMetadata;
+  try {
+    assert.throws(
+      () => restore(definition, {
+        root: realm.document,
+        resolveTarget() { return disconnected; },
+      }),
+      (error) => error instanceof HanamaruTargetError,
+    );
+    assert.equal(trackingMetadata.setCalls, 0);
+  } finally {
+    runtimeState.metadata = originalMetadata;
+  }
+});
 
 test('foreign objects have no controller metadata', () => {
   assert.equal(readControllerMetadata({}), undefined);

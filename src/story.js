@@ -26,13 +26,15 @@ const STORY_TRIGGERS = new Set(['manual', 'load', 'viewport']);
 const STORY_MOTIONS = new Set(['system', 'never']);
 let nextStoryId = 0;
 
-function defaultStoryEnvironment(steps) {
-  let doc;
-  try {
-    doc = documentForTarget(steps?.[0]?.target);
-  } catch {
-    if (typeof document !== 'undefined') doc = document;
-    else throw new TypeError('story() requires a target Document');
+export function createStoryEnvironment(steps, documentOverride = undefined) {
+  let doc = documentOverride;
+  if (doc === undefined) {
+    try {
+      doc = documentForTarget(steps?.[0]?.target);
+    } catch {
+      if (typeof document !== 'undefined') doc = document;
+      else throw new TypeError('story() requires a target Document');
+    }
   }
   const win = doc.defaultView;
   return {
@@ -68,7 +70,7 @@ function defaultStoryEnvironment(steps) {
 }
 
 export function story(steps, options = {}) {
-  return createStory(steps, options, defaultStoryEnvironment(steps));
+  return createStory(steps, options, createStoryEnvironment(steps));
 }
 
 function has(input, key) {

@@ -167,7 +167,7 @@ function documentContext(context) {
   return root;
 }
 
-function defaultGroupEnvironment(root) {
+export function createGroupEnvironment(root) {
   const view = root.defaultView;
   const memberErrors = new WeakMap();
   let memberErrorObserver = null;
@@ -256,7 +256,7 @@ function runtimeError(cause) {
 
 export function group(members, options = {}, context = {}) {
   const root = documentContext(context);
-  return createGroup(members, options, defaultGroupEnvironment(root));
+  return createGroup(members, options, createGroupEnvironment(root));
 }
 
 export function createGroup(members, rawOptions = {}, env) {
