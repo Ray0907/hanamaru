@@ -116,7 +116,22 @@ test('three unequal members draw in one frame and complete only after every anim
       if (descriptor === undefined) delete owner[key];
       else Object.defineProperty(owner, key, descriptor);
     };
+    const harnessState = () => ({
+      activeAnimations: animations.filter(({ animation }) => (
+        animation.playState === 'running' || animation.playState === 'paused'
+      )).length,
+      frames: frames.size,
+      timers: timers.size,
+    });
+    const assertHarnessClean = (phase) => {
+      const state = harnessState();
+      if (state.activeAnimations !== 0 || state.frames !== 0 || state.timers !== 0) {
+        throw new Error(`Controlled harness leaked ${phase} ${JSON.stringify(state)}`);
+      }
+      return state;
+    };
 
+    let primaryError = null;
     try {
       Object.defineProperty(performance, 'now', {
         configurable: true,
@@ -288,16 +303,7 @@ test('three unequal members draw in one frame and complete only after every anim
         ),
       };
       await flushMicrotasks();
-      const cleanup = {
-        activeAnimations: animations.filter(({ animation }) => (
-          animation.playState === 'running' || animation.playState === 'paused'
-        )).length,
-        frames: frames.size,
-        timers: timers.size,
-      };
-      if (cleanup.activeAnimations !== 0 || cleanup.frames !== 0 || cleanup.timers !== 0) {
-        throw new Error(`Controlled harness leaked ${JSON.stringify(cleanup)}`);
-      }
+      const cleanup = assertHarnessClean('after explicit destroy');
       result = {
         afterDestroy: {
           descriptions: ['group-first', 'group-second', 'group-third'].map((id) => (
@@ -322,23 +328,46 @@ test('three unequal members draw in one frame and complete only after every anim
         stateAfterSecondAnimation,
         surface,
       };
+    } catch (error) {
+      primaryError = error;
     } finally {
-      controller?.destroy();
-      const cleanup = {
-        activeAnimations: animations.filter(({ animation }) => (
-          animation.playState === 'running' || animation.playState === 'paused'
-        )).length,
-        frames: frames.size,
-        timers: timers.size,
-      };
-      restore(performance, 'now', descriptors.now);
-      restore(window, 'requestAnimationFrame', descriptors.requestAnimationFrame);
-      restore(window, 'cancelAnimationFrame', descriptors.cancelAnimationFrame);
-      restore(window, 'setTimeout', descriptors.setTimeout);
-      restore(window, 'clearTimeout', descriptors.clearTimeout);
-      restore(Element.prototype, 'animate', descriptors.animate);
-      if (cleanup.activeAnimations !== 0 || cleanup.frames !== 0 || cleanup.timers !== 0) {
-        throw new Error(`Controlled harness leaked before restore ${JSON.stringify(cleanup)}`);
+      const teardownErrors = [];
+      const restorationErrors = [];
+      try {
+        try {
+          controller?.destroy();
+        } catch (error) {
+          teardownErrors.push(error);
+        }
+        try {
+          assertHarnessClean('before native restoration');
+        } catch (error) {
+          teardownErrors.push(error);
+        }
+      } finally {
+        for (const [owner, key, descriptor] of [
+          [performance, 'now', descriptors.now],
+          [window, 'requestAnimationFrame', descriptors.requestAnimationFrame],
+          [window, 'cancelAnimationFrame', descriptors.cancelAnimationFrame],
+          [window, 'setTimeout', descriptors.setTimeout],
+          [window, 'clearTimeout', descriptors.clearTimeout],
+          [Element.prototype, 'animate', descriptors.animate],
+        ]) {
+          try {
+            restore(owner, key, descriptor);
+          } catch (error) {
+            restorationErrors.push(error);
+          }
+        }
+      }
+      const failures = [
+        primaryError,
+        ...teardownErrors,
+        ...restorationErrors,
+      ].filter((error) => error !== null);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(failures, 'Controlled Group harness failed');
       }
     }
     return result;
