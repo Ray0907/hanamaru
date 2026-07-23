@@ -225,10 +225,14 @@ test('Document setup disconnects a native MutationObserver whose observe mutates
     let deliveries = 0;
     let mutationDisconnects = 0;
     let resizeDisconnects = 0;
+    let portalRemoveCount = 0;
+    let removedPortal = null;
+    let samePortalRemoved = true;
     let windowAdds = 0;
     let windowRemovals = 0;
     const nativeWindowAdd = window.addEventListener;
     const nativeWindowRemove = window.removeEventListener;
+    const nativeElementRemove = Element.prototype.remove;
 
     class ThrowingMutationObserver {
       constructor(callback) {
@@ -282,6 +286,14 @@ test('Document setup disconnects a native MutationObserver whose observe mutates
       windowRemovals += 1;
       return Reflect.apply(nativeWindowRemove, this, args);
     };
+    Element.prototype.remove = function remove() {
+      if (this.hasAttribute('data-hana-overlay')) {
+        portalRemoveCount += 1;
+        if (removedPortal === null) removedPortal = this;
+        else samePortalRemoved &&= removedPortal === this;
+      }
+      return Reflect.apply(nativeElementRemove, this, []);
+    };
 
     let error = null;
     try {
@@ -293,6 +305,7 @@ test('Document setup disconnects a native MutationObserver whose observe mutates
     await new Promise((resolve) => setTimeout(resolve, 0));
     window.addEventListener = nativeWindowAdd;
     window.removeEventListener = nativeWindowRemove;
+    Element.prototype.remove = nativeElementRemove;
     Object.defineProperty(window, 'MutationObserver', {
       configurable: true,
       value: NativeMutationObserver,
@@ -306,7 +319,9 @@ test('Document setup disconnects a native MutationObserver whose observe mutates
       error,
       mutationDisconnects,
       overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      portalRemoveCount,
       resizeDisconnects,
+      samePortalRemoved,
       stateReserved: runtimeState.documents.has(document),
       windowAdds,
       windowRemovals,
@@ -318,7 +333,9 @@ test('Document setup disconnects a native MutationObserver whose observe mutates
     error: 'observe failed after native side effect',
     mutationDisconnects: 1,
     overlays: 0,
+    portalRemoveCount: 1,
     resizeDisconnects: 1,
+    samePortalRemoved: true,
     stateReserved: false,
     windowAdds: 0,
     windowRemovals: 0,

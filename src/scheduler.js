@@ -303,8 +303,6 @@ class SharedDocumentResources {
   constructor(doc, initialPortal = null) {
     this.#doc = doc;
     try {
-      this.#window = doc.defaultView;
-      this.#visualViewport = this.#window.visualViewport;
       resourceInternals.set(this, {
         defaultPortal: initialPortal,
         ignoredPortals: new Set(
@@ -317,6 +315,8 @@ class SharedDocumentResources {
         this.svgLayer = initialPortal.svgLayer;
         this.noteLayer = initialPortal.noteLayer;
       }
+      this.#window = doc.defaultView;
+      this.#visualViewport = this.#window.visualViewport;
 
       const requestFrame = this.#window.requestAnimationFrame.bind(this.#window);
       const cancelFrame = this.#window.cancelAnimationFrame.bind(this.#window);
@@ -1062,7 +1062,6 @@ function documentEntry(doc, requireDefaultPortal = false) {
     entry.phase = 'active';
   } catch (error) {
     entry.phase = 'failed';
-    try { initialPortal?.overlay.remove(); } catch {}
     if (resourcesByDocument.get(doc) === entry) {
       resourcesByDocument.delete(doc);
     }

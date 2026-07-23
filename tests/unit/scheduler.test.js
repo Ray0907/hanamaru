@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  acquireDocumentResources,
   acquireDocumentScheduler,
   FrameQueue,
 } from '../../src/scheduler.js';
@@ -94,18 +95,40 @@ test('Document setup rolls back created observers when mutation observation muta
     },
   };
   const document = {
+    body: {
+      append() {},
+    },
+    createElement(name) {
+      const element = {
+        append() {},
+        className: '',
+        remove() {
+          if (element === overlay) events.push('portal:remove');
+        },
+        setAttribute() {},
+      };
+      if (name === 'div' && overlay === undefined) overlay = element;
+      return element;
+    },
+    createElementNS() {
+      return {
+        setAttribute() {},
+      };
+    },
     defaultView: view,
     nodeType: 9,
   };
+  let overlay;
 
   assert.throws(
-    () => acquireDocumentScheduler(document),
+    () => acquireDocumentResources(document),
     (error) => error === cause,
   );
   assert.deepEqual(events, [
     'mutation:observe',
     'resize:disconnect',
     'mutation:disconnect',
+    'portal:remove',
   ]);
   assert.equal(runtimeState.documents.has(document), false);
 });
