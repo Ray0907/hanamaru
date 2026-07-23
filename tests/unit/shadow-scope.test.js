@@ -8,6 +8,13 @@ import {
 } from '../../src/runtime-state.js';
 import { acquireShadowResources } from '../../src/shadow-resources.js';
 import { acquireShadowStyles } from '../../src/shadow-styles.js';
+import { createAnnotationEnvironmentWithResources } from '../../src/annotation.js';
+import { createGroupEnvironmentWithResources } from '../../src/group.js';
+import {
+  resolveSerializedTargetWithEnvironment,
+  restoreWithEnvironment,
+} from '../../src/serialize.js';
+import { createStoryEnvironmentWithResources } from '../../src/story.js';
 
 function owner(root, describedBy = null) {
   return {
@@ -859,4 +866,177 @@ test('composed dispatch primitive preserves exact owner, type, and detail', () =
     },
   );
   lease.release();
+});
+
+test('scoped controller environments use only the exact injected root resources and resolver', () => {
+  const calls = [];
+  const view = {
+    clearTimeout() {},
+    defaultView: null,
+    matchMedia() { return { matches: false }; },
+    performance: { now() { return 1; } },
+    queueMicrotask() {},
+    requestAnimationFrame() { return 1; },
+    cancelAnimationFrame() {},
+    setTimeout() { return 1; },
+  };
+  const document = { defaultView: view, nodeType: 9 };
+  view.defaultView = view;
+  const shadow = root(document, 'scope-environments');
+  const lease = { shared: {}, release() {} };
+  let nextId = 0;
+  const resources = {
+    root: shadow,
+    document,
+    lease,
+    allocateId(prefix) {
+      nextId += 1;
+      calls.push(['allocateId', prefix]);
+      return `${prefix}-${nextId}`;
+    },
+    createEvent(type, detail, eventOwner) {
+      calls.push(['event', type, detail, eventOwner]);
+    },
+  };
+  const resolver = (target) => {
+    calls.push(['resolve', target]);
+    return { ownerElement: target };
+  };
+
+  const annotation = createAnnotationEnvironmentWithResources({
+    root: shadow,
+    resources,
+    resolveTarget: resolver,
+  });
+  const story = createStoryEnvironmentWithResources({
+    root: shadow,
+    resources,
+    resolveTarget: resolver,
+  });
+  const group = createGroupEnvironmentWithResources({
+    root: shadow,
+    resources,
+    resolveTarget: resolver,
+  });
+  const target = {};
+  const detail = {};
+
+  assert.strictEqual(annotation.lease, lease);
+  assert.strictEqual(annotation.resolveTarget(target).ownerElement, target);
+  annotation.createEvent('hana:annotation', detail, target);
+  assert.strictEqual(story.root, shadow);
+  assert.strictEqual(story.document, document);
+  assert.strictEqual(story.acquireDocumentResources(document), lease);
+  assert.strictEqual(story.resolveTarget(target).ownerElement, target);
+  story.createEvent('hana:story', detail, target);
+  assert.strictEqual(group.root, shadow);
+  assert.strictEqual(group.document, document);
+  assert.strictEqual(group.acquireDocumentResources(document), lease);
+  assert.strictEqual(group.resolveTarget(target).ownerElement, target);
+  group.createEvent('hana:group', detail, target);
+  assert.deepEqual(calls, [
+    ['allocateId', 'hana'],
+    ['allocateId', 'hana-story-trigger'],
+    ['allocateId', 'hana-group-trigger'],
+    ['resolve', target],
+    ['event', 'hana:annotation', detail, target],
+    ['resolve', target],
+    ['event', 'hana:story', detail, target],
+    ['resolve', target],
+    ['event', 'hana:group', detail, target],
+  ]);
+});
+
+test('scoped controller environments reject foreign resources before allocating IDs', () => {
+  const document = { defaultView: {} };
+  const shadow = root(document, 'expected');
+  const foreign = root(document, 'foreign');
+  let allocations = 0;
+  const resources = {
+    root: foreign,
+    document,
+    lease: { shared: {}, release() {} },
+    allocateId() {
+      allocations += 1;
+      return 'must-not-allocate';
+    },
+    createEvent() {},
+  };
+  for (const create of [
+    createAnnotationEnvironmentWithResources,
+    createStoryEnvironmentWithResources,
+    createGroupEnvironmentWithResources,
+  ]) {
+    assert.throws(
+      () => create({
+        root: shadow,
+        resources,
+        resolveTarget() {},
+      }),
+      /exact injected root/u,
+    );
+  }
+  assert.equal(allocations, 0);
+});
+
+test('scoped restore and serialized entrypoints preflight before controller creation with exact contexts', () => {
+  const calls = [];
+  const controller = { destroy() {} };
+  const resolved = {};
+  const source = {};
+  const environment = {
+    resolveTargetSource(target, context) {
+      calls.push(['resolve', target, { ...context }]);
+      return { resolved, source };
+    },
+    createAnnotation(target, options) {
+      calls.push(['createAnnotation', target, options]);
+      return controller;
+    },
+    createStory() { throw new Error('unused'); },
+    createGroup() { throw new Error('unused'); },
+  };
+  const definition = {
+    schema: 'hanamaru/v1',
+    kind: 'annotation',
+    target: { type: 'selector', selector: '#target' },
+    options: {
+      mark: 'underline',
+      note: null,
+      placement: 'auto',
+      trigger: 'manual',
+      accessible: false,
+      seed: 'scope-seed',
+      duration: 0,
+      motion: 'never',
+    },
+  };
+
+  const restored = restoreWithEnvironment(definition, undefined, environment);
+  const isolated = resolveSerializedTargetWithEnvironment(
+    { type: 'selector', selector: '#target' },
+    undefined,
+    environment,
+  );
+
+  assert.strictEqual(restored, controller);
+  assert.strictEqual(isolated, resolved);
+  assert.deepEqual(calls.map(([name]) => name), [
+    'resolve',
+    'createAnnotation',
+    'resolve',
+  ]);
+  assert.deepEqual(calls[0][2], {
+    resolveTarget: undefined,
+    controllerKind: 'annotation',
+    index: null,
+  });
+  assert.strictEqual(calls[1][1], source);
+  assert.deepEqual(calls[1][2], definition.options);
+  assert.deepEqual(calls[2][2], {
+    resolveTarget: undefined,
+    role: 'target',
+    controllerKind: null,
+    index: null,
+  });
 });

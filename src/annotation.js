@@ -320,6 +320,31 @@ function hiddenTargetError(record) {
   );
 }
 
+function rootKind(root) {
+  if (root?.nodeType === 9) return 'document';
+  if (root?.nodeType === 11 && root.host !== undefined) return 'shadow-root';
+  return 'unknown';
+}
+
+function intrinsicRoot(node, doc) {
+  const method = doc?.defaultView?.Node?.prototype?.getRootNode;
+  if (typeof method !== 'function') return node?.getRootNode?.();
+  return Reflect.apply(method, node, []);
+}
+
+export function resolveStandaloneTarget(target, doc) {
+  const record = resolveTarget(target, doc);
+  const actualRoot = intrinsicRoot(record.ownerElement, doc);
+  if (rootKind(actualRoot) === 'shadow-root') {
+    throw new HanamaruTargetError(
+      'HANA_TARGET_SHADOW_UNSCOPED',
+      'ShadowRoot targets require an explicit Shadow scope',
+      { target, root: actualRoot },
+    );
+  }
+  return record;
+}
+
 export function documentForTarget(target) {
   if (target?.nodeType === 1) return target.ownerDocument;
   if (target?.startContainer) {
@@ -332,31 +357,23 @@ export function documentForTarget(target) {
   throw new TypeError('annotate() requires a target Document');
 }
 
-export function createAnnotationEnvironment(target, documentOverride = undefined) {
-  const doc = documentOverride === undefined
-    ? documentForTarget(target)
-    : documentOverride;
+function createDomAnnotationEnvironment({
+  doc,
+  id,
+  lease,
+  createEvent,
+  resolveCandidate,
+}) {
   if (doc === null || typeof doc !== 'object'
     || doc.nodeType !== 9 || doc.defaultView === null) {
     throw new TypeError('annotation document must be a Document with a browsing context');
   }
   const win = doc.defaultView;
-  const id = `hana-${++nextAnnotationId}`;
-  let lease;
 
   return {
     id,
-    get lease() {
-      lease ??= acquireDocumentResources(doc);
-      return lease;
-    },
-    createEvent(type, detail, owner) {
-      owner.dispatchEvent(new win.CustomEvent(type, {
-        detail,
-        bubbles: true,
-        composed: true,
-      }));
-    },
+    get lease() { return lease(); },
+    createEvent,
     createRenderer: createDomRenderer,
     direction(owner) { return win.getComputedStyle(owner).direction; },
     microtask(callback) { win.queueMicrotask(callback); },
@@ -365,7 +382,7 @@ export function createAnnotationEnvironment(target, documentOverride = undefined
       return options.motion === 'never'
         || win.matchMedia('(prefers-reduced-motion: reduce)').matches;
     },
-    resolveTarget(candidate) { return resolveTarget(candidate, doc); },
+    resolveTarget: resolveCandidate,
     targetRects(record) {
       let ancestor = record.ownerElement;
       while (ancestor !== null) {
@@ -385,6 +402,59 @@ export function createAnnotationEnvironment(target, documentOverride = undefined
       return rects;
     },
   };
+}
+
+export function createAnnotationEnvironment(target, documentOverride = undefined) {
+  const doc = documentOverride === undefined
+    ? documentForTarget(target)
+    : documentOverride;
+  let documentLease;
+  return createDomAnnotationEnvironment({
+    doc,
+    id: `hana-${++nextAnnotationId}`,
+    lease() {
+      documentLease ??= acquireDocumentResources(doc);
+      return documentLease;
+    },
+    createEvent(type, detail, owner) {
+      owner.dispatchEvent(new doc.defaultView.CustomEvent(type, {
+        detail,
+        bubbles: true,
+        composed: true,
+      }));
+    },
+    resolveCandidate(candidate) {
+      return resolveStandaloneTarget(candidate, doc);
+    },
+  });
+}
+
+export function createAnnotationEnvironmentWithResources({
+  root,
+  resources,
+  resolveTarget: resolveCandidate,
+}) {
+  if (resources === null || typeof resources !== 'object'
+    || resources.root !== root
+    || resources.document !== root?.ownerDocument
+    || typeof resources.allocateId !== 'function'
+    || typeof resources.createEvent !== 'function'
+    || resources.lease === null
+    || typeof resources.lease !== 'object') {
+    throw new TypeError('annotation resources must belong to the exact injected root');
+  }
+  if (typeof resolveCandidate !== 'function') {
+    throw new TypeError('annotation target resolver must be a function');
+  }
+  return createDomAnnotationEnvironment({
+    doc: resources.document,
+    id: resources.allocateId('hana'),
+    lease() { return resources.lease; },
+    createEvent(type, detail, owner) {
+      return resources.createEvent(type, detail, owner);
+    },
+    resolveCandidate,
+  });
 }
 
 export function annotate(target, options) {

@@ -1,9 +1,11 @@
 import {
   createAnnotation,
   createAnnotationEnvironment,
+  createAnnotationEnvironmentWithResources,
   documentForTarget,
   normalizeOptions,
   pauseAnnotationRun,
+  resolveStandaloneTarget,
   resumeAnnotationRun,
 } from './annotation.js';
 import {
@@ -16,7 +18,6 @@ import {
   recordStoryMetadata,
 } from './controller-metadata.js';
 import { acquireDocumentResources } from './scheduler.js';
-import { resolveTarget } from './target.js';
 
 const STORY_KEYS = new Set(['trigger', 'gap', 'once', 'motion']);
 const STEP_KEYS = new Set([
@@ -62,10 +63,62 @@ export function createStoryEnvironment(steps, documentOverride = undefined) {
       return options.motion === 'never'
         || win.matchMedia('(prefers-reduced-motion: reduce)').matches;
     },
-    resolveTarget(target) { return resolveTarget(target, doc); },
+    resolveTarget(target) { return resolveStandaloneTarget(target, doc); },
     resumeAnnotationRun,
     setTimeout(callback, delay) { return win.setTimeout(callback, delay); },
     triggerId: `hana-story-trigger-${++nextStoryId}`,
+  };
+}
+
+export function createStoryEnvironmentWithResources({
+  root,
+  resources,
+  resolveTarget: resolveCandidate,
+}) {
+  if (resources === null || typeof resources !== 'object'
+    || resources.root !== root
+    || resources.document !== root?.ownerDocument
+    || typeof resources.allocateId !== 'function'
+    || typeof resources.createEvent !== 'function'
+    || resources.lease === null
+    || typeof resources.lease !== 'object') {
+    throw new TypeError('story resources must belong to the exact injected root');
+  }
+  if (typeof resolveCandidate !== 'function') {
+    throw new TypeError('story target resolver must be a function');
+  }
+  const doc = resources.document;
+  const win = doc.defaultView;
+  return {
+    root,
+    acquireDocumentResources() { return resources.lease; },
+    clearTimeout(id) { win.clearTimeout(id); },
+    createAnnotation(target, options) {
+      return createAnnotation(target, options, createAnnotationEnvironmentWithResources({
+        root,
+        resources,
+        resolveTarget: resolveCandidate,
+      }));
+    },
+    createEvent(type, detail, owner) {
+      return resources.createEvent(type, detail, owner);
+    },
+    document: doc,
+    eventOwner(record) {
+      try { record.refresh(); } catch { /* Retain the last valid owner for error delivery. */ }
+      return record.ownerElement;
+    },
+    microtask(callback) { win.queueMicrotask(callback); },
+    now() { return win.performance.now(); },
+    pauseAnnotationRun,
+    reducedMotion(options) {
+      return options.motion === 'never'
+        || win.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    },
+    resolveTarget: resolveCandidate,
+    resumeAnnotationRun,
+    setTimeout(callback, delay) { return win.setTimeout(callback, delay); },
+    triggerId: resources.allocateId('hana-story-trigger'),
   };
 }
 

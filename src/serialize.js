@@ -9,7 +9,11 @@ import {
   HanamaruStateError,
 } from './errors.js';
 import { createGroup, createGroupEnvironment } from './group.js';
-import { SCHEMA, validateDefinition } from './serialize-schema.js';
+import {
+  SCHEMA,
+  validateDefinition,
+  validateSerializedTarget,
+} from './serialize-schema.js';
 import {
   activeDocument,
   executionContext,
@@ -463,38 +467,34 @@ function normalizeRestoreOptions(definition) {
   }, member.options.seed));
 }
 
-function preflightTargets(definition, root, resolveTargetCallback) {
+function preflightTargets(definition, environment, resolveTargetCallback) {
   if (definition.kind === 'annotation') {
-    return [resolveTargetSource(definition.target, {
-      root,
+    return [environment.resolveTargetSource(definition.target, {
       resolveTarget: resolveTargetCallback,
       controllerKind: 'annotation',
       index: null,
     })];
   }
   const members = definition.kind === 'story' ? definition.steps : definition.members;
-  return members.map((member, index) => resolveTargetSource(member.target, {
-    root,
+  return members.map((member, index) => environment.resolveTargetSource(member.target, {
     resolveTarget: resolveTargetCallback,
     controllerKind: definition.kind,
     index,
   }));
 }
 
-export function restore(definitionInput, contextInput = undefined) {
-  const definition = validateDefinition(definitionInput);
-  const context = executionContext(contextInput, ['root', 'resolveTarget']);
-  const root = activeDocument(
-    Object.hasOwn(context, 'root') ? context.root : globalThis.document,
-  );
+function restoreInEnvironment(definition, context, environment) {
   const normalized = normalizeRestoreOptions(definition);
-  const preparedTargets = preflightTargets(definition, root, context.resolveTarget);
+  const preparedTargets = preflightTargets(
+    definition,
+    environment,
+    context.resolveTarget,
+  );
 
   if (definition.kind === 'annotation') {
-    return createAnnotation(
+    return environment.createAnnotation(
       preparedTargets[0].source,
       normalized[0],
-      createAnnotationEnvironment(preparedTargets[0].source, root),
     );
   }
 
@@ -509,17 +509,93 @@ export function restore(definitionInput, contextInput = undefined) {
       duration: member.options.duration,
     }));
   if (definition.kind === 'story') {
-    return createStory(
+    return environment.createStory(
       members,
       definition.options,
-      createStoryEnvironment(members, root),
     );
   }
-  return createGroup(
+  return environment.createGroup(
     members,
     definition.options,
-    createGroupEnvironment(root),
   );
+}
+
+function documentRestoreEnvironment(root) {
+  return {
+    resolveTargetSource(target, context) {
+      return resolveTargetSource(target, { root, ...context });
+    },
+    createAnnotation(target, options) {
+      return createAnnotation(
+        target,
+        options,
+        createAnnotationEnvironment(target, root),
+      );
+    },
+    createStory(steps, options) {
+      return createStory(steps, options, createStoryEnvironment(steps, root));
+    },
+    createGroup(members, options) {
+      return createGroup(members, options, createGroupEnvironment(root));
+    },
+  };
+}
+
+function assertRestoreEnvironment(environment) {
+  if (environment === null || typeof environment !== 'object') {
+    throw new TypeError('restore environment must be an object');
+  }
+  for (const method of [
+    'resolveTargetSource',
+    'createAnnotation',
+    'createStory',
+    'createGroup',
+  ]) {
+    if (typeof environment[method] !== 'function') {
+      throw new TypeError(`restore environment requires ${method}()`);
+    }
+  }
+  return environment;
+}
+
+export function restoreWithEnvironment(
+  definitionInput,
+  contextInput,
+  environmentInput,
+) {
+  const definition = validateDefinition(definitionInput);
+  const context = executionContext(contextInput, ['resolveTarget']);
+  const environment = assertRestoreEnvironment(environmentInput);
+  return restoreInEnvironment(definition, context, environment);
+}
+
+export function restore(definitionInput, contextInput = undefined) {
+  const definition = validateDefinition(definitionInput);
+  const context = executionContext(contextInput, ['root', 'resolveTarget']);
+  const root = activeDocument(
+    Object.hasOwn(context, 'root') ? context.root : globalThis.document,
+  );
+  return restoreInEnvironment(
+    definition,
+    context,
+    documentRestoreEnvironment(root),
+  );
+}
+
+export function resolveSerializedTargetWithEnvironment(
+  targetInput,
+  contextInput,
+  environmentInput,
+) {
+  const target = validateSerializedTarget(targetInput);
+  const context = executionContext(contextInput, ['resolveTarget']);
+  const environment = assertRestoreEnvironment(environmentInput);
+  return environment.resolveTargetSource(target, {
+    resolveTarget: context.resolveTarget,
+    role: 'target',
+    controllerKind: null,
+    index: null,
+  }).resolved;
 }
 
 export { resolveSerializedTarget };

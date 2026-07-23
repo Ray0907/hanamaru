@@ -1,6 +1,7 @@
 import {
   createAnnotation,
   createAnnotationEnvironment,
+  createAnnotationEnvironmentWithResources,
   normalizeOptions,
 } from './annotation.js';
 import {
@@ -211,6 +212,70 @@ export function createGroupEnvironment(root) {
     },
     microtask(callback) { view.queueMicrotask(callback); },
     resolveTarget(target) { return resolveTarget(target, root); },
+  };
+}
+
+export function createGroupEnvironmentWithResources({
+  root,
+  resources,
+  resolveTarget: resolveCandidate,
+}) {
+  if (resources === null || typeof resources !== 'object'
+    || resources.root !== root
+    || resources.document !== root?.ownerDocument
+    || typeof resources.allocateId !== 'function'
+    || typeof resources.createEvent !== 'function'
+    || resources.lease === null
+    || typeof resources.lease !== 'object') {
+    throw new TypeError('group resources must belong to the exact injected root');
+  }
+  if (typeof resolveCandidate !== 'function') {
+    throw new TypeError('group target resolver must be a function');
+  }
+  const doc = resources.document;
+  const view = doc.defaultView;
+  const memberErrors = new WeakMap();
+  let memberErrorObserver = null;
+  return {
+    root,
+    document: doc,
+    triggerId: resources.allocateId('hana-group-trigger'),
+    acquireDocumentResources() { return resources.lease; },
+    createAnnotation(target, options) {
+      const annotationEnvironment = createAnnotationEnvironmentWithResources({
+        root,
+        resources,
+        resolveTarget: resolveCandidate,
+      });
+      annotationEnvironment.createEvent = (type, detail) => {
+        if (type === 'hana:error') {
+          memberErrors.set(detail.controller, detail.error);
+          memberErrorObserver?.(detail.controller, detail.error);
+        }
+      };
+      return createAnnotation(target, options, annotationEnvironment);
+    },
+    createEvent(type, detail, owner) {
+      return resources.createEvent(type, detail, owner);
+    },
+    eventOwner(record) {
+      try { record.refresh(); } catch { /* Retain the last valid owner for error delivery. */ }
+      return record.ownerElement;
+    },
+    afterRefresh(callback) {
+      const id = view.requestAnimationFrame(callback);
+      return () => view.cancelAnimationFrame(id);
+    },
+    clearMemberError(annotation) { memberErrors.delete(annotation); },
+    memberError(annotation) { return memberErrors.get(annotation); },
+    observeMemberErrors(observer) {
+      memberErrorObserver = observer;
+      return () => {
+        if (memberErrorObserver === observer) memberErrorObserver = null;
+      };
+    },
+    microtask(callback) { view.queueMicrotask(callback); },
+    resolveTarget: resolveCandidate,
   };
 }
 
