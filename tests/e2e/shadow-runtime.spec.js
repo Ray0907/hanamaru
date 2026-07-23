@@ -911,21 +911,33 @@ test('scope scan stays in the exact root and owns every returned annotation once
   });
 });
 
-test('standalone scan rejects empty open and retained closed ShadowRoots upfront', async ({ page }) => {
+test('standalone scan intrinsically rejects masked open closed and iframe ShadowRoots', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { scan } = await import('/src/declarative.js');
     const { createShadowScope } = await import('/src/shadow.js');
     const { runtimeState } = await import('/src/runtime-state.js');
     const state = window.__shadowRuntime;
-    for (const root of [state.openRoot, state.closedRoot]) {
-      Object.defineProperty(root, 'ownerDocument', {
-        configurable: true,
-        value: null,
+    const roots = [state.openRoot, state.closedRoot, state.frameRoot];
+    const frameDocument = state.frameRoot.ownerDocument;
+    const frameView = frameDocument.defaultView;
+    const restores = [];
+    const mask = (object, key, value) => {
+      const descriptor = Object.getOwnPropertyDescriptor(object, key);
+      Object.defineProperty(object, key, { configurable: true, value });
+      restores.push(() => {
+        if (descriptor === undefined) delete object[key];
+        else Object.defineProperty(object, key, descriptor);
       });
+    };
+    for (const root of roots) {
+      mask(root, 'ownerDocument', null);
+      mask(root, 'host', null);
     }
+    for (const owner of [document, frameDocument]) mask(owner, 'defaultView', null);
+    for (const view of [window, frameView]) mask(view, 'ShadowRoot', null);
     const documentScan = scan(document);
     const failures = [];
-    for (const root of [state.openRoot, state.closedRoot]) {
+    for (const root of roots) {
       try {
         scan(root);
       } catch (error) {
@@ -938,15 +950,21 @@ test('standalone scan rejects empty open and retained closed ShadowRoots upfront
     const resourcesAfterStandalone = [
       runtimeState.shadows.has(state.openRoot),
       runtimeState.shadows.has(state.closedRoot),
+      runtimeState.shadows.has(state.frameRoot),
     ];
-    delete state.closedRoot.ownerDocument;
-    delete state.openRoot.ownerDocument;
+    while (restores.length > 0) restores.pop()();
     const openScope = createShadowScope(state.openRoot);
     const closedScope = createShadowScope(state.closedRoot);
-    const scoped = [openScope.scan(), closedScope.scan()].map((value) => ({
+    const frameScope = createShadowScope(state.frameRoot);
+    const scoped = [
+      openScope.scan(),
+      closedScope.scan(),
+      frameScope.scan(),
+    ].map((value) => ({
       annotations: value.annotations.length,
       errors: value.errors.length,
     }));
+    frameScope.destroy();
     closedScope.destroy();
     openScope.destroy();
     return {
@@ -957,7 +975,8 @@ test('standalone scan rejects empty open and retained closed ShadowRoots upfront
       failures,
       resourcesAfterStandalone,
       scoped,
-      portals: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+      portals: document.querySelectorAll('[data-hana-shadow-overlay]').length
+        + frameDocument.querySelectorAll('[data-hana-shadow-overlay]').length,
     };
   });
 
@@ -972,9 +991,14 @@ test('standalone scan rejects empty open and retained closed ShadowRoots upfront
         name: 'HanamaruTargetError',
         code: 'HANA_TARGET_SHADOW_UNSCOPED',
       },
+      {
+        name: 'HanamaruTargetError',
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
     ],
-    resourcesAfterStandalone: [false, false],
+    resourcesAfterStandalone: [false, false, false],
     scoped: [
+      { annotations: 0, errors: 0 },
       { annotations: 0, errors: 0 },
       { annotations: 0, errors: 0 },
     ],

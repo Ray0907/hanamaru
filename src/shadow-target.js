@@ -40,17 +40,32 @@ function methodReader(prototype, key) {
 }
 
 function initialOwnerDocument(value) {
-  const NodeConstructor = globalThis.Node;
-  if (typeof NodeConstructor !== 'function') throw new TypeError('DOM Node is unavailable');
-  return propertyReader(NodeConstructor.prototype, 'ownerDocument')(value);
+  return propertyReader(Object.getPrototypeOf(value), 'ownerDocument')(value);
+}
+
+function initialDefaultView(document) {
+  return propertyReader(Object.getPrototypeOf(document), 'defaultView')(document);
+}
+
+function initialShadowHost(root) {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(root),
+    'host',
+  );
+  if (typeof descriptor?.get !== 'function') {
+    throw new TypeError('Root is not a native ShadowRoot');
+  }
+  return Reflect.apply(descriptor.get, root, []);
 }
 
 export function isNativeShadowRoot(root) {
   try {
     const document = initialOwnerDocument(root);
-    const ShadowRootConstructor = document?.defaultView?.ShadowRoot;
-    return typeof ShadowRootConstructor === 'function'
-      && root instanceof ShadowRootConstructor;
+    const realm = initialDefaultView(document);
+    const host = initialShadowHost(root);
+    return realm !== null
+      && (typeof realm === 'object' || typeof realm === 'function')
+      && initialOwnerDocument(host) === document;
   } catch {
     return false;
   }
@@ -59,7 +74,7 @@ export function isNativeShadowRoot(root) {
 function shadowContext(root) {
   try {
     const document = initialOwnerDocument(root);
-    const realm = document?.defaultView;
+    const realm = initialDefaultView(document);
     if (typeof realm?.ShadowRoot !== 'function'
       || typeof realm.Element !== 'function'
       || typeof realm.Range !== 'function'
