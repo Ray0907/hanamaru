@@ -11,6 +11,10 @@ import {
   HanamaruStateError,
   HanamaruTargetError,
 } from './errors.js';
+import {
+  deleteControllerMetadata,
+  recordStoryMetadata,
+} from './controller-metadata.js';
 import { acquireDocumentResources } from './scheduler.js';
 import { resolveTarget } from './target.js';
 
@@ -165,8 +169,8 @@ export function createStory(steps, rawOptions = {}, env) {
       annotations.push(env.createAnnotation(step.target, step.annotationOptions));
     }
   } catch (error) {
-    for (const annotation of annotations) {
-      try { annotation.destroy(); } catch { /* Preserve the construction failure. */ }
+    for (let index = annotations.length - 1; index >= 0; index -= 1) {
+      try { annotations[index].destroy(); } catch { /* Preserve the construction failure. */ }
     }
     throw error;
   }
@@ -693,6 +697,7 @@ export function createStory(steps, rawOptions = {}, env) {
 
   function destroy() {
     if (state === 'destroyed') return controller;
+    deleteControllerMetadata(controller);
     operationEpoch += 1;
     const notifyCancel = (state === 'playing' || state === 'paused')
       && run !== null && !run.settled;
@@ -703,7 +708,7 @@ export function createStory(steps, rawOptions = {}, env) {
     stopAutomaticTrigger(true);
     let destroyFailure = null;
     let destroyFailureIndex = -1;
-    for (let index = 0; index < annotations.length; index += 1) {
+    for (let index = annotations.length - 1; index >= 0; index -= 1) {
       try {
         annotations[index].destroy();
       } catch (error) {
@@ -720,11 +725,17 @@ export function createStory(steps, rawOptions = {}, env) {
   }
   try {
     installAutomaticTrigger();
+    if (state !== 'destroyed') {
+      recordStoryMetadata(controller, options, annotations);
+    }
   } catch (error) {
     stopAutomaticTrigger(true);
-    for (const annotation of annotations) {
-      try { annotation.destroy(); } catch { /* Preserve trigger installation failure. */ }
+    for (let index = annotations.length - 1; index >= 0; index -= 1) {
+      try {
+        annotations[index].destroy();
+      } catch { /* Preserve trigger installation failure. */ }
     }
+    deleteControllerMetadata(controller);
     throw runtimeError(error);
   }
   return controller;

@@ -8,6 +8,10 @@ import {
   HanamaruStateError,
   HanamaruTargetError,
 } from './errors.js';
+import {
+  deleteControllerMetadata,
+  recordGroupMetadata,
+} from './controller-metadata.js';
 import { acquireDocumentResources } from './scheduler.js';
 import { resolveTarget } from './target.js';
 
@@ -984,6 +988,7 @@ export function createGroup(members, rawOptions = {}, env) {
 
   function destroy() {
     if (state === 'destroyed') return controller;
+    deleteControllerMetadata(controller);
     operationEpoch += 1;
     const notifyCancel = run !== null && !run.settled;
     abortPending('destroyed');
@@ -1023,6 +1028,9 @@ export function createGroup(members, rawOptions = {}, env) {
       stopMemberErrors = env.observeMemberErrors(handleMemberError);
     }
     installAutomaticTrigger();
+    if (state !== 'destroyed') {
+      recordGroupMetadata(controller, options, annotations);
+    }
   } catch (error) {
     stopAutomaticTrigger();
     try { stopMemberErrors?.(); } catch { /* Preserve setup failure. */ }
@@ -1030,6 +1038,7 @@ export function createGroup(members, rawOptions = {}, env) {
     for (let index = annotations.length - 1; index >= 0; index -= 1) {
       try { annotations[index].destroy(); } catch { /* Preserve trigger setup failure. */ }
     }
+    deleteControllerMetadata(controller);
     throw runtimeError(error);
   }
   return controller;

@@ -15,6 +15,10 @@ import {
   readThemeMetrics,
   removeDescriptionToken,
 } from './renderer.js';
+import {
+  deleteControllerMetadata,
+  recordAnnotationMetadata,
+} from './controller-metadata.js';
 import { runtimeState } from './runtime-state.js';
 import { acquireDocumentResources } from './scheduler.js';
 import { resolveTarget } from './target.js';
@@ -1074,7 +1078,14 @@ export function createAnnotation(target, rawOptions, env) {
       handleRuntimeFailure(error);
       return controller;
     }
+    if (destroyed) {
+      cleanupUncommittedRenderer(nextRenderer);
+      try { oldRenderer.destroy(); } catch { /* Destroy already owns the lifecycle outcome. */ }
+      forceRemoveRenderer(oldRenderer, knownOwners);
+      return controller;
+    }
     commitRenderer(renderer);
+    recordAnnotationMetadata(controller, currentTarget, options);
     knownOwners.add(nextRecord.ownerElement);
     let cleanupFailure = null;
     try { oldRenderer.hide(); } catch (error) { cleanupFailure = error; }
@@ -1110,6 +1121,7 @@ export function createAnnotation(target, rawOptions, env) {
 
   function destroy() {
     if (destroyed) return controller;
+    deleteControllerMetadata(controller);
     pausedControllers.delete(controller);
     acceptOperation(false);
     const wasActive = state === 'showing' || state === 'visible'
@@ -1140,6 +1152,10 @@ export function createAnnotation(target, rawOptions, env) {
   try {
     bindLayout();
     installAutomaticTrigger();
+    if (destroyed) {
+      cleanupUncommittedRenderer(renderer);
+      return controller;
+    }
     commitRenderer(renderer);
   } catch (error) {
     activeRenderers.delete(controller);
@@ -1149,5 +1165,6 @@ export function createAnnotation(target, rawOptions, env) {
     try { lease.release(); } catch { /* Preserve binding failure. */ }
     throw stateError(error);
   }
+  recordAnnotationMetadata(controller, currentTarget, options);
   return controller;
 }
