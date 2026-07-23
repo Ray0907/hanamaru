@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createAdapterOwner } from '../../src/adapters/lifecycle.js';
+import { createAnnotation } from '../../src/annotation.js';
+import { readControllerMetadata } from '../../src/controller-metadata.js';
 import { HanamaruConfigError } from '../../src/errors.js';
+import { createAdapterOwner } from '../../src/adapters/lifecycle.js';
 
 class FakeTarget extends EventTarget {
   constructor(name, calls) {
@@ -63,6 +65,8 @@ function createHarness() {
   let destroyFailure = null;
   let exposeFailure = null;
   let onDestroy = null;
+  let showEvent = null;
+  let showFinishedFailure = null;
 
   const owner = createAdapterOwner({
     create(target, options) {
@@ -79,8 +83,14 @@ function createHarness() {
         },
         show() {
           calls.push(`show:${target.name}`);
+          if (showEvent !== null) {
+            target.fail(controller, showEvent.error, showEvent.generation);
+          }
           if (showFailure !== null) throw showFailure;
-          controller.finished = run.promise;
+          controller.finished = showFinishedFailure === null
+            ? run.promise
+            : Promise.reject(showFinishedFailure);
+          controller.finished.catch(() => {});
           return controller;
         },
         finished: null,
@@ -114,6 +124,10 @@ function createHarness() {
     setDestroyFailure(error) { destroyFailure = error; },
     setExposeFailure(error) { exposeFailure = error; },
     setOnDestroy(callback) { onDestroy = callback; },
+    setShowEvent(error, generation = undefined) {
+      showEvent = error === null ? null : { error, generation };
+    },
+    setShowFinishedFailure(error) { showFinishedFailure = error; },
     setShowFailure(error) { showFailure = error; },
     setUpdateFailure(error) { updateFailure = error; },
   };
@@ -121,6 +135,20 @@ function createHarness() {
 
 const box = Object.freeze({ mark: 'box' });
 const circle = Object.freeze({ mark: 'circle' });
+
+function manualOptions(mark, seed, overrides = {}) {
+  return {
+    mark,
+    note: null,
+    placement: 'auto',
+    trigger: 'manual',
+    accessible: false,
+    seed,
+    duration: 650,
+    motion: 'system',
+    ...overrides,
+  };
+}
 
 async function flushMicrotasks() {
   await Promise.resolve();
@@ -133,12 +161,10 @@ test('mount defaults enabled, forces manual trigger, listens before show, and ex
 
   assert.deepEqual(Object.keys(harness.owner), ['mount', 'update', 'destroy']);
   assert.equal(harness.owner.mount(target, box), harness.owner);
+  const seed = harness.calls[0][2].seed;
 
   assert.deepEqual(harness.calls, [
-    ['create', 'first', {
-      mark: 'box',
-      trigger: 'manual',
-    }],
+    ['create', 'first', manualOptions('box', seed)],
     'listen:first',
     'show:first',
     'expose:first',
@@ -171,6 +197,7 @@ test('update compares canonical values and retains the same controller', () => {
     duration: 650,
     motion: 'system',
   });
+  const seed = harness.calls[0][2].seed;
   harness.calls.length = 0;
 
   harness.owner.update(target, { mark: 'box' });
@@ -178,10 +205,7 @@ test('update compares canonical values and retains the same controller', () => {
 
   harness.owner.update(target, circle);
   assert.deepEqual(harness.calls, [
-    ['update', 'first', {
-      mark: 'circle',
-      trigger: 'manual',
-    }],
+    ['update', 'first', manualOptions('circle', seed)],
   ]);
   assert.equal(harness.controllers.length, 1);
   assert.equal(target.listenerCount, 1);
@@ -195,12 +219,10 @@ test('replacement accepts and shows new ownership before old teardown', () => {
   harness.calls.length = 0;
 
   harness.owner.update(second, circle);
+  const seed = harness.calls[0][2].seed;
 
   assert.deepEqual(harness.calls, [
-    ['create', 'second', {
-      mark: 'circle',
-      trigger: 'manual',
-    }],
+    ['create', 'second', manualOptions('circle', seed)],
     'listen:second',
     'show:second',
     'unlisten:first',
@@ -221,15 +243,13 @@ test('disable, repeated disable, and re-enable own cleanup exactly once', () => 
   harness.owner.update(target, box, { enabled: false });
   harness.owner.update(target, box, { enabled: false });
   harness.owner.update(target, box, { enabled: true });
+  const seed = harness.calls[3][2].seed;
 
   assert.deepEqual(harness.calls, [
     'unlisten:first',
     'destroy:first',
     'expose:null',
-    ['create', 'first', {
-      mark: 'box',
-      trigger: 'manual',
-    }],
+    ['create', 'first', manualOptions('box', seed)],
     'listen:first',
     'show:first',
     'expose:first',
@@ -271,11 +291,9 @@ test('mount show failure removes its listener, destroys the candidate, and rethr
   harness.setShowFailure(failure);
 
   assert.throws(() => harness.owner.mount(target, box), (error) => error === failure);
+  const seed = harness.calls[0][2].seed;
   assert.deepEqual(harness.calls, [
-    ['create', 'first', {
-      mark: 'box',
-      trigger: 'manual',
-    }],
+    ['create', 'first', manualOptions('box', seed)],
     'listen:first',
     'show:first',
     'unlisten:first',
@@ -289,16 +307,14 @@ test('same-target update failure cleans exposed ownership and rethrows directly'
   const harness = createHarness();
   const target = new FakeTarget('first', harness.calls);
   harness.owner.mount(target, box);
+  const seed = harness.calls[0][2].seed;
   harness.calls.length = 0;
   const failure = new Error('update failed');
   harness.setUpdateFailure(failure);
 
   assert.throws(() => harness.owner.update(target, circle), (error) => error === failure);
   assert.deepEqual(harness.calls, [
-    ['update', 'first', {
-      mark: 'circle',
-      trigger: 'manual',
-    }],
+    ['update', 'first', manualOptions('circle', seed)],
     'unlisten:first',
     'destroy:first',
     'expose:null',
@@ -606,4 +622,224 @@ test('show must publish one observable finished Promise before exposure', () => 
     'unlisten:first',
     'destroy:first',
   ]);
+});
+
+function realCoreEnvironment() {
+  let generation = 0;
+  const shared = {
+    registerController() { generation += 1; return generation; },
+    releaseController() {},
+    bumpGeneration() { generation += 1; return generation; },
+    observeLayout() { return () => {}; },
+    rebindLayout() { return () => {}; },
+    enqueue({ read, write, onError }) {
+      try { write(read()); } catch (error) { onError(error); }
+    },
+  };
+  const lease = { shared, release() {} };
+  return {
+    id: 'adapter-real-core',
+    lease,
+    resolveTarget(target) {
+      return {
+        kind: 'element',
+        element: target,
+        ownerElement: target,
+        refresh() { return this; },
+      };
+    },
+    targetRects() {
+      return [{
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 20,
+        top: 0,
+        right: 80,
+        bottom: 20,
+        left: 0,
+      }];
+    },
+    createRenderer() {
+      return {
+        group: {},
+        noteElement: null,
+        measure() {
+          return {
+            noteRect: null,
+            peerNoteRects: [],
+            viewport: { width: 800, height: 600 },
+          };
+        },
+        draw() {},
+        animate() { return { finished: Promise.resolve() }; },
+        finish() {},
+        hide() {},
+        destroy() {},
+        updateOwner() {},
+      };
+    },
+    readThemeMetrics() { return { duration: 650, noteGap: 16 }; },
+    reducedMotion() { return true; },
+    createEvent(type, detail, target) {
+      const event = new Event(type);
+      Object.defineProperty(event, 'detail', { value: detail });
+      target.dispatchEvent(event);
+    },
+    microtask(callback) { queueMicrotask(callback); },
+  };
+}
+
+test('same-target sparse update restores canonical defaults on the real core controller', () => {
+  const calls = [];
+  const target = new FakeTarget('real', calls);
+  const environment = realCoreEnvironment();
+  const exposed = [];
+  const owner = createAdapterOwner({
+    create(nextTarget, options) {
+      return createAnnotation(nextTarget, options, environment);
+    },
+    expose(controller) { exposed.push(controller); },
+  });
+
+  owner.mount(target, {
+    mark: 'box',
+    note: 'explicit',
+    placement: 'left',
+    accessible: true,
+    seed: 'explicit-seed',
+    duration: 42,
+    motion: 'never',
+  });
+  const controller = exposed[0];
+  assert.equal(readControllerMetadata(controller).options.note, 'explicit');
+
+  owner.update(target, { mark: 'box' });
+
+  assert.equal(exposed.at(-1), controller);
+  assert.deepEqual(readControllerMetadata(controller).options, {
+    mark: 'box',
+    note: null,
+    placement: 'auto',
+    trigger: 'manual',
+    accessible: false,
+    seed: readControllerMetadata(controller).options.seed,
+    duration: 650,
+    motion: 'system',
+  });
+  assert.notEqual(readControllerMetadata(controller).options.seed, 'explicit-seed');
+  owner.destroy();
+});
+
+test('hana:error emitted synchronously by candidate show is cleaned before initial null exposure and onError', () => {
+  const harness = createHarness();
+  const target = new FakeTarget('first', harness.calls);
+  const failure = new Error('show event failed');
+  const observed = [];
+  harness.setShowEvent(failure, 11);
+
+  harness.owner.mount(target, box, {
+    onError(error, controller) {
+      observed.push({
+        controller,
+        error,
+        exposed: harness.exposed.at(-1),
+        listenerCount: target.listenerCount,
+      });
+    },
+  });
+
+  assert.equal(harness.exposed.at(-1), null);
+  assert.deepEqual(observed, [{
+    controller: harness.controllers[0],
+    error: failure,
+    exposed: null,
+    listenerCount: 0,
+  }]);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:first').length, 1);
+  assert.ok(!harness.calls.includes('expose:first'));
+});
+
+test('candidate show hana:error retains prior replacement ownership', () => {
+  const harness = createHarness();
+  const first = new FakeTarget('first', harness.calls);
+  const second = new FakeTarget('second', harness.calls);
+  const observed = [];
+  harness.owner.mount(first, box);
+  const previous = harness.controllers[0];
+  const failure = new Error('replacement show event failed');
+  harness.setShowEvent(failure, 12);
+  harness.calls.length = 0;
+
+  harness.owner.update(second, circle, {
+    onError(error, controller) { observed.push([error, controller]); },
+  });
+
+  assert.equal(harness.exposed.at(-1), previous);
+  assert.equal(first.listenerCount, 1);
+  assert.equal(second.listenerCount, 0);
+  assert.deepEqual(observed, [[failure, harness.controllers[1]]]);
+  assert.ok(!harness.calls.includes('destroy:first'));
+  assert.ok(!harness.calls.includes('expose:null'));
+  assert.ok(!harness.calls.includes('expose:second'));
+});
+
+test('show event followed by synchronous throw preserves direct throw without onError delivery', () => {
+  const harness = createHarness();
+  const target = new FakeTarget('first', harness.calls);
+  const eventFailure = new Error('event first');
+  const showFailure = new Error('show threw');
+  const observed = [];
+  harness.setShowEvent(eventFailure, 13);
+  harness.setShowFailure(showFailure);
+
+  assert.throws(
+    () => harness.owner.mount(target, box, {
+      onError(error) { observed.push(error); },
+    }),
+    (error) => error === showFailure,
+  );
+  assert.deepEqual(observed, []);
+  assert.deepEqual(harness.exposed, []);
+  assert.equal(target.listenerCount, 0);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:first').length, 1);
+});
+
+test('candidate event and exact finished rejection deduplicate before exposure', async () => {
+  const harness = createHarness();
+  const target = new FakeTarget('first', harness.calls);
+  const failure = new Error('dual candidate failure');
+  const observed = [];
+  harness.setShowEvent(failure, 14);
+  harness.setShowFinishedFailure(failure);
+
+  harness.owner.mount(target, box, {
+    onError(error) { observed.push(error); },
+  });
+  await flushMicrotasks();
+
+  assert.deepEqual(observed, [failure]);
+  assert.equal(harness.exposed.filter((value) => value === null).length, 1);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:first').length, 1);
+  assert.ok(!harness.calls.includes('expose:first'));
+});
+
+test('candidate onError reentrancy wins over the stale outer mount', () => {
+  const harness = createHarness();
+  const failed = new FakeTarget('failed', harness.calls);
+  const winner = new FakeTarget('winner', harness.calls);
+  const failure = new Error('candidate failed');
+  harness.setShowEvent(failure);
+
+  harness.owner.mount(failed, box, {
+    onError() {
+      harness.setShowEvent(null);
+      harness.owner.mount(winner, circle);
+    },
+  });
+
+  assert.equal(harness.exposed.at(-1).target, winner);
+  assert.equal(failed.listenerCount, 0);
+  assert.equal(winner.listenerCount, 1);
+  assert.ok(!harness.calls.includes('expose:failed'));
 });

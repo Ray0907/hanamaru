@@ -12,6 +12,7 @@ const OPTION_KEYS = new Set([
 ]);
 const CONFIG_KEYS = new Set(['enabled', 'onError']);
 const DEFAULT_SEED = '__hanamaru_adapter_default_seed__';
+let nextAdapterSeed = 0;
 
 function invalid(field, value) {
   throw new HanamaruConfigError(
@@ -47,7 +48,26 @@ function normalizeAdapterOptions(input) {
       normalized.duration,
       normalized.motion,
     ],
-    manual,
+    normalized,
+    seedExplicit: own(input, 'seed'),
+  };
+}
+
+function allocateDefaultSeed() {
+  nextAdapterSeed += 1;
+  return `hana-adapter-${nextAdapterSeed}`;
+}
+
+function completeManual(prepared, defaultSeed) {
+  return {
+    mark: prepared.normalized.mark,
+    note: prepared.normalized.note,
+    placement: prepared.normalized.placement,
+    trigger: 'manual',
+    accessible: prepared.normalized.accessible,
+    seed: prepared.seedExplicit ? prepared.normalized.seed : defaultSeed,
+    duration: prepared.normalized.duration,
+    motion: prepared.normalized.motion,
   };
 }
 
@@ -161,6 +181,17 @@ export function createAdapterOwner({
     }
   }
 
+  function routeFailure(record, error, failureGeneration) {
+    if (!record.active) return;
+    if (record.phase === 'candidate') {
+      if (record.pendingFailure !== null) return;
+      if (seenFailure(record, error, failureGeneration)) return;
+      record.pendingFailure = { error, generation: failureGeneration };
+      return;
+    }
+    handleFailure(record, error, failureGeneration);
+  }
+
   function eventFailure(record, event) {
     let detail;
     try {
@@ -169,7 +200,7 @@ export function createAdapterOwner({
     } catch {
       return;
     }
-    handleFailure(record, detail.error, detail.generation);
+    routeFailure(record, detail.error, detail.generation);
   }
 
   function observeFinished(record) {
@@ -183,17 +214,13 @@ export function createAdapterOwner({
     }
     Reflect.apply(then, finished, [
       undefined,
-      (error) => handleFailure(record, error, undefined),
+      (error) => routeFailure(record, error, undefined),
     ]);
   }
 
   function createRecord(target, prepared, config) {
-    let controller;
-    try {
-      controller = create(target, prepared.manual);
-    } catch (error) {
-      throw error;
-    }
+    const defaultSeed = allocateDefaultSeed();
+    const controller = create(target, completeManual(prepared, defaultSeed));
     if (controller === null
       || (typeof controller !== 'object' && typeof controller !== 'function')) {
       throw new TypeError('create must return an annotation controller');
@@ -203,6 +230,7 @@ export function createAdapterOwner({
       active: true,
       canonical: prepared.canonical,
       controller,
+      defaultSeed,
       exposed: false,
       failureGenerations: new Set(),
       failureObjects: new WeakSet(),
@@ -211,6 +239,8 @@ export function createAdapterOwner({
       generation: ++nextGeneration,
       listener: null,
       onError: config.onError,
+      pendingFailure: null,
+      phase: 'candidate',
       target,
     };
     record.listener = (event) => eventFailure(record, event);
@@ -225,6 +255,25 @@ export function createAdapterOwner({
       throw error;
     }
     return record;
+  }
+
+  function rejectCandidate(record, previous) {
+    const failure = record.pendingFailure;
+    record.phase = 'failed';
+    cleanup(record, false, failure.error, true);
+    if (previous === null && current === null) {
+      try {
+        expose(null);
+      } catch (error) {
+        queueThrow(error);
+      }
+    }
+    if (abortFailure(failure.error) || record.onError === undefined) return;
+    try {
+      record.onError(failure.error, record.controller);
+    } catch (error) {
+      queueThrow(error);
+    }
   }
 
   function exposeRecord(record) {
@@ -263,7 +312,7 @@ export function createAdapterOwner({
       active.onError = config.onError;
       if (sameCanonical(active.canonical, prepared.canonical)) return owner;
       try {
-        active.controller.update(prepared.manual);
+        active.controller.update(completeManual(prepared, active.defaultSeed));
         if (!destroyed
           && operation === operationEpoch
           && current === active
@@ -280,6 +329,10 @@ export function createAdapterOwner({
 
     const previous = current;
     const candidate = createRecord(target, prepared, config);
+    if (candidate.pendingFailure !== null) {
+      rejectCandidate(candidate, previous);
+      return owner;
+    }
     if (destroyed || operation !== operationEpoch) {
       cleanup(candidate, false);
       return owner;
@@ -296,6 +349,7 @@ export function createAdapterOwner({
         return owner;
       }
     }
+    candidate.phase = 'current';
     current = candidate;
     try {
       exposeRecord(candidate);
