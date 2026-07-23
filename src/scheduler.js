@@ -1,3 +1,5 @@
+import { runtimeState } from './runtime-state.js';
+
 function requireFunction(name, value) {
   if (typeof value !== 'function') {
     throw new TypeError(`${name} must be a function`);
@@ -213,7 +215,7 @@ export class FrameQueue {
   }
 }
 
-const resourcesByDocument = new WeakMap();
+const resourcesByDocument = runtimeState.documents;
 
 function createOverlay(doc) {
   const overlay = doc.createElement('div');

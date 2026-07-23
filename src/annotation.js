@@ -15,6 +15,7 @@ import {
   readThemeMetrics,
   removeDescriptionToken,
 } from './renderer.js';
+import { runtimeState } from './runtime-state.js';
 import { acquireDocumentResources } from './scheduler.js';
 import { resolveTarget } from './target.js';
 
@@ -53,7 +54,11 @@ function optional(input, key, fallback) {
   return has(input, key) ? input[key] : fallback;
 }
 
-export function normalizeOptions(input, fallbackSeed, { allowUnknown = false } = {}) {
+export function normalizeOptions(
+  input,
+  fallbackSeed,
+  { allowUnknown = false, acceptedCustomMark = null } = {},
+) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     invalid('input', input);
   }
@@ -65,7 +70,9 @@ export function normalizeOptions(input, fallbackSeed, { allowUnknown = false } =
   }
 
   const mark = optional(input, 'mark', undefined);
-  if (!MARKS.has(mark)) invalid('mark', mark);
+  if (!MARKS.has(mark)
+    && !(acceptedCustomMark !== null && mark === acceptedCustomMark)
+    && !runtimeState.plugins.has(mark)) invalid('mark', mark);
 
   const note = optional(input, 'note', null);
   if (note !== null && typeof note !== 'string') invalid('note', note);
@@ -118,12 +125,12 @@ export function abortError(reason = 'Annotation run cancelled') {
   return new DOMException(reason, 'AbortError');
 }
 
-function layoutFor(record, renderer, options, env) {
+function layoutFor(record, renderer, options, markPlugin, env) {
   const targetRects = env.targetRects(record);
   const targetRect = unionRects(targetRects);
   const measured = renderer.measure();
   const metrics = env.readThemeMetrics(renderer.group);
-  const markPaths = buildMarkPaths(options.mark, targetRects, options.seed);
+  const markPaths = buildMarkPaths(options.mark, targetRects, options.seed, 5, markPlugin);
   const targetVisible = targetRects.some((item) => intersectsViewport(item, measured.viewport));
 
   if (measured.noteRect === null) {
@@ -366,6 +373,8 @@ export function createAnnotation(target, rawOptions, env) {
 
   const id = env.id;
   let options = normalizeOptions(rawOptions, id);
+  let markPlugin = MARKS.has(options.mark) ? null : runtimeState.plugins.get(options.mark);
+  if (!MARKS.has(options.mark) && markPlugin === undefined) invalid('mark', options.mark);
   let currentTarget = target;
   let record = env.resolveTarget(target);
   const lease = env.lease;
@@ -547,7 +556,7 @@ export function createAnnotation(target, rawOptions, env) {
         resolveCurrentTarget();
         const owner = record.ownerElement;
         const layout = requestedVisible
-          ? layoutFor(record, renderer, options, env)
+          ? layoutFor(record, renderer, options, markPlugin, env)
           : (env.targetRects(record), null);
         renderabilityEpisode = false;
         return {
@@ -628,7 +637,9 @@ export function createAnnotation(target, rawOptions, env) {
       if (!isCurrentOperation(operation)) return null;
       resolveCurrentTarget();
       const owner = record.ownerElement;
-      const layout = validate ? (env.targetRects(record), null) : layoutFor(record, renderer, options, env);
+      const layout = validate
+        ? (env.targetRects(record), null)
+        : layoutFor(record, renderer, options, markPlugin, env);
       renderabilityEpisode = false;
       return {
         layout,
@@ -870,8 +881,24 @@ export function createAnnotation(target, rawOptions, env) {
     const nextTarget = Object.prototype.hasOwnProperty.call(next, 'target') ? next.target : currentTarget;
     const optionPatch = { ...next };
     delete optionPatch.target;
-    const nextOptions = normalizeOptions({ ...options, ...optionPatch }, options.seed);
+    const nextOptions = normalizeOptions(
+      { ...options, ...optionPatch },
+      options.seed,
+      { acceptedCustomMark: markPlugin === null ? null : options.mark },
+    );
+    const nextMarkPlugin = MARKS.has(nextOptions.mark)
+      ? null
+      : (nextOptions.mark === options.mark && markPlugin !== null
+        ? markPlugin
+        : runtimeState.plugins.get(nextOptions.mark));
+    if (!MARKS.has(nextOptions.mark) && nextMarkPlugin === undefined) {
+      invalid('mark', nextOptions.mark);
+    }
     const nextRecord = env.resolveTarget(nextTarget);
+    if (nextOptions.mark !== options.mark && nextMarkPlugin !== null) {
+      const nextRects = env.targetRects(nextRecord);
+      buildMarkPaths(nextOptions.mark, nextRects, nextOptions.seed, 5, nextMarkPlugin);
+    }
     const operation = acceptOperation();
     let nextRenderer;
     try {
@@ -885,10 +912,12 @@ export function createAnnotation(target, rawOptions, env) {
     const oldRenderer = renderer;
     const oldTarget = currentTarget;
     const oldOptions = options;
+    const oldMarkPlugin = markPlugin;
     const oldRecord = record;
     const priorState = state;
     currentTarget = nextTarget;
     options = nextOptions;
+    markPlugin = nextMarkPlugin;
     record = nextRecord;
     renderer = nextRenderer;
     setActiveRenderer();
@@ -899,6 +928,7 @@ export function createAnnotation(target, rawOptions, env) {
       renderer = oldRenderer;
       currentTarget = oldTarget;
       options = oldOptions;
+      markPlugin = oldMarkPlugin;
       record = oldRecord;
       setActiveRenderer();
       handleRuntimeFailure(error);

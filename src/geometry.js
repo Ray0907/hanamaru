@@ -94,8 +94,11 @@ export function buildConnector(targetRect, noteRect, side) {
   };
 }
 
-export function buildMarkPaths(mark, rects, seed, padding = 5) {
+export function buildMarkPaths(mark, rects, seed, padding = 5, plugin = null) {
   if (!['underline', 'highlight', 'strike', 'circle', 'box', 'bracket'].includes(mark)) {
+    if (plugin !== null && typeof plugin?.build === 'function') {
+      return plugin.build(rects, unionRects(rects), seed, padding);
+    }
     throw new RangeError(`Unsupported mark: ${mark}`);
   }
 
