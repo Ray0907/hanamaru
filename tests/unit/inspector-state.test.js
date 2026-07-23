@@ -337,10 +337,11 @@ test('effect context keeps open invoker payload beside the exact reducer result'
   const result = reduceInspector(previous, event);
   const context = createInspectorEffectContext(previous, event, result);
 
-  assert.equal(context.previous, previous);
-  assert.equal(context.event, event);
+  assert.notEqual(context.previous, previous);
+  assert.notEqual(context.event, event);
   assert.equal(context.event.invoker, 'open-button');
-  assert.equal(context.next, result.model);
+  assert.notEqual(context.next, result.model);
+  assert.equal(context.next.state, result.model.state);
   assert.deepEqual(context.effects, [
     'capture-invoker',
     'mount',
@@ -348,6 +349,9 @@ test('effect context keeps open invoker payload beside the exact reducer result'
     'focus-exit',
   ]);
   assert.ok(Object.isFrozen(context));
+  assert.ok(Object.isFrozen(context.previous));
+  assert.ok(Object.isFrozen(context.event));
+  assert.ok(Object.isFrozen(context.next));
   assert.ok(Object.isFrozen(context.effects));
 });
 
@@ -394,6 +398,106 @@ test('effect context rejects malformed reducer inputs and results', () => {
   ]) {
     assert.throws(() => createInspectorEffectContext(...args), TypeError);
   }
+});
+
+test('effect context retains the invoker from the reducer read when its getter changes', () => {
+  const first = { id: 'first-invoker' };
+  const second = { id: 'second-invoker' };
+  let reads = 0;
+  const event = {
+    type: 'open',
+    get invoker() {
+      reads += 1;
+      return reads === 1 ? first : second;
+    },
+  };
+  const result = reduceInspector(CLOSED, event);
+  const context = createInspectorEffectContext(CLOSED, event, result);
+
+  assert.equal(reads, 1);
+  assert.equal(context.event.invoker, first);
+  assert.equal(event.invoker, second);
+  assert.equal(context.event.invoker, first);
+});
+
+test('effect context retains a transient opener without rereading its getter', () => {
+  const opener = { id: 'palette-opener' };
+  let openerReads = 0;
+  const transient = {
+    kind: 'palette',
+    get opener() {
+      openerReads += 1;
+      if (openerReads > 1) throw new Error('opener reread');
+      return opener;
+    },
+  };
+  const previous = {
+    state: 'selected',
+    transient,
+    mark: null,
+    options: {},
+  };
+  const event = { type: 'escape' };
+  const result = reduceInspector(previous, event);
+  const context = createInspectorEffectContext(previous, event, result);
+
+  assert.equal(openerReads, 1);
+  assert.equal(context.previous.transient.opener, opener);
+  assert.deepEqual(context.effects, ['close-transient', 'focus-transient-opener']);
+});
+
+test('effect context is unchanged by later caller event and model mutations', () => {
+  const previous = {
+    state: 'editing',
+    transient: null,
+    mark: 'underline',
+    options: { placement: 'auto' },
+  };
+  const event = { type: 'valid-option', name: 'duration', value: 320 };
+  const result = reduceInspector(previous, event);
+  const context = createInspectorEffectContext(previous, event, result);
+
+  previous.state = 'closed';
+  previous.options.placement = 'left';
+  event.type = 'close';
+  event.name = 'motion';
+  event.value = 'never';
+
+  assert.equal(context.previous.state, 'editing');
+  assert.deepEqual(context.previous.options, { placement: 'auto' });
+  assert.deepEqual(context.event, {
+    type: 'valid-option',
+    name: 'duration',
+    value: 320,
+  });
+  assert.equal(context.next.state, 'editing');
+  assert.deepEqual(context.next.options, { placement: 'auto', duration: 320 });
+  assert.ok(Object.isFrozen(context.previous.options));
+  assert.ok(Object.isFrozen(context.next.options));
+});
+
+test('only exact reducer results can create effect contexts without public metadata', () => {
+  const previous = { state: 'idle', transient: null };
+  const event = { type: 'valid-selection', range: { id: 'range' } };
+  const result = reduceInspector(previous, event);
+
+  assert.deepEqual(Object.keys(result).sort(), ['effects', 'model']);
+  assert.throws(
+    () => createInspectorEffectContext(
+      previous,
+      event,
+      { model: result.model, effects: result.effects },
+    ),
+    TypeError,
+  );
+  assert.throws(
+    () => createInspectorEffectContext({ ...previous }, event, result),
+    TypeError,
+  );
+  assert.throws(
+    () => createInspectorEffectContext(previous, { ...event }, result),
+    TypeError,
+  );
 });
 
 function assertRejected(model, event) {
@@ -529,6 +633,37 @@ test('advanced options accept only their exact public domains', () => {
   ];
   for (const [name, value] of rejected) {
     assertRejected(model, { type: 'valid-option', name, value });
+  }
+});
+
+test('existing malformed model options gate work but never block teardown', () => {
+  const malformed = [
+    ['placement', 'start'],
+    ['accessible', 1],
+    ['duration', -1],
+    ['duration', 1.5],
+    ['duration', undefined],
+    ['motion', 'always'],
+    ['seed', 10],
+  ];
+
+  for (const [name, value] of malformed) {
+    const model = {
+      state: 'editing',
+      transient: null,
+      mark: 'underline',
+      options: { [name]: value },
+    };
+    assertRejected(model, { type: 'apply' });
+    const closed = reduceInspector(model, { type: 'close' });
+    assert.equal(closed.model.state, 'closed');
+    assert.deepEqual(closed.effects, [
+      'destroy-owned',
+      'close-layers',
+      'remove-listeners',
+      'unmount',
+      'focus-connected-invoker',
+    ]);
   }
 });
 
@@ -744,12 +879,86 @@ test('valid transient snapshot reads kind once and preserves opener identity', (
     mark: null,
     options: {},
   };
-  const result = reduceInspector(model, { type: 'escape' });
+  const event = { type: 'escape' };
+  const result = reduceInspector(model, event);
 
   assert.equal(kindReads, 1);
   assert.equal(openerReads, 1);
   assert.equal(result.model.transient, null);
   assert.deepEqual(result.effects, ['close-transient', 'focus-transient-opener']);
-  const context = createInspectorEffectContext(model, { type: 'escape' }, result);
+  const context = createInspectorEffectContext(model, event, result);
   assert.equal(context.previous.transient.opener, opener);
+});
+
+test('closed state normalizes a stale valid transient before opening', () => {
+  const stale = {
+    state: 'closed',
+    transient: { kind: 'palette', opener: 'old-button' },
+    mark: 'circle',
+    options: { placement: 'left' },
+  };
+  const result = reduceInspector(stale, { type: 'open', invoker: 'open-button' });
+
+  assert.equal(result.model.state, 'idle');
+  assert.equal(result.model.transient, null);
+  assert.equal(result.model.mark, undefined);
+  assert.deepEqual(result.model.options, {});
+  assert.deepEqual(result.effects, [
+    'capture-invoker',
+    'mount',
+    'attach-listeners',
+    'focus-exit',
+  ]);
+});
+
+test('closed state opens without consulting hostile stale nonessential fields', () => {
+  const reads = { transient: 0, mark: 0, options: 0 };
+  const stale = {
+    state: 'closed',
+    get transient() {
+      reads.transient += 1;
+      throw new Error('stale transient');
+    },
+    get mark() {
+      reads.mark += 1;
+      throw new Error('stale mark');
+    },
+    get options() {
+      reads.options += 1;
+      throw new Error('stale options');
+    },
+  };
+  let result;
+  assert.doesNotThrow(() => {
+    result = reduceInspector(stale, { type: 'open', invoker: { id: 'open' } });
+  });
+
+  assert.deepEqual(reads, { transient: 0, mark: 0, options: 0 });
+  assert.equal(result.model.state, 'idle');
+  assert.equal(result.model.transient, null);
+  assert.deepEqual(result.model.options, {});
+});
+
+test('accepted transitions structurally sanitize and replace options identity', () => {
+  const options = {
+    placement: 'auto',
+    unrelated: 'drop-me',
+  };
+  const previous = {
+    state: 'selected',
+    transient: null,
+    mark: null,
+    options,
+  };
+  const event = { type: 'choose-mark', mark: 'circle' };
+  const result = reduceInspector(previous, event);
+  const context = createInspectorEffectContext(previous, event, result);
+
+  assert.notEqual(result.model.options, options);
+  assert.deepEqual(result.model.options, { placement: 'auto' });
+  assert.ok(!Object.hasOwn(result.model.options, 'unrelated'));
+  assert.notEqual(context.previous.options, options);
+  assert.notEqual(context.next.options, result.model.options);
+  assert.deepEqual(context.previous.options, { placement: 'auto' });
+  assert.deepEqual(context.next.options, { placement: 'auto' });
 });
