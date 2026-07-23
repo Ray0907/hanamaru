@@ -120,10 +120,10 @@ test('serialized Range keys reject invalid native shapes and clone side effects'
       key: 'selection',
       targetKind: 'range',
     };
-    const resolve = (range) => {
+    const resolve = (range, root = document) => {
       try {
         const value = resolveSerializedTarget(wire, {
-          root: document,
+          root,
           resolveTarget() { return range; },
         });
         return {
@@ -198,11 +198,69 @@ test('serialized Range keys reject invalid native shapes and clone side effects'
     });
     const retargetResult = resolve(retargeting);
 
+    const originalText = host.firstChild;
+    const originalSnapshot = {
+      startContainer: originalText,
+      endContainer: originalText,
+      startOffset: 0,
+      endOffset: originalText.data.length,
+      commonAncestorContainer: originalText,
+    };
+    const maskRange = (range) => {
+      Object.defineProperties(range, Object.fromEntries(
+        Object.entries(originalSnapshot).map(([key, value]) => ([
+          key,
+          { configurable: true, value },
+        ])),
+      ));
+      return range;
+    };
+    const masked = document.createRange();
+    masked.setStart(originalText, originalSnapshot.startOffset);
+    masked.setEnd(originalText, originalSnapshot.endOffset);
+    maskRange(masked);
+    Object.defineProperty(masked, 'cloneRange', {
+      configurable: true,
+      value() {
+        masked.setStart(nextText, 0);
+        masked.setEnd(nextText, nextText.data.length);
+        return maskRange(Range.prototype.cloneRange.call(masked));
+      },
+    });
+    const maskedResult = resolve(masked);
+
+    const frame = document.createElement('iframe');
+    frame.srcdoc = '<p id="frame-range">Iframe range text</p>';
+    const loaded = new Promise((complete) => {
+      frame.addEventListener('load', complete, { once: true });
+    });
+    document.body.append(frame);
+    await loaded;
+    const frameDocument = frame.contentDocument;
+    const frameWindow = frame.contentWindow;
+    const frameHost = frameDocument.querySelector('#frame-range');
+    const frameRange = frameDocument.createRange();
+    frameRange.selectNodeContents(frameHost);
+    const frameResult = resolve(frameRange, frameDocument);
+    const iframeProof = {
+      returned: frameResult.returned,
+      isFrameRange: frameResult.value instanceof frameWindow.Range,
+      distinct: frameResult.value !== frameRange,
+      sameStartContainer:
+        frameResult.value?.startContainer === frameRange.startContainer,
+      sameEndContainer: frameResult.value?.endContainer === frameRange.endContainer,
+      sameStartOffset: frameResult.value?.startOffset === frameRange.startOffset,
+      sameEndOffset: frameResult.value?.endOffset === frameRange.endOffset,
+    };
+
     valid.detach();
     commentRange.detach();
     overridden.detach();
     disconnecting.detach();
     retargeting.detach();
+    masked.detach();
+    frameRange.detach();
+    frame.remove();
     comment.remove();
 
     return {
@@ -211,6 +269,8 @@ test('serialized Range keys reject invalid native shapes and clone side effects'
       overrideResult,
       disconnectResult,
       retargetResult,
+      maskedResult,
+      iframeProof,
     };
   });
 
@@ -243,6 +303,20 @@ test('serialized Range keys reject invalid native shapes and clone side effects'
       returned: false,
       code: 'HANA_TARGET_INVALID',
       hasCause: true,
+    },
+    maskedResult: {
+      returned: false,
+      code: 'HANA_TARGET_INVALID',
+      hasCause: true,
+    },
+    iframeProof: {
+      returned: true,
+      isFrameRange: true,
+      distinct: true,
+      sameStartContainer: true,
+      sameEndContainer: true,
+      sameStartOffset: true,
+      sameEndOffset: true,
     },
   });
 });

@@ -96,52 +96,107 @@ function connectedElement(value, root) {
   }, (cause) => targetError(message, { target: value, cause }));
 }
 
-function connectedBoundary(node, root) {
-  return node === root
-    || (node?.ownerDocument === root
-      && node.isConnected
-      && node.getRootNode?.() === root);
+function prototypeDescriptor(Constructor, key) {
+  let prototype = typeof Constructor === 'function' ? Constructor.prototype : null;
+  while (prototype !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+    if (descriptor !== undefined) return descriptor;
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  return undefined;
 }
 
-function rangeOwner(range, root, ElementConstructor) {
-  const ancestor = range.commonAncestorContainer;
+function propertyReader(Constructor, key) {
+  const getter = prototypeDescriptor(Constructor, key)?.get;
+  return typeof getter === 'function'
+    ? (value) => Reflect.apply(getter, value, [])
+    : (value) => value?.[key];
+}
+
+function methodReader(Constructor, key) {
+  const method = prototypeDescriptor(Constructor, key)?.value;
+  return typeof method === 'function'
+    ? (value) => Reflect.apply(method, value, [])
+    : (value) => value?.[key]?.();
+}
+
+function connectedBoundary(node, root, readers) {
+  return node === root
+    || (readers.ownerDocument(node) === root
+      && readers.isConnected(node)
+      && readers.getRootNode(node) === root);
+}
+
+function rangeSnapshot(range, readers) {
+  return {
+    startContainer: readers.startContainer(range),
+    endContainer: readers.endContainer(range),
+    startOffset: readers.startOffset(range),
+    endOffset: readers.endOffset(range),
+    commonAncestorContainer: readers.commonAncestorContainer(range),
+  };
+}
+
+function rangeOwner(ancestor, root, ElementConstructor, readers) {
   if (ancestor instanceof ElementConstructor) return ancestor;
-  if (ancestor === root) return root.documentElement;
-  return ancestor?.parentElement ?? null;
+  if (ancestor === root) return readers.documentElement(root);
+  return readers.parentElement(ancestor);
 }
 
 function connectedRange(value, root) {
   const message = 'Resolved key must be a connected Range in the target Document';
   return reflectionBoundary(() => {
-    const RangeConstructor = root.defaultView.Range;
-    const ElementConstructor = root.defaultView.Element;
+    const realm = root.defaultView;
+    const RangeConstructor = realm.Range;
+    const ElementConstructor = realm.Element;
+    const rangeReaders = {
+      startContainer: propertyReader(RangeConstructor, 'startContainer'),
+      endContainer: propertyReader(RangeConstructor, 'endContainer'),
+      startOffset: propertyReader(RangeConstructor, 'startOffset'),
+      endOffset: propertyReader(RangeConstructor, 'endOffset'),
+      commonAncestorContainer:
+        propertyReader(RangeConstructor, 'commonAncestorContainer'),
+    };
+    const nodeReaders = {
+      ownerDocument: propertyReader(realm.Node, 'ownerDocument'),
+      isConnected: propertyReader(realm.Node, 'isConnected'),
+      getRootNode: methodReader(realm.Node, 'getRootNode'),
+      parentElement: propertyReader(realm.Node, 'parentElement'),
+      documentElement: propertyReader(realm.Document, 'documentElement'),
+    };
     if (!(value instanceof RangeConstructor)) {
       targetError(message, { target: value });
     }
-    const original = {
-      startContainer: value.startContainer,
-      endContainer: value.endContainer,
-      startOffset: value.startOffset,
-      endOffset: value.endOffset,
-    };
+    const original = rangeSnapshot(value, rangeReaders);
     if (![original.startContainer, original.endContainer]
-      .every((node) => connectedBoundary(node, root))) {
+      .every((node) => connectedBoundary(node, root, nodeReaders))) {
       targetError(message, { target: value });
     }
     const clone = resolveTarget(value, root).range;
-    const cloneBoundaries = [clone?.startContainer, clone?.endContainer];
-    const owner = rangeOwner(clone, root, ElementConstructor);
     if (!(clone instanceof RangeConstructor)
-      || clone === value
-      || !cloneBoundaries.every((node) => connectedBoundary(node, root))
+      || clone === value) {
+      throw new TypeError('Resolved Range clone must be a distinct equivalent Range');
+    }
+    const cloneSnapshot = rangeSnapshot(clone, rangeReaders);
+    const cloneBoundaries = [
+      cloneSnapshot.startContainer,
+      cloneSnapshot.endContainer,
+    ];
+    const owner = rangeOwner(
+      cloneSnapshot.commonAncestorContainer,
+      root,
+      ElementConstructor,
+      nodeReaders,
+    );
+    if (!cloneBoundaries.every((node) => connectedBoundary(node, root, nodeReaders))
       || !(owner instanceof ElementConstructor)
-      || owner.ownerDocument !== root
-      || !owner.isConnected
-      || owner.getRootNode() !== root
-      || clone.startContainer !== original.startContainer
-      || clone.endContainer !== original.endContainer
-      || clone.startOffset !== original.startOffset
-      || clone.endOffset !== original.endOffset) {
+      || nodeReaders.ownerDocument(owner) !== root
+      || !nodeReaders.isConnected(owner)
+      || nodeReaders.getRootNode(owner) !== root
+      || cloneSnapshot.startContainer !== original.startContainer
+      || cloneSnapshot.endContainer !== original.endContainer
+      || cloneSnapshot.startOffset !== original.startOffset
+      || cloneSnapshot.endOffset !== original.endOffset) {
       throw new TypeError('Resolved Range clone must be a distinct equivalent Range');
     }
     return clone;
