@@ -5,6 +5,32 @@ test.beforeEach(async ({ page }) => {
   await page.addStyleTag({ url: '/src/hanamaru.css' });
 });
 
+const NOTE_TEXT = 'Meaningful cross-browser note';
+
+function expectRendered(snapshot) {
+  expect(snapshot).toMatchObject({
+    state: 'visible',
+    overlayPosition: 'fixed',
+    mark: 'circle',
+    groupHidden: false,
+    groupDisplay: expect.not.stringMatching(/^none$/u),
+    pathD: expect.stringMatching(/\S/u),
+    pathGeometry: true,
+    note: NOTE_TEXT,
+    noteDisplay: expect.not.stringMatching(/^none$/u),
+    noteVisibility: 'visible',
+    noteHidden: false,
+    visualAriaHidden: 'true',
+    visualOutsideRoot: true,
+    mirrorText: NOTE_TEXT,
+    mirrorInRoot: true,
+    token: expect.stringMatching(/^hana-shadow-root-\d+-mirror-\d+$/u),
+    tokenResolvesInRoot: true,
+  });
+  expect(snapshot.pathLength).toBeGreaterThan(0);
+  expect(snapshot.pathStroke).not.toMatch(/^(?:none|transparent|rgba\(0,\s*0,\s*0,\s*0\))$/u);
+}
+
 test('open-root circle note completes, replays, and cleans up in every engine', async ({
   page,
 }) => {
@@ -23,54 +49,99 @@ test('open-root circle note completes, replays, and cleans up in every engine', 
       motion: 'never',
     });
 
-    controller.show();
-    await controller.finished;
-    const group = document.querySelector(
-      '[data-hana-shadow-overlay] .hana-annotation',
-    );
-    const visualNote = document.querySelector(
-      '[data-hana-shadow-overlay] [data-hana-note]',
-    );
-    const mirror = root.querySelector('[data-hana-shadow-mirror]');
-    const token = target.getAttribute('aria-describedby');
-    const firstVisible = {
-      state: controller.state,
-      mark: group?.getAttribute('data-hana-mark'),
-      groupHidden: group?.hasAttribute('hidden'),
-      pathCount: group?.querySelectorAll('path').length,
-      note: visualNote?.textContent,
-      visualAriaHidden: visualNote?.getAttribute('aria-hidden'),
-      visualOutsideRoot: visualNote?.getRootNode() === document,
-      mirrorText: mirror?.textContent,
-      mirrorInRoot: mirror?.getRootNode() === root,
-      token,
-      tokenResolvesInRoot: token !== null && root.getElementById(token) === mirror,
+    const currentNodes = () => {
+      const overlay = document.querySelector('[data-hana-shadow-overlay]');
+      const group = overlay?.querySelector('.hana-annotation') ?? null;
+      return {
+        overlay,
+        group,
+        path: group?.querySelector('path') ?? null,
+        note: overlay?.querySelector('[data-hana-note]') ?? null,
+        mirror: root.querySelector('[data-hana-shadow-mirror]'),
+      };
+    };
+    const visibleSnapshot = () => {
+      const nodes = currentNodes();
+      const token = target.getAttribute('aria-describedby');
+      const pathBox = nodes.path?.getBBox();
+      const pathRect = nodes.path?.getBoundingClientRect();
+      return {
+        state: controller.state,
+        overlayPosition: nodes.overlay === null
+          ? null
+          : getComputedStyle(nodes.overlay).position,
+        mark: nodes.group?.getAttribute('data-hana-mark'),
+        groupHidden: nodes.group?.hasAttribute('hidden'),
+        groupDisplay: nodes.group === null ? null : getComputedStyle(nodes.group).display,
+        pathD: nodes.path?.getAttribute('d'),
+        pathLength: nodes.path?.getTotalLength(),
+        pathStroke: nodes.path === null ? null : getComputedStyle(nodes.path).stroke,
+        pathGeometry: pathBox !== undefined
+          && pathRect !== undefined
+          && pathBox.width > 0
+          && pathBox.height > 0
+          && pathRect.width > 0
+          && pathRect.height > 0,
+        note: nodes.note?.textContent,
+        noteDisplay: nodes.note === null ? null : getComputedStyle(nodes.note).display,
+        noteVisibility: nodes.note === null ? null : getComputedStyle(nodes.note).visibility,
+        noteHidden: nodes.note?.classList.contains('hana-is-hidden'),
+        visualAriaHidden: nodes.note?.getAttribute('aria-hidden'),
+        visualOutsideRoot: nodes.note?.getRootNode() === document,
+        mirrorText: nodes.mirror?.textContent,
+        mirrorInRoot: nodes.mirror?.getRootNode() === root,
+        token,
+        tokenResolvesInRoot: token !== null
+          && root.getElementById(token) === nodes.mirror,
+      };
     };
 
+    controller.show();
+    await controller.finished;
+    const firstNodes = currentNodes();
+    const firstVisible = visibleSnapshot();
+
     controller.hide();
+    const hiddenNodes = currentNodes();
     const hidden = {
       state: controller.state,
-      groupHidden: group?.hasAttribute('hidden'),
-      noteHidden: visualNote?.classList.contains('hana-is-hidden'),
+      groupHidden: hiddenNodes.group?.hasAttribute('hidden'),
+      groupDisplay: hiddenNodes.group === null
+        ? null
+        : getComputedStyle(hiddenNodes.group).display,
+      noteHidden: hiddenNodes.note?.classList.contains('hana-is-hidden'),
+      noteDisplay: hiddenNodes.note === null
+        ? null
+        : getComputedStyle(hiddenNodes.note).display,
+      noteVisibility: hiddenNodes.note === null
+        ? null
+        : getComputedStyle(hiddenNodes.note).visibility,
       mirrors: root.querySelectorAll('[data-hana-shadow-mirror]').length,
       describedBy: target.getAttribute('aria-describedby'),
     };
 
     controller.replay();
     await controller.finished;
-    const replayMirror = root.querySelector('[data-hana-shadow-mirror]');
-    const replayToken = target.getAttribute('aria-describedby');
+    const replayNodes = currentNodes();
     const replayed = {
-      state: controller.state,
-      groupHidden: group?.hasAttribute('hidden'),
-      noteHidden: visualNote?.classList.contains('hana-is-hidden'),
-      mirrorInRoot: replayMirror?.getRootNode() === root,
-      recreatedMirror: replayMirror !== mirror,
-      token: replayToken,
-      tokenResolvesInRoot: replayToken !== null
-        && root.getElementById(replayToken) === replayMirror,
+      ...visibleSnapshot(),
+      currentOutput: {
+        overlay: replayNodes.overlay !== null,
+        group: replayNodes.group !== null,
+        path: replayNodes.path !== null,
+        note: replayNodes.note !== null,
+        mirror: replayNodes.mirror !== null,
+      },
+      nodeLifecycle: {
+        overlay: replayNodes.overlay === firstNodes.overlay,
+        group: replayNodes.group === firstNodes.group,
+        pathRecreated: replayNodes.path !== firstNodes.path,
+        note: replayNodes.note === firstNodes.note,
+        mirrorRecreated: replayNodes.mirror !== firstNodes.mirror,
+      },
     };
 
+    const finalNodes = currentNodes();
     scope.destroy();
     return {
       firstVisible,
@@ -83,38 +154,44 @@ test('open-root circle note completes, replays, and cleans up in every engine', 
         notes: document.querySelectorAll('[data-hana-note]').length,
         mirrors: root.querySelectorAll('[data-hana-shadow-mirror]').length,
         describedBy: target.getAttribute('aria-describedby'),
+        disconnected: {
+          overlay: finalNodes.overlay?.isConnected,
+          group: finalNodes.group?.isConnected,
+          path: finalNodes.path?.isConnected,
+          note: finalNodes.note?.isConnected,
+          mirror: finalNodes.mirror?.isConnected,
+        },
       },
     };
   });
 
-  expect(result.firstVisible).toMatchObject({
-    state: 'visible',
-    mark: 'circle',
-    groupHidden: false,
-    note: 'Meaningful cross-browser note',
-    visualAriaHidden: 'true',
-    visualOutsideRoot: true,
-    mirrorText: 'Meaningful cross-browser note',
-    mirrorInRoot: true,
-    token: expect.stringMatching(/^hana-shadow-root-\d+-mirror-\d+$/u),
-    tokenResolvesInRoot: true,
-  });
-  expect(result.firstVisible.pathCount).toBeGreaterThan(0);
+  expectRendered(result.firstVisible);
   expect(result.hidden).toEqual({
     state: 'hidden',
     groupHidden: true,
+    groupDisplay: 'none',
     noteHidden: true,
+    noteDisplay: 'block',
+    noteVisibility: 'hidden',
     mirrors: 0,
     describedBy: null,
   });
+  expectRendered(result.replayed);
   expect(result.replayed).toMatchObject({
-    state: 'visible',
-    groupHidden: false,
-    noteHidden: false,
-    mirrorInRoot: true,
-    recreatedMirror: true,
-    token: expect.stringMatching(/^hana-shadow-root-\d+-mirror-\d+$/u),
-    tokenResolvesInRoot: true,
+    currentOutput: {
+      overlay: true,
+      group: true,
+      path: true,
+      note: true,
+      mirror: true,
+    },
+    nodeLifecycle: {
+      overlay: true,
+      group: true,
+      pathRecreated: true,
+      note: true,
+      mirrorRecreated: true,
+    },
   });
   expect(result.cleanup).toEqual({
     state: 'destroyed',
@@ -123,5 +200,12 @@ test('open-root circle note completes, replays, and cleans up in every engine', 
     notes: 0,
     mirrors: 0,
     describedBy: null,
+    disconnected: {
+      overlay: false,
+      group: false,
+      path: false,
+      note: false,
+      mirror: false,
+    },
   });
 });
