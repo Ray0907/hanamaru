@@ -87,7 +87,7 @@ dist/
   svelte/index.d.ts
 ```
 
-`package.json` must include `repository`, `homepage`, `bugs`, `keywords`, `types`, explicit conditional `exports`, and `sideEffects`. CSS is the only declared side effect and remains opt-in through `./style.css`. The package `files` list remains an allowlist. Published tarballs contain only npm's mandatory `package.json` plus `dist`, `README.md`, and `LICENSE`.
+`package.json` must include `repository`, `homepage`, `bugs`, `keywords`, `types`, explicit conditional `exports`, and the exact `sideEffects` array `["./dist/hanamaru.css", "./dist/shadow/hanamaru-shadow.css"]`. CSS remains opt-in through either public CSS export; JavaScript entries have no top-level side effects. The package `files` list remains an allowlist. Published tarballs contain only npm's mandatory `package.json` plus `dist`, `README.md`, and `LICENSE`.
 
 React, Vue, and Svelte are optional peer dependencies:
 
@@ -208,7 +208,7 @@ Because Inspector acceptance includes visual layout and motion, Computer Use is 
 
 .github/workflows/ci.yml runs the fixed verification on pushes and pull requests with `permissions: { contents: read }`. On `main`, it runs `npm pack --json`, records the tarball SHA-512, and uploads the exact `.tgz` plus digest as a workflow artifact.
 
-`.github/workflows/release.yml` runs on `v*` tags with `permissions: { contents: read }`. Its first script reads the triggering ref, parses the text after `v` with the development-only `semver` package's `valid()` function, and requires the original tag to equal `v${package.json.version}` byte-for-byte. A malformed, normalized-but-not-identical, or mismatched tag fails before install or build. The workflow then checks out the tagged commit, repeats the full verification, creates the exact pack tarball once, records its SHA-512, and uploads both as a workflow artifact. It has no `id-token: write`, `packages: write`, npm token, persisted npm configuration, or release-write permission. Future trusted publishing may be configured as a separate reviewed change.
+`.github/workflows/release.yml` runs on `v*` tags with `permissions: { contents: read }`. It first checks out the tagged commit without persisting credentials, then runs checked-in `scripts/check-release-tag.mjs` before dependency installation. That dependency-free script reads `package.json`, validates both package version and text after `v` with the SemVer 2.0.0 grammar implemented in the script, and requires the original tag to equal `v${package.json.version}` byte-for-byte. A malformed, normalized-but-not-identical, or mismatched tag fails before install or build. The workflow then installs the lockfile, repeats the full verification, creates the exact pack tarball once, records its SHA-512, and uploads both as a workflow artifact. It has no `id-token: write`, `packages: write`, npm token, persisted npm configuration, or release-write permission. Unit tests run the validator against valid, invalid, normalized-but-different, and version-mismatched tags. Future trusted publishing may be configured as a separate reviewed change.
 
 The first public release is executed in this order:
 

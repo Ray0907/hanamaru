@@ -34,6 +34,19 @@ const restored = restore(definition, {
 
 `resolveSerializedTarget(target, context?)` validates and resolves one serialized target without creating a controller. It returns a connected Element or a cloned native Range. This is the public primitive used by Inspector to prove locator boundary equality.
 
+Resolver callbacks receive this exact context:
+
+```ts
+type SerializedResolverContext = {
+  targetKind: 'element' | 'range'
+  role: 'target' | 'within'
+  controllerKind: 'annotation' | 'story' | 'group' | null
+  index: number | null
+}
+```
+
+During `restore()`, `controllerKind` is the definition kind and `index` is the zero-based Story step or Group member index, or `null` for a top-level Annotation. During isolated `resolveSerializedTarget()`, `controllerKind` and `index` are both `null`; `role` is `target` for the supplied target and `within` when resolving its locator container. `targetKind` is always the kind required at that exact resolution point, so locator containers report `element`.
+
 ## Schema
 
 The exported declaration types are `SerializedDefinition`, `SerializedAnnotation`, `SerializedStory`, `SerializedGroup`, and `SerializedTarget`. Every top-level definition begins with:
@@ -65,7 +78,7 @@ Serializable targets are:
 { "type": "key", "key": "review-17", "targetKind": "range" }
 ```
 
-`targetKind` is `element` or `range`. A locator's `within` accepts only a serialized selector or an element key. String selectors and selector-scoped text locators serialize directly. A locator whose `within` is an Element, a direct Element target, and a native Range target require `keyForTarget`. The callback receives the original accepted target plus `{ role: 'target' | 'within', controllerKind, ownerElement, index? }` and must return a non-empty string. Direct keys preserve whether the resolver must return an Element or Range. Locator `within` keys always require an Element. Hanamaru does not generate CSS paths.
+`targetKind` is `element` or `range`. A locator's `within` accepts only a serialized selector or an element key. String selectors and selector-scoped text locators serialize directly. A locator whose `within` is an Element, a direct Element target, and a native Range target require `keyForTarget`. The callback receives the original accepted target plus `{ role: 'target' | 'within', controllerKind, ownerElement, index: number | null }` and must return a non-empty string. For serialization, `controllerKind` is never `null`; `index` follows the same aggregate-member rule as restore. Direct keys preserve whether the resolver must return an Element or Range. Locator `within` keys always require an Element. Hanamaru does not generate CSS paths.
 
 The complete canonical shapes are:
 
@@ -155,7 +168,7 @@ Both restore paths:
 - validates plain own-data objects and rejects accessors, unexpected prototypes, unknown keys, and cyclic input;
 - rejects unknown schema versions and kinds;
 - resolves selectors and locators only inside `root`;
-- calls `resolveTarget(key, { targetKind, role, controllerKind, index? })` for `key` targets;
+- calls `resolveTarget(key, context)` for `key` targets using the complete `SerializedResolverContext` contract above, with no omitted fields;
 - validates the resolver result through normal target resolution;
 - requires an Element result for locator `within` keys and the declared Element or Range kind for direct keys;
 - preflights every Story or Group member before mounting any output;
@@ -169,4 +182,4 @@ Malformed data, unsupported versions, unknown keys, non-finite numbers, and a mi
 
 ## Verification
 
-Tests cover canonical byte stability, every exact wire shape and key order, all target forms, callback failures, update metadata, generated seeds, nested Story and Group definitions, schema pollution attempts, accessors, cyclic objects, unknown versions, atomic aggregate restore, standalone Document and iframe restoration, standalone Shadow rejection, scoped open/closed Shadow restoration and teardown, `resolveSerializedTarget()` boundary clones, destroyed controllers, and round trips that reproduce final SVG paths and lifecycle behavior. Type tests prove the definition union narrows by `kind` and target `type`.
+Tests cover canonical byte stability, every exact wire shape and key order, all target forms, callback failures, update metadata, generated seeds, nested Story and Group definitions, schema pollution attempts, accessors, cyclic objects, unknown versions, atomic aggregate restore, standalone Document and iframe restoration, standalone Shadow rejection, scoped open/closed Shadow restoration and teardown, `resolveSerializedTarget()` boundary clones, destroyed controllers, and round trips that reproduce final SVG paths and lifecycle behavior. Golden resolver fixtures assert every context field for top-level Annotation, Story steps, Group members, direct keys, locator `within` keys, and isolated resolution. Type tests prove the definition union narrows by `kind` and target `type`.

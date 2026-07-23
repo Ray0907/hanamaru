@@ -18,7 +18,7 @@ Provide thin lifecycle adapters for React, Vue 3.5, and Svelte 5. Adapters creat
 - Target replacement creates a new controller only after the new target is available; the previous controller is then destroyed.
 - Unmount always destroys the owned controller exactly once.
 - Synchronous construction and `update()` errors are rethrown from the framework lifecycle after cleanup has contained owned resources.
-- Asynchronous controller failures are observed through `controller.finished` and delivered to the optional `onError(error, controller)` callback; adapters never convert an asynchronous failure into an unhandled framework throw. The runtime's `hana:error` remains the always-available event channel when no callback is supplied.
+- Asynchronous controller failures are observed through both the `controller.finished` Promise for an accepted `show()` and the owner's bubbling `hana:error` events for later refresh, observer, or visible-update work. They are delivered once to the optional `onError(error, controller)` callback; adapters never convert a controller failure into an unhandled framework throw.
 - Each adapter owns only controllers it creates.
 
 ## React
@@ -76,12 +76,12 @@ The `annotation(node, input)` action accepts annotation options plus adapter-onl
 - disabling or action destruction destroys the controller, then reports `null`;
 - target replacement reports `null` after old teardown, then the new controller after successful show;
 - synchronous creation or update failure contains owned resources, reports `null` once when a controller had been reported, and rethrows from the action call;
-- asynchronous show failure is observed from `finished`, calls `onError(error, controller)`, destroys the failed controller, then reports `null`;
+- asynchronous show or later runtime failure is observed from the shared adapter failure channel, calls `onError(error, controller)` once, destroys the failed controller, then reports `null`;
 - a throwing callback is treated as user-code failure: the adapter destroys owned state, then rethrows the callback error.
 
-Every adapter attaches a rejection observer to the exact `finished` Promise created by its accepted `show()`. Stale Promise settlements from a replaced or disabled controller are ignored after cleanup. `hana:error` continues to dispatch from the runtime independently; `onError` is the framework adapter channel. If `onError` itself throws during an asynchronous delivery, cleanup runs first and the callback exception is rethrown in a queued microtask so it is visible without being mistaken for the controller failure.
+Before calling `show()`, every adapter attaches a `hana:error` listener to the controller owner element and filters events by `event.detail.controller === currentController`. It also attaches a rejection observer to the exact `finished` Promise created by that accepted `show()`. The event listener stays active after `finished` resolves so later refresh, observer, and visible-update failures are still contained. A per-controller failure record deduplicates the same error object or failure generation when both the Promise and event channels report it.
 
-For a current non-`AbortError` rejection, every adapter calls `onError` when present, destroys the failed controller, and sets its exposed controller ref/callback to `null`. Current `AbortError` rejection caused by adapter disable, replacement, or unmount is expected cleanup and is not sent to `onError`.
+For a current non-`AbortError` asynchronous failure, every adapter calls `onError` when present, destroys the failed controller, removes its event listener, and sets its exposed controller ref/callback to `null`. If `onError` itself throws, cleanup runs first and the callback exception is rethrown in a queued microtask so it is visible without being mistaken for the controller failure. Current `AbortError` caused by adapter disable, replacement, or unmount is expected cleanup and is not sent to `onError`. Replacement, disable, unmount, and failed construction remove the old listener; stale Promise settlements and stale events are ignored. Synchronous `update()` errors continue to follow the direct lifecycle-throw rule and do not enter this asynchronous channel.
 
 ## Scope
 
@@ -89,7 +89,7 @@ Adapters cover manual Annotation only. Story, Group, Selection, serialization, p
 
 ## Verification
 
-Dedicated framework fixtures verify mount-and-show, enabled toggles, update, target replacement, unmount, synchronous error propagation, asynchronous `finished` observation, stale rejection suppression, throwing `onError`, React Strict Mode double invocation, Vue reactive options, every Svelte callback transition, SSR import and render safety, reduced motion inheritance, and no duplicate overlays or ARIA tokens.
+Dedicated framework fixtures verify mount-and-show, enabled toggles, update, target replacement, unmount, synchronous error propagation, asynchronous `finished` observation, post-visible refresh/observer/update failures from `hana:error`, Promise-plus-event deduplication, stale rejection and stale-event suppression, listener removal, throwing `onError`, React Strict Mode double invocation, Vue reactive options, every Svelte callback transition, SSR import and render safety, reduced motion inheritance, and no duplicate overlays or ARIA tokens.
 
 The supported peer ranges are verified at both endpoints available at implementation time:
 
