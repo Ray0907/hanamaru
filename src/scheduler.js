@@ -216,6 +216,7 @@ export class FrameQueue {
 }
 
 const resourcesByDocument = runtimeState.documents;
+const resourceInternals = new WeakMap();
 
 function createOverlay(doc) {
   const overlay = doc.createElement('div');
@@ -269,14 +270,22 @@ class SharedDocumentResources {
     }
   };
 
-  constructor(doc) {
+  constructor(doc, initialPortal = null) {
     this.#doc = doc;
     this.#window = doc.defaultView;
     this.#visualViewport = this.#window.visualViewport;
-    const { noteLayer, overlay, svgLayer } = createOverlay(doc);
-    this.overlay = overlay;
-    this.svgLayer = svgLayer;
-    this.noteLayer = noteLayer;
+    resourceInternals.set(this, {
+      defaultPortal: initialPortal,
+      ignoredPortals: new Set(
+        initialPortal === null ? [] : [initialPortal.overlay],
+      ),
+      nextId: 0,
+    });
+    if (initialPortal !== null) {
+      this.overlay = initialPortal.overlay;
+      this.svgLayer = initialPortal.svgLayer;
+      this.noteLayer = initialPortal.noteLayer;
+    }
 
     const requestFrame = this.#window.requestAnimationFrame.bind(this.#window);
     const cancelFrame = this.#window.cancelAnimationFrame.bind(this.#window);
@@ -314,26 +323,7 @@ class SharedDocumentResources {
     const MutationObserverConstructor = this.#window.MutationObserver;
     this.#mutationObserver = typeof MutationObserverConstructor === 'function'
       ? new MutationObserverConstructor((records) => {
-        if (!this.#alive) {
-          return;
-        }
-
-        const ids = new Set();
-        for (const record of records) {
-          if (record.target === this.overlay || this.overlay.contains(record.target)) {
-            continue;
-          }
-          for (const binding of this.#layouts.values()) {
-            if (binding.mutationScope === this.#doc
-              || record.target === binding.mutationScope
-              || binding.mutationScope.contains(record.target)) {
-              ids.add(binding.id);
-            }
-          }
-        }
-        for (const id of ids) {
-          this.#signal(id);
-        }
+        this.#signalMutations(records, this.#doc);
       })
       : null;
     this.#mutationObserver?.observe(doc, {
@@ -598,10 +588,12 @@ class SharedDocumentResources {
 
     const prior = this.#layouts.get(id);
     const token = renewToken ? {} : controller.token;
+    const mutationRoot = options.mutationRoot ?? this.#doc;
     const binding = {
       generation,
       id,
-      mutationScope: this.#discoverMutationScope(record),
+      mutationRoot,
+      mutationScope: this.#discoverMutationScope(record, mutationRoot),
       note,
       onError,
       read,
@@ -666,19 +658,50 @@ class SharedDocumentResources {
     return targets;
   }
 
-  #discoverMutationScope(record) {
+  #discoverMutationScope(record, mutationRoot) {
     if (record.kind === 'selector') {
-      return this.#doc;
+      return mutationRoot;
     }
     if (record.kind === 'locator') {
-      return this.#isElement(record.source?.within) ? record.source.within : this.#doc;
+      return this.#isElement(record.source?.within) ? record.source.within : mutationRoot;
     }
     if (record.kind === 'element' || record.kind === 'range') {
       return this.#isElement(record.ownerElement?.parentElement)
         ? record.ownerElement.parentElement
-        : this.#doc;
+        : mutationRoot;
     }
-    return this.#doc;
+    return mutationRoot;
+  }
+
+  #signalMutations(records, mutationRoot) {
+    if (!this.#alive) {
+      return;
+    }
+
+    const ignoredPortals = resourceInternals.get(this)?.ignoredPortals ?? new Set();
+    const ids = new Set();
+    for (const record of records) {
+      let ignored = false;
+      for (const portal of ignoredPortals) {
+        if (record.target === portal || portal.contains?.(record.target)) {
+          ignored = true;
+          break;
+        }
+      }
+      if (ignored) continue;
+
+      for (const binding of this.#layouts.values()) {
+        if (binding.mutationRoot !== mutationRoot) continue;
+        if (binding.mutationScope === mutationRoot
+          || record.target === binding.mutationScope
+          || binding.mutationScope.contains?.(record.target)) {
+          ids.add(binding.id);
+        }
+      }
+    }
+    for (const id of ids) {
+      this.#signal(id);
+    }
   }
 
   #diffScrollTargets(id, previous, next) {
@@ -816,6 +839,68 @@ class SharedDocumentResources {
     shared.#destroy();
   }
 
+  static attachDefaultPortal(shared) {
+    const internal = resourceInternals.get(shared);
+    if (internal === undefined) {
+      throw new TypeError('Unknown Document resources');
+    }
+    if (internal.defaultPortal !== null) {
+      return;
+    }
+    const portal = createOverlay(shared.#doc);
+    internal.defaultPortal = portal;
+    internal.ignoredPortals.add(portal.overlay);
+    shared.overlay = portal.overlay;
+    shared.svgLayer = portal.svgLayer;
+    shared.noteLayer = portal.noteLayer;
+  }
+
+  static detachDefaultPortal(shared) {
+    const internal = resourceInternals.get(shared);
+    const portal = internal?.defaultPortal;
+    if (portal === null || portal === undefined) {
+      return;
+    }
+    internal.defaultPortal = null;
+    internal.ignoredPortals.delete(portal.overlay);
+    delete shared.overlay;
+    delete shared.svgLayer;
+    delete shared.noteLayer;
+    portal.overlay.remove();
+  }
+
+  static registerPortal(shared, portal) {
+    const internal = resourceInternals.get(shared);
+    if (internal === undefined) {
+      throw new TypeError('Unknown Document resources');
+    }
+    internal.ignoredPortals.add(portal);
+  }
+
+  static unregisterPortal(shared, portal) {
+    resourceInternals.get(shared)?.ignoredPortals.delete(portal);
+  }
+
+  static allocateId(shared, root, prefix) {
+    const internal = resourceInternals.get(shared);
+    if (internal === undefined) {
+      throw new TypeError('Unknown Document resources');
+    }
+    let id;
+    do {
+      internal.nextId += 1;
+      id = `${prefix}-${internal.nextId}`;
+    } while ((typeof shared.#doc.getElementById === 'function'
+      && shared.#doc.getElementById(id) !== null)
+      || (typeof root?.getElementById === 'function'
+        && root.getElementById(id) !== null));
+    return id;
+  }
+
+  static signalMutations(shared, records, root) {
+    shared.#signalMutations(records, root);
+  }
+
   #destroy() {
     if (!this.#alive) {
       return;
@@ -845,25 +930,70 @@ class SharedDocumentResources {
     cleanup(() => this.#visualViewport?.removeEventListener('resize', this.#windowResize));
     cleanup(() => this.#visualViewport?.removeEventListener('scroll', this.#windowResize));
     cleanup(() => this.#frameQueue.destroy());
-    cleanup(() => this.overlay.remove());
+    cleanup(() => SharedDocumentResources.detachDefaultPortal(this));
+    resourceInternals.delete(this);
     if (failure !== null) throw failure;
   }
 }
 
-export function acquireDocumentResources(doc) {
+function assertDocument(doc) {
   if (doc === null || typeof doc !== 'object' || doc.nodeType !== 9 || doc.defaultView === null) {
     throw new TypeError('doc must be a Document with a browsing context');
   }
+}
 
+function documentEntry(doc, requireDefaultPortal = false) {
+  assertDocument(doc);
   let entry = resourcesByDocument.get(doc);
   if (entry === undefined) {
+    let initialPortal = null;
+    if (requireDefaultPortal) initialPortal = createOverlay(doc);
     entry = {
       refs: 0,
-      shared: new SharedDocumentResources(doc),
+      documentRefs: 0,
+      shared: null,
     };
+    try {
+      entry.shared = new SharedDocumentResources(doc, initialPortal);
+    } catch (error) {
+      try { initialPortal?.overlay.remove(); } catch {}
+      throw error;
+    }
     resourcesByDocument.set(doc, entry);
   }
+  return entry;
+}
+
+function releaseEntry(doc, entry) {
+  entry.refs -= 1;
+  if (entry.refs !== 0) {
+    return;
+  }
+  try {
+    SharedDocumentResources.destroy(entry.shared);
+  } finally {
+    resourcesByDocument.delete(doc);
+  }
+}
+
+export function acquireDocumentResources(doc) {
+  const entry = documentEntry(doc, true);
+  if (entry.documentRefs === 0) {
+    try {
+      SharedDocumentResources.attachDefaultPortal(entry.shared);
+    } catch (error) {
+      if (entry.refs === 0) {
+        try {
+          SharedDocumentResources.destroy(entry.shared);
+        } finally {
+          resourcesByDocument.delete(doc);
+        }
+      }
+      throw error;
+    }
+  }
   entry.refs += 1;
+  entry.documentRefs += 1;
 
   let released = false;
   return {
@@ -873,15 +1003,56 @@ export function acquireDocumentResources(doc) {
         return;
       }
       released = true;
-      entry.refs -= 1;
-      if (entry.refs !== 0) {
-        return;
+      entry.documentRefs -= 1;
+      let failure;
+      if (entry.documentRefs === 0) {
+        try {
+          SharedDocumentResources.detachDefaultPortal(entry.shared);
+        } catch (error) {
+          failure = error;
+        }
       }
       try {
-        SharedDocumentResources.destroy(entry.shared);
-      } finally {
-        resourcesByDocument.delete(doc);
+        releaseEntry(doc, entry);
+      } catch (error) {
+        failure ??= error;
       }
+      if (failure !== undefined) throw failure;
     },
   };
+}
+
+export function acquireDocumentScheduler(doc) {
+  const entry = documentEntry(doc);
+  entry.refs += 1;
+  let released = false;
+  return {
+    shared: entry.shared,
+    release() {
+      if (released) return;
+      released = true;
+      releaseEntry(doc, entry);
+    },
+  };
+}
+
+export function registerDocumentResourcePortal(shared, portal) {
+  SharedDocumentResources.registerPortal(shared, portal);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    SharedDocumentResources.unregisterPortal(shared, portal);
+  };
+}
+
+export function allocateDocumentResourceId(shared, root, prefix = 'hana-shadow') {
+  if (typeof prefix !== 'string' || prefix.length === 0) {
+    throw new TypeError('resource ID prefix must be a non-empty string');
+  }
+  return SharedDocumentResources.allocateId(shared, root, prefix);
+}
+
+export function signalDocumentResourceMutations(shared, records, root) {
+  SharedDocumentResources.signalMutations(shared, records, root);
 }
