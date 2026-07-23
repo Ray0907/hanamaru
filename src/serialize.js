@@ -20,6 +20,14 @@ import { createStory, createStoryEnvironment } from './story.js';
 
 const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
+function isErrorType(cause, Constructor) {
+  try {
+    return cause instanceof Constructor;
+  } catch {
+    return false;
+  }
+}
+
 function stateError(reason) {
   return new HanamaruStateError(
     'HANA_STATE_SERIALIZE_CONTROLLER',
@@ -322,31 +330,40 @@ function prepareController(controller) {
 
 function serializeOptions(input) {
   if (input === undefined) return {};
-  if (input === null || typeof input !== 'object' || Array.isArray(input)
-    || Object.getPrototypeOf(input) !== Object.prototype) {
+  try {
+    if (input === null || typeof input !== 'object' || Array.isArray(input)
+      || Object.getPrototypeOf(input) !== Object.prototype) {
+      throw new HanamaruConfigError(
+        'HANA_CONFIG_SERIALIZE_TARGET',
+        'serialize options must be an ordinary object',
+        { options: input },
+      );
+    }
+    const names = Reflect.ownKeys(input);
+    if (names.some((key) => key !== 'keyForTarget')) {
+      throw new HanamaruConfigError(
+        'HANA_CONFIG_SERIALIZE_TARGET',
+        'serialize options contain an unknown key',
+        { options: input },
+      );
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(input, 'keyForTarget');
+    if (descriptor !== undefined && !Object.hasOwn(descriptor, 'value')) {
+      throw new HanamaruConfigError(
+        'HANA_CONFIG_SERIALIZE_TARGET',
+        'keyForTarget must be a data property',
+        { options: input },
+      );
+    }
+    return { keyForTarget: descriptor?.value };
+  } catch (cause) {
+    if (isErrorType(cause, HanamaruConfigError)) throw cause;
     throw new HanamaruConfigError(
       'HANA_CONFIG_SERIALIZE_TARGET',
-      'serialize options must be an ordinary object',
-      { options: input },
+      'serialize options could not be inspected',
+      { options: input, cause },
     );
   }
-  const names = Reflect.ownKeys(input);
-  if (names.some((key) => key !== 'keyForTarget')) {
-    throw new HanamaruConfigError(
-      'HANA_CONFIG_SERIALIZE_TARGET',
-      'serialize options contain an unknown key',
-      { options: input },
-    );
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(input, 'keyForTarget');
-  if (descriptor !== undefined && !Object.hasOwn(descriptor, 'value')) {
-    throw new HanamaruConfigError(
-      'HANA_CONFIG_SERIALIZE_TARGET',
-      'keyForTarget must be a data property',
-      { options: input },
-    );
-  }
-  return { keyForTarget: descriptor?.value };
 }
 
 function assignKey(target, keyForTarget) {
@@ -403,7 +420,7 @@ export function serialize(controller, optionsInput = undefined) {
     prepared = prepareController(controller);
     validateDefinition(prepared.definition);
   } catch (cause) {
-    if (cause instanceof HanamaruStateError) throw cause;
+    if (isErrorType(cause, HanamaruStateError)) throw cause;
     throw stateError('malformed');
   }
   const options = serializeOptions(optionsInput);

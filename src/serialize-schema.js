@@ -14,6 +14,22 @@ function invalid(field, value) {
   );
 }
 
+function reflectionFailure(field, cause) {
+  throw new HanamaruConfigError(
+    'HANA_CONFIG_SERIALIZED_DEFINITION',
+    `Invalid serialized definition: ${field}`,
+    { field, cause },
+  );
+}
+
+function isConfigError(cause) {
+  try {
+    return cause instanceof HanamaruConfigError;
+  } catch {
+    return false;
+  }
+}
+
 function ordinary(input, field, keys, seen) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)
     || Object.getPrototypeOf(input) !== Object.prototype) {
@@ -184,7 +200,34 @@ function keyTarget(d, field) {
   };
 }
 
-export function validateSerializedTarget(input, field = 'target', state = undefined) {
+function validateSerializedWithin(input, field, seen) {
+  const d = optionalOrdinary(
+    input,
+    field,
+    ['type'],
+    ['selector', 'key', 'targetKind'],
+    seen,
+  );
+  const names = Reflect.ownKeys(input);
+  if (d.type.value === 'selector') {
+    if (names.length !== 2 || !names.includes('selector')) invalid(field, input);
+    const output = selectorTarget(d, field);
+    seen.delete(input);
+    return output;
+  }
+  if (d.type.value === 'key') {
+    if (names.length !== 3 || !names.includes('key') || !names.includes('targetKind')) {
+      invalid(field, input);
+    }
+    const output = keyTarget(d, field);
+    if (output.targetKind !== 'element') invalid(field, input);
+    seen.delete(input);
+    return output;
+  }
+  invalid(field, input);
+}
+
+function validateSerializedTargetUnsafe(input, field = 'target', state = undefined) {
   const seen = state?.seen ?? new WeakSet();
   const base = optionalOrdinary(
     input,
@@ -214,11 +257,7 @@ export function validateSerializedTarget(input, field = 'target', state = undefi
   const required = ['type', 'within', 'text'];
   const optional = ['occurrence'];
   const d = optionalOrdinary(input, field, required, optional, new WeakSet());
-  const within = validateSerializedTarget(d.within.value, `${field}.within`, { seen });
-  if (within.type !== 'selector'
-    && !(within.type === 'key' && within.targetKind === 'element')) {
-    invalid(`${field}.within`, d.within.value);
-  }
+  const within = validateSerializedWithin(d.within.value, `${field}.within`, seen);
   const output = {
     type: 'locator',
     within,
@@ -229,6 +268,15 @@ export function validateSerializedTarget(input, field = 'target', state = undefi
   }
   seen.delete(input);
   return output;
+}
+
+export function validateSerializedTarget(input, field = 'target') {
+  try {
+    return validateSerializedTargetUnsafe(input, field);
+  } catch (cause) {
+    if (isConfigError(cause)) throw cause;
+    reflectionFailure(field, cause);
+  }
 }
 
 function validateTargetWithSeen(input, field, seen) {
@@ -260,11 +308,7 @@ function validateTargetWithSeen(input, field, seen) {
   if (names.length < 3 || names.length > 4
     || !names.includes('within') || !names.includes('text')
     || (names.length === 4 && !names.includes('occurrence'))) invalid(field, input);
-  const within = validateTargetWithSeen(d.within.value, `${field}.within`, seen);
-  if (within.type !== 'selector'
-    && !(within.type === 'key' && within.targetKind === 'element')) {
-    invalid(`${field}.within`, d.within.value);
-  }
+  const within = validateSerializedWithin(d.within.value, `${field}.within`, seen);
   const output = {
     type: 'locator',
     within,
@@ -315,7 +359,7 @@ function groupOptions(input, field, seen) {
   return output;
 }
 
-export function validateDefinition(input) {
+function validateDefinitionUnsafe(input) {
   const seen = new WeakSet();
   const base = optionalOrdinary(
     input,
@@ -381,6 +425,15 @@ export function validateDefinition(input) {
   }
 
   invalid('definition.kind', kind);
+}
+
+export function validateDefinition(input) {
+  try {
+    return validateDefinitionUnsafe(input);
+  } catch (cause) {
+    if (isConfigError(cause)) throw cause;
+    reflectionFailure('definition', cause);
+  }
 }
 
 export { SCHEMA };

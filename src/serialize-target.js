@@ -5,11 +5,12 @@ import {
 import { validateSerializedTarget } from './serialize-schema.js';
 import { resolveTarget } from './target.js';
 
-function configError(field, value) {
+function configError(field, value, cause = undefined) {
+  const details = cause === undefined ? { field, value } : { field, value, cause };
   throw new HanamaruConfigError(
     'HANA_CONFIG_SERIALIZE_TARGET',
     `Invalid serialization target configuration: ${field}`,
-    { field, value },
+    details,
   );
 }
 
@@ -17,77 +18,100 @@ function targetError(message, details) {
   throw new HanamaruTargetError('HANA_TARGET_INVALID', message, details);
 }
 
+function isErrorType(cause, Constructor) {
+  try {
+    return cause instanceof Constructor;
+  } catch {
+    return false;
+  }
+}
+
 function activeDocument(root) {
-  if (root?.nodeType === 11 && root?.host !== undefined) {
-    throw new HanamaruTargetError(
-      'HANA_TARGET_SHADOW_UNSCOPED',
-      'Serialized targets require an explicit Shadow scope',
-      { root },
-    );
+  try {
+    if (root?.nodeType === 11 && root?.host !== undefined) {
+      throw new HanamaruTargetError(
+        'HANA_TARGET_SHADOW_UNSCOPED',
+        'Serialized targets require an explicit Shadow scope',
+        { root },
+      );
+    }
+    const DocumentConstructor = root?.defaultView?.Document;
+    if (typeof DocumentConstructor !== 'function'
+      || !(root instanceof DocumentConstructor)
+      || root.nodeType !== 9
+      || root.defaultView === null) {
+      configError('root', root);
+    }
+    return root;
+  } catch (cause) {
+    if (isErrorType(cause, HanamaruConfigError)
+      || isErrorType(cause, HanamaruTargetError)) {
+      throw cause;
+    }
+    configError('root', root, cause);
   }
-  const DocumentConstructor = root?.defaultView?.Document;
-  if (typeof DocumentConstructor !== 'function'
-    || !(root instanceof DocumentConstructor)
-    || root.nodeType !== 9
-    || root.defaultView === null) {
-    configError('root', root);
-  }
-  return root;
 }
 
 function executionContext(input, allowed) {
   if (input === undefined) return {};
-  if (input === null || typeof input !== 'object' || Array.isArray(input)
-    || Object.getPrototypeOf(input) !== Object.prototype) configError('context', input);
-  const keys = Reflect.ownKeys(input);
-  if (keys.some((key) => typeof key !== 'string' || !allowed.includes(key))) {
-    configError('context', input);
+  try {
+    if (input === null || typeof input !== 'object' || Array.isArray(input)
+      || Object.getPrototypeOf(input) !== Object.prototype) configError('context', input);
+    const keys = Reflect.ownKeys(input);
+    if (keys.some((key) => typeof key !== 'string' || !allowed.includes(key))) {
+      configError('context', input);
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(input);
+    const output = {};
+    for (const key of keys) {
+      if (!Object.hasOwn(descriptors[key], 'value')) configError(`context.${key}`, input);
+      output[key] = descriptors[key].value;
+    }
+    return output;
+  } catch (cause) {
+    if (isErrorType(cause, HanamaruConfigError)) throw cause;
+    configError('context', input, cause);
   }
-  const descriptors = Object.getOwnPropertyDescriptors(input);
-  const output = {};
-  for (const key of keys) {
-    if (!Object.hasOwn(descriptors[key], 'value')) configError(`context.${key}`, input);
-    output[key] = descriptors[key].value;
-  }
-  return output;
 }
 
 function connectedElement(value, root) {
-  const ElementConstructor = root.defaultView.Element;
-  if (!(value instanceof ElementConstructor)
-    || value.ownerDocument !== root
-    || !value.isConnected
-    || value.getRootNode() !== root) {
-    targetError('Resolved key must be a connected Element in the target Document', { target: value });
+  const message = 'Resolved key must be a connected Element in the target Document';
+  try {
+    const ElementConstructor = root.defaultView.Element;
+    if (!(value instanceof ElementConstructor)
+      || value.ownerDocument !== root
+      || !value.isConnected
+      || value.getRootNode() !== root) {
+      targetError(message, { target: value });
+    }
+    return value;
+  } catch (cause) {
+    if (isErrorType(cause, HanamaruTargetError)) throw cause;
+    targetError(message, { target: value, cause });
   }
-  return value;
 }
 
 function connectedRange(value, root) {
-  const RangeConstructor = root.defaultView.Range;
-  if (!(value instanceof RangeConstructor)) {
-    targetError('Resolved key must be a connected Range in the target Document', { target: value });
-  }
-  const boundaries = [value.startContainer, value.endContainer];
-  if (!boundaries.every((node) => (
-    node === root
-      || (node?.ownerDocument === root
-        && node.isConnected
-        && node.getRootNode?.() === root)
-  ))) {
-    targetError('Resolved key must be a connected Range in the target Document', { target: value });
-  }
-  let record;
+  const message = 'Resolved key must be a connected Range in the target Document';
   try {
-    record = resolveTarget(value, root);
+    const RangeConstructor = root.defaultView.Range;
+    if (!(value instanceof RangeConstructor)) {
+      targetError(message, { target: value });
+    }
+    const boundaries = [value.startContainer, value.endContainer];
+    if (!boundaries.every((node) => (
+      node === root
+        || (node?.ownerDocument === root
+          && node.isConnected
+          && node.getRootNode?.() === root)
+    ))) {
+      targetError(message, { target: value });
+    }
+    return resolveTarget(value, root).range.cloneRange();
   } catch (cause) {
-    if (cause instanceof HanamaruTargetError) throw cause;
-    targetError('Resolved key must be a connected Range in the target Document', {
-      target: value,
-      cause,
-    });
+    if (isErrorType(cause, HanamaruTargetError)) throw cause;
+    targetError(message, { target: value, cause });
   }
-  return record.range.cloneRange();
 }
 
 function resolverContext(targetKind, role, controllerKind, index) {

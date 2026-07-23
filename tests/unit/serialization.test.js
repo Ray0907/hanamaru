@@ -722,6 +722,25 @@ test('serialized validation accepts benign shared aliases but still rejects acti
   );
 });
 
+test('locator within rejects deeply nested locator data without recursive overflow', () => {
+  let within = { type: 'selector', selector: '#scope' };
+  for (let depth = 0; depth < 5_000; depth += 1) {
+    within = { type: 'locator', within, text: 'nested' };
+  }
+  const definition = serializedAnnotation({
+    type: 'locator',
+    within,
+    text: 'outer',
+  });
+
+  assert.throws(
+    () => validateDefinition(definition),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZED_DEFINITION'
+      && error.details.field === 'definition.target.within',
+  );
+});
+
 test('serialized array validation uses its own length descriptor without reading length', () => {
   let lengthReads = 0;
   const steps = new Proxy([
@@ -748,6 +767,124 @@ test('serialized array validation uses its own length descriptor without reading
       && error.code === 'HANA_CONFIG_SERIALIZE_TARGET',
   );
   assert.equal(lengthReads, 0);
+});
+
+test('public serialization validation normalizes reflection trap failures as config errors', () => {
+  const definitionCause = new Error('definition prototype trap');
+  const definition = new Proxy({}, {
+    getPrototypeOf() { throw definitionCause; },
+  });
+  assert.throws(
+    () => validateDefinition(definition),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZED_DEFINITION'
+      && error.details.field === 'definition'
+      && error.details.cause === definitionCause,
+  );
+
+  const targetCause = new Error('target ownKeys trap');
+  const target = new Proxy(
+    { type: 'selector', selector: '#target' },
+    { ownKeys() { throw targetCause; } },
+  );
+  assert.throws(
+    () => resolveSerializedTarget(target, { root: null }),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZED_DEFINITION'
+      && error.details.field === 'target'
+      && error.details.cause === targetCause,
+  );
+});
+
+test('public serialization contexts normalize reflection and root trap failures', () => {
+  const realm = minimalNativeRealm();
+  const contextCause = new Error('context ownKeys trap');
+  const context = new Proxy({}, {
+    ownKeys() { throw contextCause; },
+  });
+  assert.throws(
+    () => resolveSerializedTarget(
+      { type: 'selector', selector: '#target' },
+      context,
+    ),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.field === 'context'
+      && error.details.cause === contextCause,
+  );
+
+  const restoreCause = new Error('restore context descriptor trap');
+  const restoreContext = new Proxy({ root: realm.document }, {
+    getOwnPropertyDescriptor() { throw restoreCause; },
+  });
+  assert.throws(
+    () => restore(
+      serializedAnnotation({ type: 'selector', selector: '#target' }),
+      restoreContext,
+    ),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.field === 'context'
+      && error.details.cause === restoreCause,
+  );
+
+  const rootCause = new Error('root nodeType trap');
+  const root = new Proxy({}, {
+    get(target, key) {
+      if (key === 'nodeType') throw rootCause;
+      return Reflect.get(target, key);
+    },
+  });
+  assert.throws(
+    () => resolveSerializedTarget(
+      { type: 'selector', selector: '#target' },
+      { root },
+    ),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.field === 'root'
+      && error.details.cause === rootCause,
+  );
+});
+
+test('resolver return-value reflection traps become target errors without wrapping callbacks', () => {
+  const realm = minimalNativeRealm();
+  const resultCause = new Error('resolver result prototype trap');
+  const result = new Proxy({}, {
+    getPrototypeOf() { throw resultCause; },
+  });
+
+  assert.throws(
+    () => resolveSerializedTarget({
+      type: 'key',
+      key: 'proxy-result',
+      targetKind: 'element',
+    }, {
+      root: realm.document,
+      resolveTarget() { return result; },
+    }),
+    (error) => error instanceof HanamaruTargetError
+      && error.code === 'HANA_TARGET_INVALID'
+      && error.details.cause === resultCause,
+  );
+});
+
+test('serialize options normalize reflection traps without changing callback error contracts', () => {
+  const environment = annotationEnvironment();
+  const controller = createAnnotation('#target', { mark: 'underline' }, environment.env);
+  const optionsCause = new Error('serialize options prototype trap');
+  const options = new Proxy({}, {
+    getPrototypeOf() { throw optionsCause; },
+  });
+
+  assert.throws(
+    () => serialize(controller, options),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
+      && error.details.cause === optionsCause,
+  );
+
+  controller.destroy();
 });
 
 test('late invalid locator text is rejected before a within-key resolver callback', () => {
