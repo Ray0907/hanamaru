@@ -31,6 +31,8 @@
 
 :where(.demo-page) a,
 :where(.demo-page) button,
+:where(.demo-page) input,
+:where(.demo-page) select,
 :where(.demo-page) textarea {
   font: inherit;
 }
@@ -1083,16 +1085,20 @@
 }
 
 .demo-playground {
-  display: grid;
-  grid-template-columns: minmax(18rem, 0.75fr) minmax(18rem, 1.25fr);
   width: min(94rem, 100%);
   margin: clamp(2rem, 6vw, 5rem) auto;
   padding: clamp(2rem, 5vw, 4.5rem) max(3vw, calc((100% - 88rem) / 2));
-  gap: 2rem 5vw;
   background: var(--demo-indigo);
   color: var(--demo-paper-strong);
   box-shadow: 0 12px 26px rgb(31 39 51 / 18%);
   scroll-margin-top: 1rem;
+}
+
+.demo-playground__heading {
+  display: grid;
+  grid-template-columns: minmax(18rem, 0.75fr) minmax(18rem, 1.25fr);
+  align-items: end;
+  gap: 1.25rem 5vw;
 }
 
 .demo-playground__title {
@@ -1125,24 +1131,304 @@
   font-size: 1.05rem;
 }
 
-.demo-playground__docket {
+.demo-playground__bench {
   display: grid;
-  grid-column: 2;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 1rem 0 0;
+  grid-template-columns: minmax(18rem, 0.72fr) minmax(24rem, 1.28fr);
+  align-items: start;
+  margin-top: clamp(2rem, 4vw, 3.5rem);
+  border-top: 1px solid rgb(255 254 249 / 34%);
+  gap: clamp(1.25rem, 3vw, 3rem);
+}
+
+.demo-playground__form,
+.demo-playground__proof,
+.demo-playground__output {
+  min-width: 0;
+}
+
+.demo-playground__form {
+  padding: 1.8rem clamp(1rem, 2.2vw, 2rem) 2rem;
+  background: var(--demo-paper-strong);
+  color: var(--demo-ink);
+  box-shadow: inset 6px 0 0 var(--demo-red);
+}
+
+.demo-playground__form fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 1.2rem 0 1.35rem;
+  border: 0;
+  border-top: 2px solid var(--demo-ink);
+}
+
+.demo-playground__form fieldset:first-child {
+  padding-top: 0.75rem;
+}
+
+.demo-playground__form legend {
+  padding: 0 0.6rem 0 0;
+  color: var(--demo-red);
+  font: 850 0.74rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.demo-playground__form > fieldset > label,
+.demo-playground__annotation-fields > label {
+  display: block;
+  margin: 0.75rem 0 0.32rem;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.demo-playground__form select,
+.demo-playground__form textarea {
+  width: 100%;
+  min-height: 44px;
+  border: 2px solid var(--demo-ink);
+  border-radius: 0;
+  background: #fff;
+  color: var(--demo-ink);
+}
+
+.demo-playground__form select {
+  padding: 0.55rem 2rem 0.55rem 0.65rem;
+}
+
+.demo-playground__form textarea {
+  min-height: 5.8rem;
+  padding: 0.6rem 0.65rem;
+  resize: vertical;
+}
+
+.demo-playground__form [aria-invalid="true"] {
+  border-color: var(--demo-red);
+  border-width: 3px;
+}
+
+.demo-field-help,
+.demo-field-error {
+  margin: 0.42rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.demo-field-help {
+  color: var(--demo-muted);
+}
+
+.demo-field-error {
+  padding-left: 0.65rem;
+  border-left: 4px solid var(--demo-red);
+  color: #8e201c;
+}
+
+.demo-choice-group + .demo-choice-group {
+  margin-top: 0.9rem;
+}
+
+.demo-choice-group__label {
+  display: block;
+  margin-bottom: 0.28rem;
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+
+.demo-choice-group label {
+  display: inline-flex;
+  min-height: 44px;
+  padding: 0.25rem 0.6rem 0.25rem 0;
+  align-items: center;
+  gap: 0.42rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.demo-choice-group input {
+  width: 1.15rem;
+  height: 1.15rem;
+  margin: 0;
+  accent-color: var(--demo-red);
+}
+
+.demo-playground__actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.demo-playground__actions button {
+  min-height: 48px;
+  padding: 0.65rem 0.8rem;
+  border: 2px solid var(--demo-red);
+  border-radius: 0;
+  font-size: 0.83rem;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.demo-playground__run {
+  background: var(--demo-red);
+  color: #fff;
+}
+
+.demo-playground__copy-button {
+  background: transparent;
+  color: var(--demo-red);
+}
+
+.demo-playground__actions button:hover {
+  border-color: var(--demo-ink);
+  background: var(--demo-yellow);
+  color: var(--demo-ink);
+}
+
+.demo-playground__proof {
+  display: grid;
+  padding-top: 1.8rem;
   gap: 1rem;
 }
 
+.demo-playground__specimen {
+  position: relative;
+  min-height: 18rem;
+  padding: clamp(1.4rem, 3vw, 2.5rem);
+  border: 1px solid rgb(31 39 51 / 28%);
+  background: var(--demo-paper-strong);
+  color: var(--demo-ink);
+  box-shadow: 7px 8px 0 rgb(12 23 48 / 28%);
+}
+
+.demo-playground__specimen::before {
+  position: absolute;
+  inset: 0 auto 0 1.05rem;
+  width: 1px;
+  background: rgb(201 47 42 / 46%);
+  content: "";
+}
+
+.demo-playground__folio {
+  margin: 0 0 1rem;
+  color: var(--demo-red);
+  font: 800 0.7rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.demo-playground__specimen h3 {
+  margin: 0 0 1rem;
+  font-family: "Arial Black", system-ui, sans-serif;
+  font-size: clamp(1.35rem, 2.5vw, 2.15rem);
+  line-height: 1.05;
+}
+
+.demo-playground__specimen p:not(.demo-playground__folio) {
+  max-width: 62ch;
+  margin: 0.8rem 0;
+  font-family: Georgia, "Yu Mincho", serif;
+  font-size: 1rem;
+  line-height: 1.75;
+}
+
+.demo-playground__specimen p:has([data-playground-output-owner]) {
+  margin-bottom: 4rem;
+}
+
+.demo-playground__specimen span[data-playground-output-owner] {
+  background: rgb(244 207 63 / 48%);
+  box-shadow: 0 2px 0 var(--demo-red);
+}
+
+.demo-playground__output {
+  padding: 1.2rem;
+  border-top: 4px solid var(--demo-yellow);
+  background: #182b54;
+  box-shadow: inset 7px 0 16px rgb(12 23 48 / 32%);
+}
+
+.demo-playground__output-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.demo-playground__output-heading p {
+  margin: 0;
+  color: var(--demo-yellow);
+  font: 800 0.68rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.demo-playground__output-heading h3 {
+  margin: 0.15rem 0 0;
+  font-size: 1.12rem;
+}
+
+.demo-playground__output-heading > span {
+  color: var(--demo-indigo-quiet);
+  font: 750 0.75rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.demo-playground__output pre {
+  max-width: 100%;
+  min-height: 13rem;
+  margin: 1rem 0 0;
+  padding: 1rem;
+  overflow-x: auto;
+  border: 1px solid rgb(255 254 249 / 24%);
+  background: #102142;
+  color: #f7f9ff;
+  font: 0.74rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.demo-playground__output code {
+  font: inherit;
+}
+
+.demo-playground__docket {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 0.9rem 0 0;
+  gap: 0.55rem;
+}
+
 .demo-playground__docket div {
+  min-width: 0;
+  padding-top: 0.35rem;
   border-top: 2px solid var(--demo-yellow);
 }
 
 .demo-playground__docket dt {
+  margin: 0;
   color: var(--demo-indigo-quiet);
 }
 
 .demo-playground__docket dd {
+  margin: 0.12rem 0 0;
   color: var(--demo-paper-strong);
+  overflow-wrap: anywhere;
+}
+
+.demo-playground__docket [data-playground-state="error"],
+.demo-playground__docket [data-playground-result^="Needs"] {
+  color: var(--demo-yellow);
+}
+
+.demo-playground__fallback {
+  margin-top: 1rem;
+  color: var(--demo-paper-strong);
+}
+
+.demo-playground__fallback textarea {
+  width: 100%;
+  margin-top: 0.5rem;
+  border: 2px solid var(--demo-yellow);
+  background: var(--demo-paper-strong);
+  color: var(--demo-ink);
 }
 
 .demo-footer {
@@ -1217,8 +1503,17 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .demo-playground__heading,
+  .demo-playground__bench {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .demo-playground__proof {
+    padding-top: 0;
+  }
+
   .demo-playground__docket {
-    grid-column: 1;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .demo-range-proof {
@@ -1424,9 +1719,38 @@
     padding: 2.5rem 1rem;
   }
 
+  .demo-playground__heading {
+    gap: 1rem;
+  }
+
   .demo-playground__title > span {
     width: 3.2rem;
     height: 3.2rem;
+  }
+
+  .demo-playground__bench {
+    gap: 1.25rem;
+  }
+
+  .demo-playground__form {
+    padding: 1.4rem 1rem 1.5rem;
+    box-shadow: inset 4px 0 0 var(--demo-red);
+  }
+
+  .demo-playground__actions {
+    grid-template-columns: 1fr;
+  }
+
+  .demo-playground__specimen {
+    padding: 1.4rem 1.2rem 1.4rem 2rem;
+  }
+
+  .demo-playground__output {
+    padding: 1rem;
+  }
+
+  .demo-playground__output pre {
+    min-height: 11rem;
   }
 
   .demo-footer {

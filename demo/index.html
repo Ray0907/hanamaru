@@ -368,22 +368,145 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
       </section>
 
       <section id="playground" class="demo-playground" aria-labelledby="playground-title" tabindex="-1">
-        <div class="demo-playground__title">
-          <span aria-hidden="true">校</span>
-          <div>
-            <p>Control bench</p>
-            <h2 id="playground-title">Live playground</h2>
+        <header class="demo-playground__heading">
+          <div class="demo-playground__title">
+            <span aria-hidden="true">校</span>
+            <div>
+              <p>Control bench · 004</p>
+              <h2 id="playground-title">Live playground</h2>
+            </div>
+          </div>
+          <p class="demo-playground__copy">
+            Choose a phrase already on the sheet, author one definition, then run the real public
+            API. No arbitrary editing, drag positioning, or publish theater.
+          </p>
+        </header>
+
+        <div class="demo-playground__bench">
+          <form class="demo-playground__form" data-playground-form novalidate>
+            <fieldset>
+              <legend>Specimen target</legend>
+              <label for="playground-target-select">Existing phrase</label>
+              <select id="playground-target-select" name="target" required
+                aria-describedby="playground-target-help playground-target-error">
+                <option value="">Choose one existing phrase</option>
+                <option value="#playground-target-reflow" selected>Proof survives reflow</option>
+                <option value="#playground-target-proof">Proof follows text</option>
+                <option value="#playground-target-data">Definitions remain data</option>
+              </select>
+              <p id="playground-target-help" class="demo-field-help">
+                V1 targets pre-authored specimen text only.
+              </p>
+              <p id="playground-target-error" class="demo-field-error" hidden>
+                <strong>Needs correction:</strong> Choose one existing phrase.
+              </p>
+            </fieldset>
+
+            <fieldset class="demo-playground__annotation-fields">
+              <legend>Annotation</legend>
+              <label for="playground-mark">Mark</label>
+              <select id="playground-mark" name="mark" required>
+                <option value="underline">underline</option>
+                <option value="highlight">highlight</option>
+                <option value="circle">circle</option>
+                <option value="box">box</option>
+                <option value="strike">strike</option>
+                <option value="bracket">bracket</option>
+              </select>
+
+              <label for="playground-note">Optional note</label>
+              <textarea id="playground-note" name="note" rows="3" maxlength="280"
+                aria-describedby="playground-note-help playground-note-error"
+                placeholder="Explain the correction (optional)"></textarea>
+              <p id="playground-note-help" class="demo-field-help">
+                Notes are associated with their selected phrase. 280 characters maximum.
+              </p>
+              <p id="playground-note-error" class="demo-field-error" hidden>
+                <strong>Needs correction:</strong> Keep the note to 280 characters.
+              </p>
+
+              <label for="playground-placement">Placement</label>
+              <select id="playground-placement" name="placement" required>
+                <option value="auto">auto</option>
+                <option value="top">top</option>
+                <option value="right">right</option>
+                <option value="bottom">bottom</option>
+                <option value="left">left</option>
+              </select>
+            </fieldset>
+
+            <fieldset class="demo-playground__execution-fields">
+              <legend>Execution</legend>
+              <div class="demo-choice-group">
+                <span class="demo-choice-group__label">Trigger</span>
+                <label><input type="radio" name="trigger" value="manual" checked> Manual</label>
+                <label><input type="radio" name="trigger" value="load"> Load</label>
+                <label><input type="radio" name="trigger" value="viewport"> Viewport</label>
+              </div>
+              <div class="demo-choice-group">
+                <span class="demo-choice-group__label">Output and execution mode</span>
+                <label><input type="radio" name="mode" value="imperative" checked>
+                  Imperative JavaScript</label>
+                <label><input type="radio" name="mode" value="declarative">
+                  Declarative HTML</label>
+              </div>
+            </fieldset>
+
+            <div class="demo-playground__actions">
+              <button class="demo-playground__run" type="button" data-playground-run>
+                Run definition
+              </button>
+              <button class="demo-playground__copy-button" type="button" data-playground-copy>
+                Copy definition
+              </button>
+            </div>
+          </form>
+
+          <div class="demo-playground__proof" data-playground-proof>
+            <article class="demo-playground__specimen" aria-labelledby="playground-specimen-title"
+              data-playground-specimen>
+              <p class="demo-playground__folio">Live specimen · fixed text</p>
+              <h3 id="playground-specimen-title">The proof under test</h3>
+              <p>
+                A reliable mark respects the layout because
+                <span id="playground-target-reflow">the proof survives reflow</span>.
+              </p>
+              <p>
+                The runtime stays useful when
+                <span id="playground-target-proof">the proof follows text</span>, not coordinates.
+              </p>
+              <p>
+                Both APIs stay inspectable because
+                <span id="playground-target-data">definitions remain data</span>.
+              </p>
+            </article>
+
+            <section class="demo-playground__output" aria-labelledby="playground-output-title">
+              <div class="demo-playground__output-heading">
+                <div>
+                  <p>Generated definition</p>
+                  <h3 id="playground-output-title">Execution ledger</h3>
+                </div>
+                <span data-playground-method>annotate()</span>
+              </div>
+              <pre tabindex="0"><code data-playground-code></code></pre>
+              <dl class="demo-playground__docket" aria-label="Playground status docket"
+                data-playground-docket tabindex="-1">
+                <div><dt>State</dt><dd data-playground-state>ready</dd></div>
+                <div><dt>Result</dt><dd data-playground-result>Ready to run</dd></div>
+                <div><dt>Owner</dt><dd data-playground-owner>No output yet</dd></div>
+                <div><dt>Trigger</dt><dd data-playground-trigger>manual · explicit show</dd></div>
+                <div><dt>Runs</dt><dd data-playground-run-count>0</dd></div>
+              </dl>
+              <label class="demo-copy-fallback demo-playground__fallback" hidden
+                data-playground-fallback-wrap>
+                <span>Clipboard blocked. The exact definition is selected for manual copy:</span>
+                <textarea rows="8" readonly aria-label="Clipboard fallback definition"
+                  data-playground-fallback></textarea>
+              </label>
+            </section>
           </div>
         </div>
-        <p class="demo-playground__copy">
-          This proof target is reserved for the public-API workbench: existing specimen text,
-          mark, note, placement, and trigger—without arbitrary page editing or drag positioning.
-        </p>
-        <dl class="demo-playground__docket">
-          <div><dt>Input</dt><dd>Existing specimen text</dd></div>
-          <div><dt>Placement</dt><dd>Automatic or named</dd></div>
-          <div><dt>Lifecycle</dt><dd>Show · hide · update · destroy</dd></div>
-        </dl>
       </section>
 
       <section id="limitations" class="demo-doc-section" aria-labelledby="limitations-title">

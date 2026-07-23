@@ -252,13 +252,17 @@ test('supporting notes leave with offscreen targets and redraw without collision
     hasText: 'Parsed locally, rendered through annotate().',
   });
   await expect(note).toBeVisible();
-  const [noteRect, headingRect, targetRect] = await Promise.all([
-    clientRect(note),
-    clientRect(page.locator('#mode-proof-title')),
-    clientRect(page.locator('[data-demo-mode-target]')),
-  ]);
-  expect(overlaps(noteRect, headingRect)).toBe(false);
-  expect(overlaps(noteRect, targetRect)).toBe(false);
+  await expect.poll(async () => {
+    const [noteRect, headingRect, targetRect] = await Promise.all([
+      clientRect(note),
+      clientRect(page.locator('#mode-proof-title')),
+      clientRect(page.locator('[data-demo-mode-target]')),
+    ]);
+    return {
+      heading: overlaps(noteRect, headingRect),
+      target: overlaps(noteRect, targetRect),
+    };
+  }).toEqual({ heading: false, target: false });
   await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(1);
 
   await page.locator('#quick-start').scrollIntoViewIfNeeded();

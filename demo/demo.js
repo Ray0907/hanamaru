@@ -69,6 +69,24 @@ const sizeFields = {
   iife: document.querySelector('[data-testid="size-iife"]'),
   css: document.querySelector('[data-testid="size-css"]'),
 };
+const playgroundForm = document.querySelector('[data-playground-form]');
+const playgroundSpecimen = document.querySelector('[data-playground-specimen]');
+const playgroundCode = document.querySelector('[data-playground-code]');
+const playgroundDocket = document.querySelector('[data-playground-docket]');
+const playgroundState = document.querySelector('[data-playground-state]');
+const playgroundResult = document.querySelector('[data-playground-result]');
+const playgroundOwner = document.querySelector('[data-playground-owner]');
+const playgroundTrigger = document.querySelector('[data-playground-trigger]');
+const playgroundMethod = document.querySelector('[data-playground-method]');
+const playgroundRunCount = document.querySelector('[data-playground-run-count]');
+const playgroundRunButton = document.querySelector('[data-playground-run]');
+const playgroundCopyButton = document.querySelector('[data-playground-copy]');
+const playgroundFallbackWrap = document.querySelector('[data-playground-fallback-wrap]');
+const playgroundFallback = document.querySelector('[data-playground-fallback]');
+const playgroundTargetControl = playgroundForm.elements.target;
+const playgroundNoteControl = playgroundForm.elements.note;
+const playgroundTargetError = document.querySelector('#playground-target-error');
+const playgroundNoteError = document.querySelector('#playground-note-error');
 
 version.textContent = `v${VERSION}`;
 starterFallback.value = localStarter;
@@ -85,6 +103,9 @@ let ledgerMark = 'underline';
 let modeController = null;
 let reflowRequested = false;
 let appliedMode = null;
+let playgroundController = null;
+let playgroundControllerCleanup = null;
+let playgroundRuns = 0;
 
 const proofStory = story(storySteps, {
   trigger: 'manual',
@@ -651,6 +672,307 @@ rangeButton.addEventListener('click', () => {
   status.textContent = 'Native Range target reset.';
 });
 
+const playgroundOwnedAttributes = [
+  'data-hana',
+  'data-hana-note',
+  'data-hana-placement',
+  'data-hana-trigger',
+  'data-hana-accessible',
+  'data-hana-duration',
+  'data-hana-motion',
+];
+
+function playgroundSelection() {
+  const values = new FormData(playgroundForm);
+  const target = String(values.get('target') ?? '');
+  const targetOption = playgroundTargetControl.selectedOptions[0];
+  return {
+    target,
+    targetLabel: targetOption?.textContent.trim() ?? 'Unknown phrase',
+    mark: String(values.get('mark') ?? ''),
+    note: String(values.get('note') ?? '').trim(),
+    placement: String(values.get('placement') ?? ''),
+    trigger: String(values.get('trigger') ?? ''),
+    mode: String(values.get('mode') ?? ''),
+  };
+}
+
+function playgroundSingleQuote(value) {
+  return `'${value
+    .replaceAll('\\', '\\\\')
+    .replaceAll("'", "\\'")
+    .replaceAll('\n', '\\n')}'`;
+}
+
+function playgroundEscapeAttribute(value) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+function imperativeDefinition(selection) {
+  const optionLines = [
+    `  mark: ${playgroundSingleQuote(selection.mark)},`,
+  ];
+  if (selection.note !== '') {
+    optionLines.push(`  note: ${playgroundSingleQuote(selection.note)},`);
+    optionLines.push('  accessible: true,');
+  }
+  optionLines.push(`  placement: ${playgroundSingleQuote(selection.placement)},`);
+  optionLines.push(`  trigger: ${playgroundSingleQuote(selection.trigger)},`);
+  optionLines.push("  motion: 'never',");
+  optionLines.push('  duration: 0,');
+
+  const showLine = selection.trigger === 'manual' ? '\nannotation.show()' : '';
+  return `import { annotate } from '/dist/hanamaru.esm.js'\n\n`
+    + `const annotation = annotate(${playgroundSingleQuote(selection.target)}, {\n`
+    + `${optionLines.join('\n')}\n})${showLine}`;
+}
+
+function declarativeDefinition(selection) {
+  const target = selection.target === '' ? null : document.querySelector(selection.target);
+  const text = playgroundEscapeAttribute(target?.textContent.trim() ?? 'Choose a phrase');
+  const attributes = [
+    `  data-hana="${playgroundEscapeAttribute(selection.mark)}"`,
+  ];
+  if (selection.note !== '') {
+    attributes.push(`  data-hana-note="${playgroundEscapeAttribute(selection.note)}"`);
+    attributes.push('  data-hana-accessible');
+  }
+  attributes.push(`  data-hana-placement="${playgroundEscapeAttribute(selection.placement)}"`);
+  attributes.push(`  data-hana-trigger="${playgroundEscapeAttribute(selection.trigger)}"`);
+  attributes.push('  data-hana-motion="never"');
+  attributes.push('  data-hana-duration="0"');
+  const showLine = selection.trigger === 'manual' ? '\nannotation.show()' : '';
+
+  return `<span id="${selection.target.replace(/^#/, '')}"\n${attributes.join('\n')}>`
+    + `${text}</span>\n\n`
+    + `<script type="module">\n`
+    + `  import { scan } from '/dist/hanamaru.esm.js'\n\n`
+    + `  const root = document.querySelector('[data-playground-specimen]')\n`
+    + `  const { annotations, errors } = scan(root)\n`
+    + `  if (errors.length) throw errors[0]\n`
+    + `  const [annotation] = annotations${showLine}\n`
+    + `</script>`;
+}
+
+function renderPlaygroundDefinition({ edited = false } = {}) {
+  const selection = playgroundSelection();
+  playgroundCode.textContent = selection.mode === 'declarative'
+    ? declarativeDefinition(selection)
+    : imperativeDefinition(selection);
+  playgroundMethod.textContent = selection.mode === 'declarative' ? 'scan()' : 'annotate()';
+  playgroundTrigger.textContent = selection.trigger === 'manual'
+    ? 'manual · explicit show'
+    : `${selection.trigger} · automatic`;
+  playgroundFallbackWrap.hidden = true;
+  if (edited && playgroundController !== null) {
+    playgroundResult.textContent = 'Definition changed · run to apply';
+  }
+}
+
+function clearPlaygroundAuthorship() {
+  for (const target of playgroundSpecimen.querySelectorAll('span[id]')) {
+    for (const attribute of playgroundOwnedAttributes) target.removeAttribute(attribute);
+    target.removeAttribute('data-playground-output-owner');
+  }
+}
+
+function destroyPlaygroundController() {
+  playgroundControllerCleanup?.();
+  playgroundControllerCleanup = null;
+  playgroundController?.destroy();
+  playgroundController = null;
+  clearPlaygroundAuthorship();
+}
+
+function setPlaygroundFieldError(control, error, message) {
+  control.setCustomValidity(message);
+  control.setAttribute('aria-invalid', 'true');
+  error.hidden = false;
+}
+
+function clearPlaygroundErrors() {
+  for (const [control, error] of [
+    [playgroundTargetControl, playgroundTargetError],
+    [playgroundNoteControl, playgroundNoteError],
+  ]) {
+    control.setCustomValidity('');
+    control.removeAttribute('aria-invalid');
+    error.hidden = true;
+  }
+}
+
+function validatePlayground(selection) {
+  clearPlaygroundErrors();
+  if (selection.target === '') {
+    setPlaygroundFieldError(
+      playgroundTargetControl,
+      playgroundTargetError,
+      'Choose one existing phrase.',
+    );
+    return playgroundTargetControl;
+  }
+  if ([...selection.note].length > 280) {
+    setPlaygroundFieldError(
+      playgroundNoteControl,
+      playgroundNoteError,
+      'Keep the note to 280 characters.',
+    );
+    return playgroundNoteControl;
+  }
+  return null;
+}
+
+function authorPlaygroundAttributes(target, selection) {
+  target.dataset.hana = selection.mark;
+  target.dataset.hanaPlacement = selection.placement;
+  target.dataset.hanaTrigger = selection.trigger;
+  target.dataset.hanaMotion = 'never';
+  target.dataset.hanaDuration = '0';
+  if (selection.note !== '') {
+    target.dataset.hanaNote = selection.note;
+    target.setAttribute('data-hana-accessible', '');
+  }
+}
+
+function bindPlaygroundController(controller, target, selection) {
+  const handles = {
+    start(event) {
+      if (event.detail.controller !== controller) return;
+      playgroundRuns += 1;
+      playgroundRunCount.textContent = String(playgroundRuns);
+      playgroundState.textContent = controller.state;
+      playgroundResult.textContent = `Drawing · ${selection.mark}`;
+    },
+    complete(event) {
+      if (event.detail.controller !== controller) return;
+      playgroundState.textContent = controller.state;
+      playgroundResult.textContent = `Rendered · ${selection.mark}`;
+      status.textContent = `Playground rendered ${selection.mark} on ${selection.targetLabel}.`;
+    },
+    cancel(event) {
+      if (event.detail.controller !== controller) return;
+      playgroundState.textContent = controller.state;
+      playgroundResult.textContent = 'Replaced by the next run';
+    },
+    error(event) {
+      if (event.detail.controller !== controller) return;
+      const code = event.detail.error?.code ?? 'HANA_STATE_RUNTIME';
+      playgroundState.textContent = 'error';
+      playgroundResult.textContent = `Runtime error · ${code}`;
+      status.textContent = `Playground stopped: ${code}.`;
+      playgroundDocket.focus({ preventScroll: true });
+    },
+  };
+  for (const [type, handle] of Object.entries(handles)) {
+    target.addEventListener(`hana:${type}`, handle);
+  }
+  return () => {
+    for (const [type, handle] of Object.entries(handles)) {
+      target.removeEventListener(`hana:${type}`, handle);
+    }
+  };
+}
+
+function createPlaygroundController(target, selection) {
+  if (selection.mode === 'declarative') {
+    authorPlaygroundAttributes(target, selection);
+    const result = scan(playgroundSpecimen);
+    if (result.errors.length > 0 || result.annotations.length !== 1) {
+      for (const annotation of result.annotations) annotation.destroy();
+      throw result.errors[0] ?? new Error('Declarative definition did not produce one annotation');
+    }
+    return result.annotations[0];
+  }
+  const options = {
+    mark: selection.mark,
+    placement: selection.placement,
+    trigger: selection.trigger,
+    motion: 'never',
+    duration: 0,
+  };
+  if (selection.note !== '') {
+    options.note = selection.note;
+    options.accessible = true;
+  }
+  return annotate(selection.target, options);
+}
+
+function runPlayground() {
+  const selection = playgroundSelection();
+  const invalidControl = validatePlayground(selection);
+  if (invalidControl !== null) {
+    playgroundState.textContent = 'error';
+    playgroundResult.textContent = 'Needs correction · invalid input';
+    playgroundOwner.textContent = 'No output · input invalid';
+    status.textContent = 'Playground needs correction. Review the focused field.';
+    invalidControl.focus();
+    return;
+  }
+
+  destroyPlaygroundController();
+  const target = document.querySelector(selection.target);
+  try {
+    playgroundController = createPlaygroundController(target, selection);
+    playgroundControllerCleanup = bindPlaygroundController(
+      playgroundController,
+      target,
+      selection,
+    );
+    target.setAttribute('data-playground-output-owner', '');
+    playgroundOwner.textContent = selection.targetLabel;
+    playgroundMethod.textContent = selection.mode === 'declarative' ? 'scan()' : 'annotate()';
+    playgroundTrigger.textContent = selection.trigger === 'manual'
+      ? 'manual · explicit show'
+      : `${selection.trigger} · automatic`;
+    playgroundState.textContent = playgroundController.state;
+    playgroundResult.textContent = selection.trigger === 'manual'
+      ? 'Running · explicit show'
+      : `Waiting · ${selection.trigger} trigger armed`;
+    if (selection.trigger === 'manual') playgroundController.show();
+  } catch (error) {
+    playgroundControllerCleanup?.();
+    playgroundControllerCleanup = null;
+    playgroundController?.destroy();
+    playgroundController = null;
+    clearPlaygroundAuthorship();
+    const code = typeof error?.code === 'string' ? error.code : 'HANA_STATE_RUNTIME';
+    playgroundState.textContent = 'error';
+    playgroundResult.textContent = `Runtime error · ${code}`;
+    playgroundOwner.textContent = 'No output · run failed';
+    status.textContent = `Playground stopped: ${code}.`;
+    playgroundDocket.focus();
+  }
+}
+
+async function copyPlaygroundDefinition() {
+  const definition = playgroundCode.textContent;
+  try {
+    if (navigator.clipboard?.writeText === undefined) throw new Error('Clipboard unavailable');
+    await navigator.clipboard.writeText(definition);
+    playgroundFallbackWrap.hidden = true;
+    playgroundResult.textContent = 'Copied · exact current definition';
+    status.textContent = 'Playground definition copied.';
+  } catch {
+    playgroundFallback.value = definition;
+    playgroundFallbackWrap.hidden = false;
+    playgroundFallback.focus();
+    playgroundFallback.select();
+    playgroundResult.textContent = 'Copy blocked · definition selected';
+    status.textContent = 'Copy blocked. Playground definition selected.';
+  }
+}
+
+playgroundForm.addEventListener('input', () => {
+  clearPlaygroundErrors();
+  renderPlaygroundDefinition({ edited: true });
+});
+playgroundRunButton.addEventListener('click', runPlayground);
+playgroundCopyButton.addEventListener('click', copyPlaygroundDefinition);
+
 window.addEventListener('pagehide', (event) => {
   if (event.persisted) return;
   for (const cleanup of visibilityCleanups) cleanup();
@@ -658,8 +980,10 @@ window.addEventListener('pagehide', (event) => {
   rangeProof.destroy();
   suspendSectionProofs();
   destroyModeProof({ forget: true });
+  destroyPlaygroundController();
 });
 
 selectTab(document.querySelector('[data-demo-tab="story"]'));
 renderStoryState();
+renderPlaygroundDefinition();
 loadSizeReport();
