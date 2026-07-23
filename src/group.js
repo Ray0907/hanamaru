@@ -587,7 +587,6 @@ export function createGroup(members, rawOptions = {}, env) {
     if (state !== 'idle' && state !== 'hidden' && state !== 'suspended') {
       return controller;
     }
-    const priorState = state;
     cancelRefreshObservation();
     const triggerFailure = stopAutomaticTrigger();
     if (triggerFailure !== null) {
@@ -596,10 +595,7 @@ export function createGroup(members, rawOptions = {}, env) {
     }
     const failures = preflightAll();
     if (failures.length > 0) {
-      reportPreflightFailure(
-        failures[0],
-        priorState === 'suspended' && run !== null,
-      );
+      reportPreflightFailure(failures[0], false);
       return controller;
     }
     beginRun();

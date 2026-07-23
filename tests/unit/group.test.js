@@ -670,7 +670,7 @@ test('show transition starts every member in input order and completes atomicall
   assert.equal(controller.finished, run);
 });
 
-test('show from suspended creates a fresh recoverable run and preserves finished on failed preflight', async () => {
+test('show from suspended creates a fresh run for successful and failed preflight', async () => {
   const successEnvironment = fakeEnvironment();
   const recoverable = createGroup(definitions(), {}, successEnvironment.env);
   recoverable.show();
@@ -704,8 +704,16 @@ test('show from suspended creates a fresh recoverable run and preserves finished
     .filter(([name]) => name === 'annotation:show').length;
 
   assert.equal(stillSuspended.show(), stillSuspended);
+  const failedPreflightRun = stillSuspended.finished;
   assert.equal(stillSuspended.state, 'suspended');
-  assert.equal(stillSuspended.finished, previousFinished);
+  assert.notEqual(failedPreflightRun, previousFinished);
+  await assert.rejects(failedPreflightRun, (error) => {
+    assert.equal(error.code, 'HANA_STATE_GROUP_MEMBER');
+    assert.equal(error.details.index, 1);
+    assert.ok(error.details.error instanceof HanamaruTargetError);
+    assert.equal(error.details.error.code, 'HANA_TARGET_MISSING');
+    return true;
+  });
   assert.equal(
     failureEnvironment.calls.filter(([name]) => name === 'annotation:show').length,
     showCalls,
