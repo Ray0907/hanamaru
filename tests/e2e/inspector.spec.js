@@ -450,11 +450,12 @@ test('Inspector runtime imports use only documented bare public package specifie
   )?.[1];
   expect(mapSource).toBeTruthy();
   expect(JSON.parse(mapSource).imports).toEqual({
-    'hanamaru-annotations': '/src/index.js',
-    'hanamaru-annotations/plugins': '/src/plugins.js',
-    'hanamaru-annotations/selection': '/src/selection.js',
-    'hanamaru-annotations/serialize': '/src/serialize.js',
+    'hanamaru-annotations': '/dist/hanamaru.esm.js',
+    'hanamaru-annotations/plugins': '/dist/hanamaru.plugins.esm.js',
+    'hanamaru-annotations/selection': '/dist/hanamaru.selection.esm.js',
+    'hanamaru-annotations/serialize': '/dist/hanamaru.serialize.esm.js',
   });
+  expect(mapSource).not.toContain('/src/');
 
   const publicImports = [...inspectorSource.matchAll(
     /^import(?:[\s\S]*?)from\s+['"](hanamaru-annotations(?:\/[^'"]+)?)['"];$/gmu,

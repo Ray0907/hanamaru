@@ -8,6 +8,45 @@ const distributionFiles = ['hanamaru.esm.js', 'hanamaru.iife.js'];
 const HARD_COMBINED_GZIP_CAP = 20_480;
 const STRETCH_COMBINED_GZIP_TARGET = 18_432;
 
+function localEsmSpecifiers(source) {
+  const specifiers = [];
+  const staticImportPattern = /\b(?:import|export)\s*(?:[^;"']*?\bfrom\s*)?["'](\.[^"']+)["']/gu;
+  for (const match of source.matchAll(staticImportPattern)) {
+    specifiers.push(match[1]);
+  }
+  return specifiers;
+}
+
+async function readEsmGraph(entryPath, distributionDirectory) {
+  const files = [];
+  const seen = new Set();
+  const resolvedDistributionDirectory = path.resolve(distributionDirectory);
+
+  async function visit(filePath) {
+    const resolvedPath = path.resolve(filePath);
+    const relativePath = path.relative(resolvedDistributionDirectory, resolvedPath);
+    if (
+      relativePath.startsWith(`..${path.sep}`)
+      || relativePath === '..'
+      || path.isAbsolute(relativePath)
+    ) {
+      throw new Error(`dist-check: ESM import leaves dist (${relativePath})`);
+    }
+    if (seen.has(resolvedPath)) return;
+    seen.add(resolvedPath);
+
+    const source = await readFile(resolvedPath);
+    files.push(source);
+    for (const specifier of localEsmSpecifiers(source.toString('utf8'))) {
+      const cleanSpecifier = specifier.split(/[?#]/u, 1)[0];
+      await visit(path.resolve(path.dirname(resolvedPath), cleanSpecifier));
+    }
+  }
+
+  await visit(entryPath);
+  return files;
+}
+
 export async function measureDistribution(root = process.cwd()) {
   const distributionDirectory = path.join(path.resolve(root), 'dist');
   const css = await readFile(path.join(distributionDirectory, 'hanamaru.css'));
@@ -15,9 +54,17 @@ export async function measureDistribution(root = process.cwd()) {
   const formats = [];
 
   for (const file of distributionFiles) {
-    const source = await readFile(path.join(distributionDirectory, file));
-    const raw = source.length;
-    const gzip = gzipSync(source, { level: constants.Z_BEST_COMPRESSION }).length;
+    const entryPath = path.join(distributionDirectory, file);
+    const sources = file === 'hanamaru.esm.js'
+      ? await readEsmGraph(entryPath, distributionDirectory)
+      : [await readFile(entryPath)];
+    const raw = sources.reduce((total, source) => total + source.length, 0);
+    const gzip = sources.reduce(
+      (total, source) => (
+        total + gzipSync(source, { level: constants.Z_BEST_COMPRESSION }).length
+      ),
+      0,
+    );
     const combined = gzip + cssGzip;
     formats.push({
       combined,

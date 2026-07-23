@@ -9,17 +9,26 @@ export async function buildDistribution(root = process.cwd()) {
   const sourceDirectory = path.join(projectRoot, 'src');
   const distributionDirectory = path.join(projectRoot, 'dist');
   const entryPoint = path.join(sourceDirectory, 'index.js');
+  const esmEntryPoints = {
+    'hanamaru.esm': entryPoint,
+    'hanamaru.plugins.esm': path.join(sourceDirectory, 'plugins.js'),
+    'hanamaru.selection.esm': path.join(sourceDirectory, 'selection.js'),
+    'hanamaru.serialize.esm': path.join(sourceDirectory, 'serialize.js'),
+  };
 
   await rm(distributionDirectory, { recursive: true, force: true });
   await mkdir(distributionDirectory, { recursive: true });
 
   await Promise.all([
     build({
-      entryPoints: [entryPoint],
-      outfile: path.join(distributionDirectory, 'hanamaru.esm.js'),
+      entryPoints: esmEntryPoints,
+      outdir: distributionDirectory,
       bundle: true,
+      chunkNames: 'chunks/[name]-[hash]',
+      entryNames: '[name]',
       format: 'esm',
       minify: true,
+      splitting: true,
       target: 'es2020',
     }),
     build({
@@ -47,5 +56,5 @@ const invokedPath = process.argv[1] && pathToFileURL(path.resolve(process.argv[1
 
 if (invokedPath === import.meta.url) {
   await buildDistribution(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
-  console.log('build: wrote ESM, IIFE, CSS, and size report');
+  console.log('build: wrote ESM entry points, shared chunks, IIFE, CSS, and size report');
 }

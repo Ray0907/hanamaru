@@ -9,6 +9,9 @@
   },
   "exports": {
     ".": "./dist/hanamaru.esm.js",
+    "./plugins": "./dist/hanamaru.plugins.esm.js",
+    "./selection": "./dist/hanamaru.selection.esm.js",
+    "./serialize": "./dist/hanamaru.serialize.esm.js",
     "./style.css": "./dist/hanamaru.css"
   },
   "files": [
