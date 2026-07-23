@@ -8,6 +8,13 @@ const CLOSE_EFFECTS = Object.freeze([
 
 const PLACEMENTS = Object.freeze(new Set(['auto', 'top', 'right', 'bottom', 'left']));
 const MOTIONS = Object.freeze(new Set(['system', 'never']));
+const OPTION_NAMES = Object.freeze([
+  'placement',
+  'accessible',
+  'duration',
+  'motion',
+  'seed',
+]);
 
 function unchanged(model) {
   return { model, effects: [] };
@@ -20,8 +27,19 @@ function changed(model, state, effects, changes = {}) {
   };
 }
 
+function recordStatus(value) {
+  try {
+    return {
+      ok: true,
+      isRecord: typeof value === 'object' && value !== null && !Array.isArray(value),
+    };
+  } catch {
+    return { ok: false, isRecord: false };
+  }
+}
+
 function isRecord(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return recordStatus(value).isRecord;
 }
 
 function readField(record, name) {
@@ -32,12 +50,85 @@ function readField(record, name) {
   }
 }
 
-function isStringToken(value) {
-  return typeof value === 'string' && value.trim().length > 0;
+function isOpaqueControlToken(value) {
+  if (typeof value === 'string') return value.trim().length > 0;
+  return (typeof value === 'object' && value !== null) || typeof value === 'function';
 }
 
 function isTransientOpen(model) {
   return model?.transient?.kind === 'note' || model?.transient?.kind === 'palette';
+}
+
+function snapshotOptions(options) {
+  if (options == null) return { ok: true, value: {} };
+  const status = recordStatus(options);
+  if (!status.ok || !status.isRecord) return { ok: false, value: {} };
+
+  const value = {};
+  for (const name of OPTION_NAMES) {
+    const field = readField(options, name);
+    if (!field.ok) return { ok: false, value: {} };
+    if (field.value !== undefined) value[name] = field.value;
+  }
+  return { ok: true, value };
+}
+
+function snapshotTransient(transient) {
+  if (transient == null) return { ok: true, value: null };
+  const status = recordStatus(transient);
+  if (!status.ok) return { ok: false, value: null };
+  if (!status.isRecord) return { ok: true, value: null };
+
+  const kind = readField(transient, 'kind');
+  if (!kind.ok) return { ok: false, value: null };
+  if (kind.value !== 'note' && kind.value !== 'palette') {
+    return { ok: true, value: null };
+  }
+
+  const opener = readField(transient, 'opener');
+  if (!opener.ok) return { ok: false, value: null };
+  if (!isOpaqueControlToken(opener.value)) return { ok: true, value: null };
+
+  return {
+    ok: true,
+    value: { kind: kind.value, opener: opener.value },
+  };
+}
+
+function snapshotModel(model) {
+  const state = readField(model, 'state');
+  if (!state.ok) {
+    return {
+      ok: false,
+      stateOk: false,
+      value: { state: undefined, transient: null, mark: undefined, options: {} },
+    };
+  }
+
+  const transient = readField(model, 'transient');
+  const mark = readField(model, 'mark');
+  const options = readField(model, 'options');
+  const transientSnapshot = transient.ok
+    ? snapshotTransient(transient.value)
+    : { ok: false, value: null };
+  const optionsSnapshot = options.ok
+    ? snapshotOptions(options.value)
+    : { ok: false, value: {} };
+
+  return {
+    ok: transient.ok
+      && mark.ok
+      && options.ok
+      && transientSnapshot.ok
+      && optionsSnapshot.ok,
+    stateOk: true,
+    value: {
+      state: state.value,
+      transient: transientSnapshot.value,
+      mark: mark.value,
+      options: optionsSnapshot.value,
+    },
+  };
 }
 
 function isValidOption(name, value) {
@@ -94,9 +185,31 @@ export function reduceInspector(model, event) {
   const typeField = readField(event, 'type');
   if (!typeField.ok || typeof typeField.value !== 'string') return unchanged(model);
   const type = typeField.value;
+  const snapshot = snapshotModel(model);
+  if (!snapshot.stateOk) return unchanged(model);
+  const current = snapshot.value;
+  const isOpen = (
+    current.state === 'idle'
+    || current.state === 'selected'
+    || current.state === 'editing'
+    || current.state === 'applied'
+  );
+
+  if (!snapshot.ok) {
+    if (
+      isOpen
+      && (type === 'escape' || type === 'close' || type === 'navigation')
+    ) {
+      return {
+        model: { ...current, state: 'closed', transient: null },
+        effects: [...CLOSE_EFFECTS],
+      };
+    }
+    return unchanged(model);
+  }
 
   if (
-    isTransientOpen(model)
+    isTransientOpen(current)
     && type !== 'escape'
     && type !== 'close'
     && type !== 'navigation'
@@ -104,12 +217,12 @@ export function reduceInspector(model, event) {
     return unchanged(model);
   }
 
-  switch (model?.state) {
+  switch (current.state) {
     case 'closed':
       if (type === 'open') {
         const invoker = readField(event, 'invoker');
-        if (!invoker.ok || !isStringToken(invoker.value)) return unchanged(model);
-        return changed(model, 'idle', [
+        if (!invoker.ok || !isOpaqueControlToken(invoker.value)) return unchanged(model);
+        return changed(current, 'idle', [
           'capture-invoker',
           'mount',
           'attach-listeners',
@@ -122,19 +235,21 @@ export function reduceInspector(model, event) {
       if (type === 'valid-selection') {
         const range = readField(event, 'range');
         if (!range.ok || range.value == null) return unchanged(model);
-        return changed(model, 'selected', ['clone-selection', 'show-toolbar']);
+        return changed(current, 'selected', ['clone-selection', 'show-toolbar']);
       }
       break;
 
     case 'selected':
       if (type === 'invalid-selection') {
-        return changed(model, 'idle', ['clear-selection', 'hide-toolbar']);
+        return changed(current, 'idle', ['clear-selection', 'hide-toolbar']);
       }
       if (type === 'choose-mark') {
         const mark = readField(event, 'mark');
-        if (!mark.ok || !isStringToken(mark.value)) return unchanged(model);
+        if (!mark.ok || typeof mark.value !== 'string' || mark.value.trim().length === 0) {
+          return unchanged(model);
+        }
         return changed(
-          model,
+          current,
           'editing',
           ['create-preview', 'show-output'],
           { mark: mark.value },
@@ -145,11 +260,16 @@ export function reduceInspector(model, event) {
     case 'editing': {
       if (type === 'change-mark') {
         const mark = readField(event, 'mark');
-        if (!mark.ok || !isStringToken(mark.value) || Object.is(model.mark, mark.value)) {
+        if (
+          !mark.ok
+          || typeof mark.value !== 'string'
+          || mark.value.trim().length === 0
+          || Object.is(current.mark, mark.value)
+        ) {
           return unchanged(model);
         }
         return changed(
-          model,
+          current,
           'editing',
           ['update-preview', 'refresh-output'],
           { mark: mark.value },
@@ -163,24 +283,24 @@ export function reduceInspector(model, event) {
           !name.ok
           || !value.ok
           || !isValidOption(name.value, value.value)
-          || Object.is(model.options?.[name.value], value.value)
+          || Object.is(current.options[name.value], value.value)
         ) {
           return unchanged(model);
         }
         return changed(
-          model,
+          current,
           'editing',
           ['update-preview', 'refresh-output'],
-          { options: { ...model.options, [name.value]: value.value } },
+          { options: { ...current.options, [name.value]: value.value } },
         );
       }
 
       if (type === 'add-note') {
-        if (model.transient != null) return unchanged(model);
+        if (current.transient != null) return unchanged(model);
         const opener = readField(event, 'opener');
-        if (!opener.ok || !isStringToken(opener.value)) return unchanged(model);
+        if (!opener.ok || !isOpaqueControlToken(opener.value)) return unchanged(model);
         return changed(
-          model,
+          current,
           'editing',
           ['open-note', 'focus-note'],
           { transient: { kind: 'note', opener: opener.value } },
@@ -188,24 +308,24 @@ export function reduceInspector(model, event) {
       }
 
       if (type === 'apply') {
-        return changed(model, 'applied', ['commit-preview', 'refresh-output']);
+        return changed(current, 'applied', ['commit-preview', 'refresh-output']);
       }
 
       if (type === 'cancel') {
-        return changed(model, 'selected', ['destroy-owned', 'retain-range', 'hide-output']);
+        return changed(current, 'selected', ['destroy-owned', 'retain-range', 'hide-output']);
       }
       break;
     }
 
     case 'applied':
       if (type === 'edit') {
-        return changed(model, 'editing', ['reuse-controller', 'focus-first-editor']);
+        return changed(current, 'editing', ['reuse-controller', 'focus-first-editor']);
       }
 
       if (type === 'new-valid-selection') {
         const range = readField(event, 'range');
         if (!range.ok || range.value == null) return unchanged(model);
-        return changed(model, 'selected', [
+        return changed(current, 'selected', [
           'clone-selection',
           'validate-clone',
           'destroy-owned',
@@ -220,12 +340,12 @@ export function reduceInspector(model, event) {
   }
 
   if (type === 'open-palette') {
-    if (model.transient != null) return unchanged(model);
+    if (current.transient != null) return unchanged(model);
     const opener = readField(event, 'opener');
-    if (!opener.ok || !isStringToken(opener.value)) return unchanged(model);
+    if (!opener.ok || !isOpaqueControlToken(opener.value)) return unchanged(model);
     return changed(
-      model,
-      model.state,
+      current,
+      current.state,
       ['open-palette', 'focus-palette'],
       { transient: { kind: 'palette', opener: opener.value } },
     );
@@ -233,19 +353,19 @@ export function reduceInspector(model, event) {
 
   if (
     type === 'escape'
-    && (model.transient?.kind === 'note' || model.transient?.kind === 'palette')
+    && isTransientOpen(current)
   ) {
     return changed(
-      model,
-      model.state,
+      current,
+      current.state,
       ['close-transient', 'focus-transient-opener'],
       { transient: null },
     );
   }
 
-  if (type === 'close' || type === 'navigation' || (type === 'escape' && model.transient == null)) {
+  if (type === 'close' || type === 'navigation' || (type === 'escape' && current.transient == null)) {
     return {
-      model: { ...model, state: 'closed', transient: null },
+      model: { ...current, state: 'closed', transient: null },
       effects: [...CLOSE_EFFECTS],
     };
   }

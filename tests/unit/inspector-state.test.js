@@ -403,7 +403,16 @@ function assertRejected(model, event) {
 }
 
 test('open and transient events reject missing or malformed string tokens', () => {
-  for (const token of [undefined, null, '', '   ', 0, {}, Symbol('token')]) {
+  for (const token of [
+    undefined,
+    null,
+    '',
+    '   ',
+    0,
+    true,
+    false,
+    Symbol('token'),
+  ]) {
     assertRejected(CLOSED, { type: 'open', invoker: token });
     assertRejected(
       { state: 'selected', transient: null },
@@ -414,6 +423,38 @@ test('open and transient events reject missing or malformed string tokens', () =
       { type: 'add-note', opener: token },
     );
   }
+});
+
+test('DOM-like invoker and openers retain exact opaque identity', () => {
+  const invoker = { isConnected: true, focus() {} };
+  const openEvent = { type: 'open', invoker };
+  const openResult = reduceInspector(CLOSED, openEvent);
+  const openContext = createInspectorEffectContext(CLOSED, openEvent, openResult);
+  assert.equal(openResult.model.state, 'idle');
+  assert.equal(openContext.event.invoker, invoker);
+
+  const noteOpener = { isConnected: true, focus() {} };
+  const editing = {
+    state: 'editing',
+    transient: null,
+    mark: 'underline',
+    options: {},
+  };
+  const noteEvent = { type: 'add-note', opener: noteOpener };
+  const noteResult = reduceInspector(editing, noteEvent);
+  const noteContext = createInspectorEffectContext(editing, noteEvent, noteResult);
+  assert.equal(noteResult.model.transient.opener, noteOpener);
+  assert.equal(noteContext.event.opener, noteOpener);
+  assert.equal(noteContext.next.transient.opener, noteOpener);
+
+  const shortcutOpener = function shortcutOpener() {};
+  const selected = { state: 'selected', transient: null, mark: null, options: {} };
+  const paletteEvent = { type: 'open-palette', opener: shortcutOpener };
+  const paletteResult = reduceInspector(selected, paletteEvent);
+  const paletteContext = createInspectorEffectContext(selected, paletteEvent, paletteResult);
+  assert.equal(paletteResult.model.transient.opener, shortcutOpener);
+  assert.equal(paletteContext.event.opener, shortcutOpener);
+  assert.equal(paletteContext.next.transient.opener, shortcutOpener);
 });
 
 test('selection transitions reject missing or null Range tokens', () => {
@@ -509,4 +550,206 @@ test('hostile event payload access is contained as an idempotent rejection', () 
       },
     },
   ));
+});
+
+test('hostile model state reads never escape and reject idempotently', () => {
+  const hostile = new Proxy({}, {
+    get() {
+      throw new Error('model trap');
+    },
+  });
+
+  assert.doesNotThrow(() => assertRejected(hostile, { type: 'valid-selection', range: {} }));
+  assert.doesNotThrow(() => assertRejected(hostile, { type: 'close' }));
+});
+
+test('hostile transient and options reads gate work but allow safe close paths', () => {
+  const model = {
+    state: 'editing',
+    get transient() {
+      throw new Error('transient getter');
+    },
+    mark: 'underline',
+    get options() {
+      throw new Error('options getter');
+    },
+  };
+
+  assert.doesNotThrow(() => assertRejected(model, { type: 'apply' }));
+
+  for (const type of ['escape', 'close', 'navigation']) {
+    let result;
+    assert.doesNotThrow(() => {
+      result = reduceInspector(model, { type });
+    });
+    assert.equal(result.model.state, 'closed');
+    assert.equal(result.model.transient, null);
+    assert.deepEqual(result.effects, [
+      'destroy-owned',
+      'close-layers',
+      'remove-listeners',
+      'unmount',
+      'focus-connected-invoker',
+    ]);
+  }
+});
+
+test('hostile nested transient and options proxies never escape', () => {
+  const hostileTransient = new Proxy({}, {
+    get() {
+      throw new Error('transient proxy');
+    },
+  });
+  const transientModel = {
+    state: 'selected',
+    transient: hostileTransient,
+    mark: null,
+    options: {},
+  };
+  assert.doesNotThrow(() => assertRejected(
+    transientModel,
+    { type: 'choose-mark', mark: 'circle' },
+  ));
+  const escaped = reduceInspector(transientModel, { type: 'escape' });
+  assert.equal(escaped.model.state, 'closed');
+  assert.deepEqual(escaped.effects, [
+    'destroy-owned',
+    'close-layers',
+    'remove-listeners',
+    'unmount',
+    'focus-connected-invoker',
+  ]);
+
+  const hostileOptions = new Proxy({}, {
+    get() {
+      throw new Error('options proxy');
+    },
+  });
+  const optionsModel = {
+    state: 'editing',
+    transient: null,
+    mark: 'underline',
+    options: hostileOptions,
+  };
+  assert.doesNotThrow(() => assertRejected(
+    optionsModel,
+    { type: 'valid-option', name: 'duration', value: 10 },
+  ));
+});
+
+test('revoked nested proxies are contained like other hostile model fields', () => {
+  const transient = Proxy.revocable({}, {});
+  const options = Proxy.revocable({}, {});
+  transient.revoke();
+  options.revoke();
+
+  for (const [name, value] of [
+    ['transient', transient.proxy],
+    ['options', options.proxy],
+  ]) {
+    const model = {
+      state: 'editing',
+      transient: null,
+      mark: 'underline',
+      options: {},
+      [name]: value,
+    };
+    assert.doesNotThrow(() => assertRejected(model, { type: 'apply' }));
+    let closed;
+    assert.doesNotThrow(() => {
+      closed = reduceInspector(model, { type: 'close' });
+    });
+    assert.equal(closed.model.state, 'closed');
+    assert.deepEqual(closed.effects, [
+      'destroy-owned',
+      'close-layers',
+      'remove-listeners',
+      'unmount',
+      'focus-connected-invoker',
+    ]);
+  }
+});
+
+test('unknown and invalid transient kinds act as no active transient', () => {
+  for (const transient of [
+    { kind: 'dialog', opener: 'dialog-button' },
+    { kind: '', opener: 'dialog-button' },
+    { kind: 'note', opener: null },
+    42,
+  ]) {
+    const model = {
+      state: 'editing',
+      transient,
+      mark: 'underline',
+      options: {},
+    };
+    const result = reduceInspector(model, { type: 'escape' });
+
+    assert.equal(result.model.state, 'closed');
+    assert.equal(result.model.transient, null);
+    assert.deepEqual(result.effects, [
+      'destroy-owned',
+      'close-layers',
+      'remove-listeners',
+      'unmount',
+      'focus-connected-invoker',
+    ]);
+  }
+});
+
+test('changed models copy only safely snapshotted reducer-owned fields', () => {
+  const model = {
+    state: 'selected',
+    transient: null,
+    mark: null,
+    options: { placement: 'auto' },
+    get unrelated() {
+      throw new Error('unrelated getter must not run');
+    },
+  };
+  let result;
+  assert.doesNotThrow(() => {
+    result = reduceInspector(model, { type: 'choose-mark', mark: 'circle' });
+  });
+
+  assert.equal(result.model.state, 'editing');
+  assert.equal(result.model.mark, 'circle');
+  assert.deepEqual(result.model.options, { placement: 'auto' });
+  assert.ok(!Object.hasOwn(result.model, 'unrelated'));
+  assert.deepEqual(Object.keys(result.model).sort(), [
+    'mark',
+    'options',
+    'state',
+    'transient',
+  ]);
+});
+
+test('valid transient snapshot reads kind once and preserves opener identity', () => {
+  const opener = { isConnected: true, focus() {} };
+  let kindReads = 0;
+  let openerReads = 0;
+  const transient = {
+    get kind() {
+      kindReads += 1;
+      return 'palette';
+    },
+    get opener() {
+      openerReads += 1;
+      return opener;
+    },
+  };
+  const model = {
+    state: 'selected',
+    transient,
+    mark: null,
+    options: {},
+  };
+  const result = reduceInspector(model, { type: 'escape' });
+
+  assert.equal(kindReads, 1);
+  assert.equal(openerReads, 1);
+  assert.equal(result.model.transient, null);
+  assert.deepEqual(result.effects, ['close-transient', 'focus-transient-opener']);
+  const context = createInspectorEffectContext(model, { type: 'escape' }, result);
+  assert.equal(context.previous.transient.opener, opener);
 });
