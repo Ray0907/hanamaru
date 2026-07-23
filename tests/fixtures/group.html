@@ -8,6 +8,7 @@
     <style>
       body { margin: 40px; min-height: 240vh; }
       .target { display: inline-block; margin: 32px; }
+      #layout-stage { display: inline-block; }
       #replacement-slot { min-height: 80px; }
       #viewport-stage { margin-top: 140vh; }
     </style>
@@ -15,8 +16,14 @@
   <body>
     <main>
       <div id="replacement-slot"></div>
-      <p id="group-first" class="target">First group target</p>
+      <p id="group-first" class="target" aria-describedby="author-first">First group target</p>
       <p id="group-second" class="target">Second group target</p>
+      <p id="group-third" class="target">Third group target</p>
+      <div id="layout-stage">
+        <p id="layout-first" class="target">First layout target</p>
+        <p id="layout-second" class="target">Second layout target</p>
+        <p id="layout-third" class="target">Third layout target</p>
+      </div>
       <section id="viewport-stage">
         <p id="viewport-first" class="target">Original viewport target</p>
       </section>
