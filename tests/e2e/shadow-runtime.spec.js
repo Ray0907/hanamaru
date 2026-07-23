@@ -620,6 +620,94 @@ test('resource composed event dispatch crosses the Shadow boundary with exact de
   });
 });
 
+test('scoped lifecycle payloads retain the exact controller for each ShadowRoot', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const state = window.__shadowRuntime;
+    const firstScope = createShadowScope(state.openRoot);
+    const secondScope = createShadowScope(state.otherRoot);
+    const first = firstScope.annotate('#open-target', {
+      mark: 'underline',
+      duration: 0,
+      motion: 'never',
+    });
+    const second = secondScope.annotate('#other-target', {
+      mark: 'box',
+      duration: 0,
+      motion: 'never',
+    });
+    const events = [];
+    const record = (type) => (event) => {
+      events.push({
+        type,
+        root: event.detail.controller === first
+          ? 'open'
+          : event.detail.controller === second ? 'other' : 'foreign',
+        state: event.detail.state,
+        target: event.target === state.openHost
+          ? 'open'
+          : event.target === state.otherRoot.host ? 'other' : 'foreign',
+        bubbles: event.bubbles,
+        composed: event.composed,
+      });
+    };
+    const onStart = record('start');
+    const onComplete = record('complete');
+    document.addEventListener('hana:start', onStart);
+    document.addEventListener('hana:complete', onComplete);
+    first.show();
+    await first.finished;
+    second.show();
+    await second.finished;
+    document.removeEventListener('hana:start', onStart);
+    document.removeEventListener('hana:complete', onComplete);
+    secondScope.destroy();
+    firstScope.destroy();
+    return {
+      events,
+      portals: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    events: [
+      {
+        type: 'start',
+        root: 'open',
+        state: 'showing',
+        target: 'open',
+        bubbles: true,
+        composed: true,
+      },
+      {
+        type: 'complete',
+        root: 'open',
+        state: 'visible',
+        target: 'open',
+        bubbles: true,
+        composed: true,
+      },
+      {
+        type: 'start',
+        root: 'other',
+        state: 'showing',
+        target: 'other',
+        bubbles: true,
+        composed: true,
+      },
+      {
+        type: 'complete',
+        root: 'other',
+        state: 'visible',
+        target: 'other',
+        bubbles: true,
+        composed: true,
+      },
+    ],
+    portals: 0,
+  });
+});
+
 test('resource iframe root uses its owner Document portal and isolated scheduler', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireShadowResources } = await import('/src/shadow-resources.js');
