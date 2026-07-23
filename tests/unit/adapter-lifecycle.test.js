@@ -4,7 +4,10 @@ import test from 'node:test';
 import { createAnnotation } from '../../src/annotation.js';
 import { readControllerMetadata } from '../../src/controller-metadata.js';
 import { HanamaruConfigError } from '../../src/errors.js';
-import { createAdapterOwner } from '../../src/adapters/lifecycle.js';
+import {
+  createAdapterOwner,
+  prepareAdapterRequest,
+} from '../../src/adapters/lifecycle.js';
 
 class FakeTarget extends EventTarget {
   constructor(name, calls) {
@@ -157,6 +160,168 @@ function createHarness() {
 
 const box = Object.freeze({ mark: 'box' });
 const circle = Object.freeze({ mark: 'circle' });
+
+test('prepared requests preserve non-enumerable seed semantics from one frozen snapshot', () => {
+  const options = { mark: 'box' };
+  Object.defineProperty(options, 'seed', {
+    configurable: true,
+    value: 'quiet-seed',
+  });
+
+  const prepared = prepareAdapterRequest(options);
+  const replayed = prepareAdapterRequest(prepared.options, prepared.config);
+
+  assert.equal(prepared.options.seed, 'quiet-seed');
+  assert.equal(Object.hasOwn(prepared.options, 'seed'), true);
+  assert.equal(prepared.canonical[4], true);
+  assert.equal(prepared.canonical[5], 'quiet-seed');
+  assert.deepEqual(replayed.canonical, prepared.canonical);
+  assert.equal(Object.isFrozen(prepared), true);
+  assert.equal(Object.isFrozen(prepared.options), true);
+  assert.equal(Object.isFrozen(prepared.config), true);
+  assert.equal(Object.isFrozen(prepared.canonical), true);
+
+  const harness = createHarness();
+  const target = new FakeTarget('prepared', harness.calls);
+  harness.owner.mount(target, prepared.options, prepared.config);
+  assert.equal(harness.calls[0][2].seed, 'quiet-seed');
+});
+
+test('prepared requests cannot diverge through changing proxy descriptors', () => {
+  const descriptorReads = new Map();
+  const options = new Proxy({}, {
+    ownKeys() {
+      return ['mark', 'seed'];
+    },
+    getOwnPropertyDescriptor(_target, field) {
+      if (field !== 'mark' && field !== 'seed') return undefined;
+      const count = (descriptorReads.get(field) ?? 0) + 1;
+      descriptorReads.set(field, count);
+      return {
+        configurable: true,
+        enumerable: field === 'mark',
+        value: field === 'mark' ? 'box' : `seed-${count}`,
+        writable: true,
+      };
+    },
+  });
+
+  const prepared = prepareAdapterRequest(options);
+  const replayed = prepareAdapterRequest(prepared.options, prepared.config);
+
+  assert.deepEqual([...descriptorReads], [['mark', 1], ['seed', 1]]);
+  assert.equal(prepared.options.seed, 'seed-1');
+  assert.equal(prepared.canonical[5], 'seed-1');
+  assert.deepEqual(replayed.canonical, prepared.canonical);
+});
+
+test('prepared requests read each option and config accessor exactly once', () => {
+  const reads = new Map();
+  const accessor = (target, field, value, prefix) => {
+    Object.defineProperty(target, field, {
+      configurable: true,
+      get() {
+        const key = `${prefix}.${field}`;
+        reads.set(key, (reads.get(key) ?? 0) + 1);
+        return value;
+      },
+    });
+  };
+  const options = {};
+  accessor(options, 'mark', 'box', 'options');
+  accessor(options, 'note', 'Counted', 'options');
+  accessor(options, 'placement', 'left', 'options');
+  accessor(options, 'accessible', true, 'options');
+  accessor(options, 'seed', 'once', 'options');
+  accessor(options, 'duration', 10, 'options');
+  accessor(options, 'motion', 'never', 'options');
+  const onError = () => {};
+  const config = {};
+  accessor(config, 'enabled', true, 'config');
+  accessor(config, 'onError', onError, 'config');
+
+  const prepared = prepareAdapterRequest(options, config);
+  const replayed = prepareAdapterRequest(prepared.options, prepared.config);
+
+  assert.deepEqual([...reads], [
+    ['options.mark', 1],
+    ['options.note', 1],
+    ['options.placement', 1],
+    ['options.accessible', 1],
+    ['options.seed', 1],
+    ['options.duration', 1],
+    ['options.motion', 1],
+    ['config.enabled', 1],
+    ['config.onError', 1],
+  ]);
+  assert.deepEqual(replayed.canonical, prepared.canonical);
+  assert.deepEqual(prepared.config, { enabled: true, onError });
+});
+
+test('prepared request validation rejects unknown, symbol, and trigger fields once', () => {
+  const invalidInputs = [
+    { input: { mark: 'box', unknown: 1 }, field: 'unknown' },
+    { input: { mark: 'box', trigger: 'manual' }, field: 'trigger' },
+  ];
+  const hiddenUnknown = { mark: 'box' };
+  Object.defineProperty(hiddenUnknown, 'unknown', { value: 1 });
+  invalidInputs.push({ input: hiddenUnknown, field: 'unknown' });
+  const hiddenTrigger = { mark: 'box' };
+  Object.defineProperty(hiddenTrigger, 'trigger', { value: 'manual' });
+  invalidInputs.push({ input: hiddenTrigger, field: 'trigger' });
+  const symbol = Symbol('unknown');
+  invalidInputs.push({ input: { mark: 'box', [symbol]: 1 }, field: symbol });
+
+  for (const { input, field } of invalidInputs) {
+    assert.throws(
+      () => prepareAdapterRequest(input),
+      (error) => error instanceof HanamaruConfigError
+        && error.code === 'HANA_CONFIG_INVALID'
+        && error.details.field === field,
+    );
+  }
+
+  assert.throws(
+    () => prepareAdapterRequest({ mark: 'box' }, { unknown: true }),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_INVALID'
+      && error.details.field === 'config.unknown',
+  );
+  const configSymbol = Symbol('unknown');
+  assert.throws(
+    () => prepareAdapterRequest({ mark: 'box' }, { [configSymbol]: true }),
+    (error) => error instanceof HanamaruConfigError
+      && error.code === 'HANA_CONFIG_INVALID'
+      && error.details.field === `config.${String(configSymbol)}`,
+  );
+});
+
+test('prepared request reflection and accessor failures preserve their exact causes', () => {
+  for (const stage of ['ownKeys', 'descriptor', 'accessor']) {
+    const failure = new Error(`${stage} failed`);
+    let options;
+    if (stage === 'ownKeys') {
+      options = new Proxy({}, {
+        ownKeys() { throw failure; },
+      });
+    } else if (stage === 'descriptor') {
+      options = new Proxy({}, {
+        ownKeys() { return ['mark']; },
+        getOwnPropertyDescriptor() { throw failure; },
+      });
+    } else {
+      options = {};
+      Object.defineProperty(options, 'mark', {
+        get() { throw failure; },
+      });
+    }
+    assert.throws(
+      () => prepareAdapterRequest(options),
+      (error) => error === failure,
+      stage,
+    );
+  }
+});
 
 function manualOptions(mark, seed, overrides = {}) {
   return {

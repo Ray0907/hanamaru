@@ -18,40 +18,58 @@ let nextAdapterSeed = 0;
 function invalid(field, value) {
   throw new HanamaruConfigError(
     'HANA_CONFIG_INVALID',
-    `Invalid adapter option: ${field}`,
+    `Invalid adapter option: ${String(field)}`,
     { field, value },
   );
 }
 
-function own(input, key) {
-  return Object.prototype.hasOwnProperty.call(input, key);
+function descriptorValue(input, descriptor) {
+  if (Object.hasOwn(descriptor, 'value')) return descriptor.value;
+  if (descriptor.get === undefined) return undefined;
+  return Reflect.apply(descriptor.get, input, []);
+}
+
+function snapshotFields(input, allowed, fieldForInvalid) {
+  const source = {};
+  for (const key of Reflect.ownKeys(input)) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(input, key);
+    if (descriptor === undefined) continue;
+    const value = descriptorValue(input, descriptor);
+    if (typeof key !== 'string' || !allowed.has(key)) {
+      invalid(fieldForInvalid(key), value);
+    }
+    Object.defineProperty(source, key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    });
+  }
+  return source;
 }
 
 function normalizeAdapterOptions(input) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     invalid('input', input);
   }
-  for (const key of Object.keys(input)) {
-    if (key === 'trigger' || !OPTION_KEYS.has(key)) invalid(key, input[key]);
-  }
-  if (own(input, 'trigger')) invalid('trigger', input.trigger);
 
-  const source = { ...input };
+  const source = snapshotFields(input, OPTION_KEYS, (key) => key);
   const manual = { ...source, trigger: 'manual' };
   const normalized = normalizeOptions(manual, DEFAULT_SEED);
+  const seedExplicit = Object.hasOwn(source, 'seed');
   return {
     canonical: [
       normalized.mark,
       normalized.note,
       normalized.placement,
       normalized.accessible,
-      own(input, 'seed'),
+      seedExplicit,
       normalized.seed,
       normalized.duration,
       normalized.motion,
     ],
     normalized,
-    seedExplicit: own(input, 'seed'),
+    seedExplicit,
     source,
   };
 }
@@ -78,12 +96,14 @@ function normalizeConfig(input = {}) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     invalid('config', input);
   }
-  for (const key of Object.keys(input)) {
-    if (!CONFIG_KEYS.has(key)) invalid(`config.${key}`, input[key]);
-  }
-  const enabled = own(input, 'enabled') ? input.enabled : true;
+  const source = snapshotFields(
+    input,
+    CONFIG_KEYS,
+    (key) => `config.${String(key)}`,
+  );
+  const enabled = Object.hasOwn(source, 'enabled') ? source.enabled : true;
   if (typeof enabled !== 'boolean') invalid('enabled', enabled);
-  const onError = own(input, 'onError') ? input.onError : undefined;
+  const onError = Object.hasOwn(source, 'onError') ? source.onError : undefined;
   if (onError !== undefined && typeof onError !== 'function') {
     invalid('onError', onError);
   }
