@@ -82,7 +82,8 @@ test('createStaticServer applies strict CSP only to the plugin browser fixture',
   const fixtureDirectory = path.join(root, 'tests', 'fixtures');
   await mkdir(fixtureDirectory, { recursive: true });
   await Promise.all([
-    writeFile(path.join(fixtureDirectory, 'plugins.html'), '<h1>plugin fixture</h1>'),
+    writeFile(path.join(fixtureDirectory, 'plugins-csp.html'), '<h1>CSP plugin fixture</h1>'),
+    writeFile(path.join(fixtureDirectory, 'plugins.html'), '<h1>ordinary plugin fixture</h1>'),
     writeFile(path.join(fixtureDirectory, 'ordinary.html'), '<h1>ordinary fixture</h1>'),
   ]);
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -90,13 +91,15 @@ test('createStaticServer applies strict CSP only to the plugin browser fixture',
   const { server, url } = await createStaticServer({ root, port: 0 });
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const port = new URL(url).port;
-  const plugin = await request('/tests/fixtures/plugins.html', port);
+  const plugin = await request('/tests/fixtures/plugins-csp.html', port);
+  const ordinaryPlugin = await request('/tests/fixtures/plugins.html', port);
   const ordinary = await request('/tests/fixtures/ordinary.html', port);
 
   assert.equal(
     plugin.headers['content-security-policy'],
     "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'",
   );
+  assert.equal(ordinaryPlugin.headers['content-security-policy'], undefined);
   assert.equal(ordinary.headers['content-security-policy'], undefined);
 });
 

@@ -14,7 +14,7 @@ function watchBrowserFailures(page) {
 async function openPluginFixture(page) {
   const failures = watchBrowserFailures(page);
   const response = await page.goto('/tests/fixtures/plugins.html');
-  expect(response?.headers()['content-security-policy']).toBe(CSP);
+  expect(response?.headers()['content-security-policy']).toBeUndefined();
   await page.evaluate(() => {
     window.__pluginUnhandledRejections = [];
     window.addEventListener('unhandledrejection', (event) => {
@@ -37,6 +37,7 @@ test('renders deterministic flower paths for Element and Range targets through t
     const { registerMark } = await import('/src/plugins.js');
     const controllers = [];
     let unregister = () => {};
+    let unregisterReplacement = () => {};
     let contextProof;
     const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
     const pathsFor = (id) => {
@@ -109,12 +110,22 @@ test('renders deterministic flower paths for Element and Range targets through t
       const rangeId = groups[1].getAttribute('data-hana-id');
       const immediate = {
         animationCount: groups[0].getAnimations({ subtree: true }).length,
-        classes: [...groups[0].querySelectorAll('path')].map((path) => path.getAttribute('class')),
+        customClassTokens: [
+          ...document.querySelectorAll(
+            '[data-hana-svg-layer], [data-hana-svg-layer] .hana-annotation,'
+            + ' [data-hana-svg-layer] .hana-annotation *',
+          ),
+        ].flatMap((node) => [...node.classList])
+          .filter((token) => token.includes('hanamaru') || token.includes('plugin')),
+        elementClasses: [...groups[0].querySelectorAll('path')]
+          .map((path) => path.getAttribute('class')),
         elementPaths: pathsFor(elementId),
         frozenContext: contextProof,
-        groupClasses: groups.map((group) => [...group.classList]),
+        groupClasses: groups.map((group) => group.getAttribute('class')),
         groups: groups.length,
         overlays: document.querySelectorAll('[data-hana-overlay]').length,
+        rangeClasses: [...groups[1].querySelectorAll('path')]
+          .map((path) => path.getAttribute('class')),
         rangePaths: pathsFor(rangeId),
         svgLayers: document.querySelectorAll('[data-hana-svg-layer]').length,
       };
@@ -167,6 +178,23 @@ test('renders deterministic flower paths for Element and Range targets through t
           state: elementController.state,
         };
       }
+      let replacementCalls = 0;
+      unregisterReplacement = registerMark('hanamaru', () => {
+        replacementCalls += 1;
+        return { paths: ['M 3 4 L 50 60'] };
+      });
+      elementController.update({ mark: 'hanamaru' });
+      await nextFrame();
+      const replacementGroup = document.querySelector(
+        `.hana-annotation[data-hana-id="${elementId}"]`,
+      );
+      const reRegistered = {
+        calls: replacementCalls,
+        mark: replacementGroup.getAttribute('data-hana-mark'),
+        paths: pathsFor(elementId),
+        state: elementController.state,
+      };
+      unregisterReplacement();
 
       return {
         changeBack,
@@ -176,12 +204,14 @@ test('renders deterministic flower paths for Element and Range targets through t
         immediate,
         implicitSameMark,
         replayed,
+        reRegistered,
         refreshed,
         restored,
         stable,
       };
     } finally {
       controllers.reverse().forEach((controller) => controller.destroy());
+      unregisterReplacement();
       unregister();
     }
   });
@@ -193,10 +223,13 @@ test('renders deterministic flower paths for Element and Range targets through t
   expect(result.immediate.rangePaths).toHaveLength(4);
   expect(result.immediate.elementPaths.every(Boolean)).toBe(true);
   expect(result.immediate.rangePaths.every(Boolean)).toBe(true);
-  expect(result.immediate.classes).toEqual(Array(4).fill('hana-path hana-mark-path'));
-  expect(result.immediate.groupClasses.every((classes) => (
-    classes.includes('hana-annotation') && classes.includes('hana-is-visible')
-  ))).toBe(true);
+  expect(result.immediate.elementClasses).toEqual(Array(4).fill('hana-path hana-mark-path'));
+  expect(result.immediate.rangeClasses).toEqual(Array(4).fill('hana-path hana-mark-path'));
+  expect(result.immediate.groupClasses).toEqual([
+    'hana-annotation hana-is-visible',
+    'hana-annotation hana-is-visible',
+  ]);
+  expect(result.immediate.customClassTokens).toEqual([]);
   expect(result.immediate.animationCount).toBeGreaterThan(0);
   expect(result.immediate.frozenContext).toEqual({
     context: true, helpers: true, rect: true, rects: true, unionRect: true,
@@ -211,6 +244,12 @@ test('renders deterministic flower paths for Element and Range targets through t
   expect(result.changeBack).toEqual({
     code: 'HANA_CONFIG_INVALID', field: 'mark', state: 'visible',
   });
+  expect(result.reRegistered).toEqual({
+    calls: 1,
+    mark: 'hanamaru',
+    paths: ['M 3 4 L 50 60'],
+    state: 'visible',
+  });
   await expect(page.locator('[data-hana-overlay]')).toHaveCount(0);
   await expect(page.locator('[data-hana-id]')).toHaveCount(0);
   await expectNoBrowserFailures(page, failures);
@@ -223,6 +262,24 @@ test('declarative scans capture a registered mark and reject new scans after unr
     const { registerMark } = await import('/src/plugins.js');
     const controllers = [];
     let unregister = () => {};
+    const inventory = (fresh) => ({
+      annotationIds: [...document.querySelectorAll('.hana-annotation')]
+        .map((group) => group.getAttribute('data-hana-id')),
+      annotationOuterHTML: [...document.querySelectorAll('.hana-annotation')]
+        .map((group) => group.outerHTML),
+      connectorPaths: [...document.querySelectorAll('.hana-connector-path')]
+        .map((path) => path.getAttribute('d')),
+      freshAria: fresh.getAttribute('aria-describedby'),
+      markPaths: [...document.querySelectorAll('.hana-mark-path')]
+        .map((path) => path.getAttribute('d')),
+      noteOuterHTML: [...document.querySelectorAll('.hana-note')]
+        .map((note) => note.outerHTML),
+      overlayCount: document.querySelectorAll('[data-hana-overlay]').length,
+      overlayOuterHTML: [...document.querySelectorAll('[data-hana-overlay]')]
+        .map((overlay) => overlay.outerHTML),
+      priorAria: document.querySelector('#declarative-target')
+        .getAttribute('aria-describedby'),
+    });
     try {
       unregister = registerMark('hanamaru', ({ rects, helpers }) => ({
         paths: rects.map((rect, index) => helpers.line(
@@ -248,22 +305,26 @@ test('declarative scans capture a registered mark and reject new scans after unr
         paths: document.querySelectorAll('.hana-mark-path').length,
         state: first.annotations[0].state,
       };
-      const ownedBeforeFreshScan = document.querySelectorAll('[data-hana-id]').length;
       document.querySelector('#declarative-target').removeAttribute('data-hana');
       const fresh = document.createElement('span');
       fresh.dataset.hana = 'hanamaru';
       fresh.textContent = 'Fresh declarative target';
       document.querySelector('#declarative-scan-root').append(fresh);
+      const beforeFreshScan = inventory(fresh);
       const second = scan(document.querySelector('#declarative-scan-root'));
       controllers.push(...second.annotations);
+      const afterFreshScan = inventory(fresh);
       return {
         afterUnregister,
         captured,
         fresh: {
           annotations: second.annotations.length,
           code: second.errors[0]?.code,
+          errorCount: second.errors.length,
           field: second.errors[0]?.details?.field,
-          ownedDelta: document.querySelectorAll('[data-hana-id]').length - ownedBeforeFreshScan,
+          freshAria: fresh.getAttribute('aria-describedby'),
+          inventoryAfter: afterFreshScan,
+          inventoryBefore: beforeFreshScan,
         },
       };
     } finally {
@@ -272,11 +333,16 @@ test('declarative scans capture a registered mark and reject new scans after unr
     }
   });
 
-  expect(result).toEqual({
+  expect(result.fresh.inventoryAfter).toEqual(result.fresh.inventoryBefore);
+  expect(result).toMatchObject({
     afterUnregister: { paths: 1, state: 'visible' },
     captured: { errors: 0, paths: 1, state: 'visible' },
     fresh: {
-      annotations: 0, code: 'HANA_CONFIG_INVALID', field: 'mark', ownedDelta: 0,
+      annotations: 0,
+      code: 'HANA_CONFIG_INVALID',
+      errorCount: 1,
+      field: 'mark',
+      freshAria: null,
     },
   });
   await expect(page.locator('[data-hana-overlay]')).toHaveCount(0);
@@ -381,38 +447,41 @@ test('one realm registry renders into two Documents without sharing document res
 });
 
 test('strict CSP permits source-module registration and rendering without forbidden injection', async ({ page }) => {
-  const failures = await openPluginFixture(page);
-  const result = await page.evaluate(async () => {
-    const { annotate } = await import('/src/index.js');
-    const { registerMark } = await import('/src/plugins.js');
-    const unregister = registerMark('csp-hanamaru', ({ rects }) => ({
-      paths: rects.map((rect) => `M ${rect.left} ${rect.top} L ${rect.right} ${rect.bottom}`),
-    }));
-    const controller = annotate(document.querySelector('#element-target'), {
-      mark: 'csp-hanamaru', motion: 'never',
-    });
-    try {
-      controller.show();
-      await controller.finished;
-      return {
-        inlineScripts: document.querySelectorAll('script:not([src])').length,
-        styleElements: document.querySelectorAll('style').length,
-        paths: [...document.querySelectorAll('.hana-mark-path')]
-          .map((path) => path.getAttribute('d')),
-      };
-    } finally {
-      controller.destroy();
-      unregister();
-    }
-  });
+  const failures = watchBrowserFailures(page);
+  const response = await page.goto('/tests/fixtures/plugins-csp.html');
+  expect(response?.headers()['content-security-policy']).toBe(CSP);
+  const runnerLoaded = await page.evaluate(() => (
+    typeof window.__pluginCsp?.run === 'function'
+  ));
+  expect(runnerLoaded).toBe(true);
 
+  const result = await page.evaluate(() => window.__pluginCsp.run());
+  const expectedInventory = {
+    scripts: [{
+      inline: '',
+      src: '/tests/fixtures/plugins-csp.js',
+      type: 'module',
+    }],
+    styleElements: [],
+    stylesheetLinks: [{
+      href: '/src/hanamaru.css',
+      rel: 'stylesheet',
+    }],
+  };
   expect(result).toEqual({
-    inlineScripts: 0,
-    styleElements: 0,
-    paths: [expect.stringMatching(/^M .+ L .+$/)],
+    after: expectedInventory,
+    before: expectedInventory,
+    cleanup: { overlays: 0, owned: 0 },
+    visible: {
+      overlays: 1,
+      paths: [expect.stringMatching(/^M .+ L .+$/)],
+      state: 'visible',
+    },
   });
+  expect(await page.evaluate(() => window.__pluginCsp.inventory())).toEqual(expectedInventory);
+  expect(await page.evaluate(() => window.__pluginCsp.unhandledRejections)).toEqual([]);
   expect(failures.filter((message) => /content security policy|refused/i.test(message))).toEqual([]);
-  await expectNoBrowserFailures(page, failures);
+  expect(failures).toEqual([]);
   await expect(page.locator('[data-hana-overlay]')).toHaveCount(0);
 });
 
@@ -421,6 +490,7 @@ test('contains factory throws and invalid or cost-bounded output without partial
   const result = await page.evaluate(async () => {
     const { annotate } = await import('/src/index.js');
     const { registerMark } = await import('/src/plugins.js');
+    const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
     const throwCause = new Error('browser factory boom');
     const cases = [
       ['throw-case', () => { throw throwCause; }],
@@ -444,13 +514,16 @@ test('contains factory throws and invalid or cost-bounded output without partial
         motion: 'never',
       });
       const events = [];
-      target.addEventListener('hana:error', (event) => events.push(event.detail.error), {
-        once: true,
-      });
+      const onError = (event) => {
+        if (event.detail.controller === controller) events.push(event.detail.error);
+      };
+      target.addEventListener('hana:error', onError);
       try {
         controller.show();
         const finished = controller.finished?.catch((error) => error);
         const rejected = await finished;
+        await Promise.resolve();
+        await nextFrame();
         const eventError = events[0];
         outputs.push({
           code: eventError?.code,
@@ -471,6 +544,7 @@ test('contains factory throws and invalid or cost-bounded output without partial
         });
         controller.hide();
       } finally {
+        target.removeEventListener('hana:error', onError);
         controller.destroy();
         unregister();
       }
@@ -493,27 +567,19 @@ test('contains factory throws and invalid or cost-bounded output without partial
       accessible: true,
       motion: 'never',
     });
+    const transactionEvents = [];
+    const onTransactionError = (event) => {
+      if (event.detail.controller === stable) transactionEvents.push(event.detail.error);
+    };
+    target.addEventListener('hana:error', onTransactionError);
     let transaction;
     try {
       stable.show();
       await stable.finished;
-      const group = document.querySelector('.hana-annotation');
-      const before = {
-        aria: target.getAttribute('aria-describedby'),
-        html: group.innerHTML,
-        owned: document.querySelectorAll('[data-hana-id]').length,
-        overlays: document.querySelectorAll('[data-hana-overlay]').length,
-        paths: [...group.querySelectorAll('.hana-mark-path')].map((path) => path.getAttribute('d')),
-        state: stable.state,
-      };
-      let error;
-      try {
-        stable.update({ mark: 'broken-browser-mark' });
-      } catch (caught) {
-        error = caught;
-      }
-      transaction = {
-        after: {
+      const id = document.querySelector('.hana-annotation').getAttribute('data-hana-id');
+      const snapshot = () => {
+        const group = document.querySelector(`.hana-annotation[data-hana-id="${id}"]`);
+        return {
           aria: target.getAttribute('aria-describedby'),
           html: group.innerHTML,
           owned: document.querySelectorAll('[data-hana-id]').length,
@@ -521,15 +587,49 @@ test('contains factory throws and invalid or cost-bounded output without partial
           paths: [...group.querySelectorAll('.hana-mark-path')]
             .map((path) => path.getAttribute('d')),
           state: stable.state,
-        },
+        };
+      };
+      const before = snapshot();
+      unregisterStable();
+      let error;
+      try {
+        stable.update({ mark: 'broken-browser-mark' });
+      } catch (caught) {
+        error = caught;
+      }
+      const afterFailureSynchronous = snapshot();
+      await Promise.resolve();
+      await nextFrame();
+      const afterFailure = snapshot();
+      stable.replay();
+      await stable.finished;
+      const afterReplay = snapshot();
+      stable.refresh();
+      await nextFrame();
+      const afterRefresh = snapshot();
+      stable.update({ duration: 0 });
+      await nextFrame();
+      const afterImplicitUpdate = snapshot();
+      stable.update({ mark: 'stable-browser-mark', duration: 0 });
+      await nextFrame();
+      const afterExplicitUpdate = snapshot();
+      transaction = {
+        afterExplicitUpdate,
+        afterFailure,
+        afterFailureSynchronous,
+        afterImplicitUpdate,
+        afterRefresh,
+        afterReplay,
         before,
         error: {
           causeSame: error?.details?.cause === updateCause,
           code: error?.code,
           mark: error?.details?.mark,
         },
+        eventCount: transactionEvents.length,
       };
     } finally {
+      target.removeEventListener('hana:error', onTransactionError);
       stable.destroy();
       unregisterStable();
       unregisterBroken();
@@ -572,7 +672,30 @@ test('contains factory throws and invalid or cost-bounded output without partial
   expect(result.transaction.error).toEqual({
     causeSame: true, code: 'HANA_STATE_MARK_PLUGIN', mark: 'broken-browser-mark',
   });
-  expect(result.transaction.after).toEqual(result.transaction.before);
+  expect(result.transaction.eventCount).toBe(0);
+  expect(result.transaction.afterFailureSynchronous).toEqual(result.transaction.before);
+  const stableOutput = {
+    aria: result.transaction.before.aria,
+    overlays: result.transaction.before.overlays,
+    owned: result.transaction.before.owned,
+    paths: result.transaction.before.paths,
+    state: result.transaction.before.state,
+  };
+  for (const phase of [
+    'afterFailure',
+    'afterReplay',
+    'afterRefresh',
+    'afterImplicitUpdate',
+    'afterExplicitUpdate',
+  ]) {
+    expect({
+      aria: result.transaction[phase].aria,
+      overlays: result.transaction[phase].overlays,
+      owned: result.transaction[phase].owned,
+      paths: result.transaction[phase].paths,
+      state: result.transaction[phase].state,
+    }).toEqual(stableOutput);
+  }
   expect(result.transaction.afterDestroy).toEqual({ overlays: 0, owned: 0, token: null });
   await expectNoBrowserFailures(page, failures);
 });

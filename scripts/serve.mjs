@@ -54,7 +54,7 @@ export async function createStaticServer({ root = process.cwd(), port = 4173 } =
       }
       const type = MIME_TYPES[path.extname(realFilePath)] ?? 'application/octet-stream';
       const headers = { 'content-type': type };
-      if (pathname === '/tests/fixtures/plugins.html') {
+      if (pathname === '/tests/fixtures/plugins-csp.html') {
         headers['content-security-policy'] = PLUGIN_FIXTURE_CSP;
       }
       response.writeHead(200, headers);
