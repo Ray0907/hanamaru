@@ -62,10 +62,13 @@ function usageError() {
   )
 }
 
-function selectEndpoints(arguments_) {
+export function selectEndpoints(arguments_) {
   const [selection, ...requestedVersions] = arguments_
 
-  if (!selection || (selection !== 'all' && !endpointMatrix[selection])) {
+  if (
+    !selection ||
+    (selection !== 'all' && !Object.hasOwn(endpointMatrix, selection))
+  ) {
     throw usageError()
   }
 
@@ -111,61 +114,274 @@ function fixturePaths(endpoint) {
   }
 }
 
-async function requireFixture(path, framework, kind) {
+async function requireFixture(path, framework, kind, accessFile) {
   try {
-    await access(path)
+    await accessFile(path)
   } catch {
     throw new Error(`missing ${framework} ${kind} fixture`)
   }
 }
 
-async function validateFixtures(endpoint) {
+async function validateFixtures(endpoint, accessFile) {
   const fixtures = fixturePaths(endpoint)
-  await requireFixture(fixtures.runtime, endpoint.framework, 'runtime')
-  await requireFixture(fixtures.ssr, endpoint.framework, 'SSR')
-  await requireFixture(fixtures.types, endpoint.framework, 'types')
+  await requireFixture(fixtures.runtime, endpoint.framework, 'runtime', accessFile)
+  await requireFixture(fixtures.ssr, endpoint.framework, 'SSR', accessFile)
+  await requireFixture(fixtures.types, endpoint.framework, 'types', accessFile)
   return fixtures
 }
 
-function run(command, arguments_, options) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, arguments_, {
-      ...options,
-      shell: false,
-      stdio: 'inherit',
-    })
+export async function preflightFixtureSets(
+  endpoints,
+  { accessFile = access } = {},
+) {
+  const fixturesByFramework = new Map()
+  const failures = []
+  const preflightedFrameworks = new Set()
 
-    child.once('error', rejectPromise)
-    child.once('exit', (code, signal) => {
+  for (const endpoint of endpoints) {
+    if (preflightedFrameworks.has(endpoint.framework)) continue
+    preflightedFrameworks.add(endpoint.framework)
+
+    try {
+      fixturesByFramework.set(
+        endpoint.framework,
+        await validateFixtures(endpoint, accessFile),
+      )
+    } catch (error) {
+      failures.push(error)
+    }
+  }
+
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures,
+      failures.map((failure) => failure.message).join('; '),
+    )
+  }
+
+  return fixturesByFramework
+}
+
+const unsafeWindowsCommandArgument = /[&|<>^%\r\n]/
+
+export function createNpmInvocation(
+  arguments_,
+  {
+    platform = process.platform,
+    env = process.env,
+    execPath = process.execPath,
+  } = {},
+) {
+  if (env.npm_execpath) {
+    return {
+      command: execPath,
+      arguments: [env.npm_execpath, ...arguments_],
+    }
+  }
+
+  if (platform === 'win32') {
+    for (const argument of arguments_) {
+      if (unsafeWindowsCommandArgument.test(argument)) {
+        throw new Error(`unsafe npm argument: ${argument}`)
+      }
+    }
+
+    return {
+      command: env.ComSpec || env.COMSPEC || 'cmd.exe',
+      arguments: ['/d', '/s', '/c', 'npm.cmd', ...arguments_],
+    }
+  }
+
+  return {
+    command: 'npm',
+    arguments: arguments_,
+  }
+}
+
+class ParentTerminationError extends Error {
+  constructor(signal, options = {}) {
+    super(`terminated by ${signal}`, options)
+    this.name = 'ParentTerminationError'
+    this.signal = signal
+    this.exitCode = signal === 'SIGINT' ? 130 : 143
+  }
+}
+
+export function createSignalSupervisor({
+  processObject = process,
+  forceKillDelay = 5_000,
+} = {}) {
+  let activeChild = null
+  let forceKillTimer = null
+  let installed = false
+  let signal = null
+  const handlers = new Map()
+
+  function clearForceKill() {
+    if (forceKillTimer !== null) {
+      clearTimeout(forceKillTimer)
+      forceKillTimer = null
+    }
+  }
+
+  function terminateChild(child, requestedSignal) {
+    if (
+      processObject.platform !== 'win32' &&
+      Number.isInteger(child.pid) &&
+      typeof processObject.kill === 'function'
+    ) {
+      try {
+        processObject.kill(-child.pid, requestedSignal)
+        return
+      } catch {
+        // Fall back when the child did not establish a process group.
+      }
+    }
+
+    child.kill(requestedSignal)
+  }
+
+  function killActive(requestedSignal) {
+    if (!activeChild) return
+
+    try {
+      terminateChild(activeChild, requestedSignal)
+    } catch {
+      // Best effort: the child may already have exited between state checks.
+    }
+
+    clearForceKill()
+    if (Number.isFinite(forceKillDelay)) {
+      const child = activeChild
+      forceKillTimer = setTimeout(() => {
+        if (activeChild !== child) return
+        try {
+          terminateChild(child, 'SIGKILL')
+        } catch {
+          // The command close handler remains authoritative.
+        }
+      }, forceKillDelay)
+      forceKillTimer.unref?.()
+    }
+  }
+
+  function forward(requestedSignal) {
+    signal ||= requestedSignal
+    killActive(signal)
+  }
+
+  return {
+    get activeChild() {
+      return activeChild
+    },
+    get signal() {
+      return signal
+    },
+    install() {
+      if (installed) return
+      installed = true
+
+      for (const signalName of ['SIGINT', 'SIGTERM']) {
+        const handler = () => forward(signalName)
+        handlers.set(signalName, handler)
+        processObject.on(signalName, handler)
+      }
+    },
+    activate(child) {
+      if (activeChild && activeChild !== child) {
+        throw new Error('framework endpoint child process overlap')
+      }
+
+      activeChild = child
+      if (signal) killActive(signal)
+    },
+    release(child) {
+      if (activeChild !== child) return
+      activeChild = null
+      clearForceKill()
+    },
+    throwIfTerminating() {
+      if (signal) throw new ParentTerminationError(signal)
+    },
+    dispose() {
+      clearForceKill()
+      if (installed) {
+        for (const [signalName, handler] of handlers) {
+          processObject.removeListener(signalName, handler)
+        }
+      }
+      handlers.clear()
+      installed = false
+      activeChild = null
+    },
+  }
+}
+
+export function runCommand(
+  command,
+  arguments_,
+  {
+    label,
+    supervisor = null,
+    spawnChild = spawn,
+    ...spawnOptions
+  } = {},
+) {
+  supervisor?.throwIfTerminating()
+  const child = spawnChild(command, arguments_, {
+    ...spawnOptions,
+    detached: process.platform !== 'win32',
+    shell: false,
+    stdio: 'inherit',
+  })
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    let settled = false
+
+    function settle(error) {
+      if (settled) return
+      settled = true
+      supervisor?.release(child)
+
+      if (error) rejectPromise(error)
+      else resolvePromise()
+    }
+
+    child.once('error', (error) => {
+      settle(new Error(`${label} failed to start`, { cause: error }))
+    })
+    child.once('close', (code, signal) => {
       if (code === 0) {
-        resolvePromise()
+        settle()
         return
       }
 
       const ending = signal ? `signal ${signal}` : `exit code ${code}`
-      rejectPromise(new Error(`${options.label} failed with ${ending}`))
+      settle(new Error(`${label} failed with ${ending}`))
     })
+
+    supervisor?.activate(child)
   })
 }
 
-async function installDependencies(directory, dependencies) {
-  await run(
-    'npm',
-    [
-      'install',
-      '--ignore-scripts',
-      '--no-audit',
-      '--no-fund',
-      '--no-package-lock',
-      '--save-exact',
-      '--save-dev',
-      ...dependencies,
-    ],
-    {
-      cwd: directory,
-      label: 'isolated npm install',
-    },
-  )
+async function installDependencies(directory, dependencies, supervisor) {
+  const npm = createNpmInvocation([
+    'install',
+    '--ignore-scripts',
+    '--no-audit',
+    '--no-fund',
+    '--no-package-lock',
+    '--save-exact',
+    '--save-dev',
+    ...dependencies,
+  ])
+
+  await runCommand(npm.command, npm.arguments, {
+    cwd: directory,
+    label: 'isolated npm install',
+    supervisor,
+  })
 }
 
 function syntheticPackageManifest(framework) {
@@ -226,8 +442,8 @@ async function copyFixtures(directory, fixtures) {
   return copied
 }
 
-async function runBrowserFixture(directory, fixture) {
-  await run(
+async function runBrowserFixture(directory, fixture, supervisor) {
+  await runCommand(
     process.execPath,
     [
       join(directory, 'node_modules', '@playwright', 'test', 'cli.js'),
@@ -239,19 +455,21 @@ async function runBrowserFixture(directory, fixture) {
     {
       cwd: directory,
       label: 'Playwright browser fixture',
+      supervisor,
     },
   )
 }
 
-async function runSsrFixture(directory, fixture) {
-  await run(process.execPath, [fixture], {
+async function runSsrFixture(directory, fixture, supervisor) {
+  await runCommand(process.execPath, [fixture], {
     cwd: directory,
     label: 'Node SSR fixture',
+    supervisor,
   })
 }
 
-async function runTypeFixture(directory, fixture) {
-  await run(
+async function runTypeFixture(directory, fixture, supervisor) {
+  await runCommand(
     process.execPath,
     [
       join(directory, 'node_modules', 'typescript', 'bin', 'tsc'),
@@ -274,53 +492,163 @@ async function runTypeFixture(directory, fixture) {
     {
       cwd: directory,
       label: 'TypeScript declaration fixture',
+      supervisor,
     },
   )
 }
 
-async function runEndpoint(endpoint, fixtures) {
-  const directory = await mkdtemp(
-    join(tmpdir(), `hanamaru-${endpoint.framework}-${endpoint.version}-`),
+async function executeEndpoint(directory, endpoint, fixtures, supervisor) {
+  supervisor?.throwIfTerminating()
+  const packageFixture = await readFile(
+    join(frameworkDirectory, 'package-fixture.json'),
+    'utf8',
   )
+  await writeFile(join(directory, 'package.json'), packageFixture)
+  await installDependencies(
+    directory,
+    [...harnessDependencies, ...endpoint.dependencies],
+    supervisor,
+  )
+  supervisor?.throwIfTerminating()
+  await createSyntheticPackage(directory, endpoint.framework)
+  const copiedFixtures = await copyFixtures(directory, fixtures)
+
+  await runBrowserFixture(directory, copiedFixtures.runtime, supervisor)
+  await runSsrFixture(directory, copiedFixtures.ssr, supervisor)
+  await runTypeFixture(directory, copiedFixtures.types, supervisor)
+}
+
+const defaultEndpointOperations = Object.freeze({
+  createDirectory(endpoint) {
+    return mkdtemp(
+      join(tmpdir(), `hanamaru-${endpoint.framework}-${endpoint.version}-`),
+    )
+  },
+  execute: executeEndpoint,
+  cleanup(directory) {
+    return rm(directory, { force: true, recursive: true })
+  },
+})
+
+export async function runEndpoint(
+  endpoint,
+  fixtures,
+  operations = defaultEndpointOperations,
+  supervisor = null,
+) {
+  let cleanupFailure = null
+  let directory = null
+  let primaryFailure = null
 
   try {
-    const packageFixture = await readFile(
-      join(frameworkDirectory, 'package-fixture.json'),
-      'utf8',
-    )
-    await writeFile(join(directory, 'package.json'), packageFixture)
-    await installDependencies(directory, [
-      ...harnessDependencies,
-      ...endpoint.dependencies,
-    ])
-    await createSyntheticPackage(directory, endpoint.framework)
-    const copiedFixtures = await copyFixtures(directory, fixtures)
-
-    await runBrowserFixture(directory, copiedFixtures.runtime)
-    await runSsrFixture(directory, copiedFixtures.ssr)
-    await runTypeFixture(directory, copiedFixtures.types)
+    supervisor?.throwIfTerminating()
+    directory = await operations.createDirectory(endpoint)
+    await operations.execute(directory, endpoint, fixtures, supervisor)
+  } catch (error) {
+    primaryFailure = error
   } finally {
-    await rm(directory, { force: true, recursive: true })
+    if (directory !== null) {
+      try {
+        await operations.cleanup(directory, endpoint)
+      } catch (error) {
+        cleanupFailure = error
+      }
+    }
   }
+
+  if (primaryFailure && cleanupFailure) {
+    const aggregate = new AggregateError(
+      [primaryFailure, cleanupFailure],
+      `${endpoint.framework}@${endpoint.version} failed: ${primaryFailure.message}; cleanup failed: ${cleanupFailure.message}`,
+      { cause: primaryFailure },
+    )
+    aggregate.cleanupCause = cleanupFailure
+    throw aggregate
+  }
+
+  if (primaryFailure) throw primaryFailure
+  if (cleanupFailure) throw cleanupFailure
 }
 
-async function main() {
-  const endpoints = selectEndpoints(process.argv.slice(2))
-  let selectedFixtures = 0
+function endpointFailure(endpoint, error) {
+  const failure = new Error(
+    `${endpoint.framework}@${endpoint.version}: ${error.message}`,
+    { cause: error },
+  )
+  failure.endpoint = endpoint
+  return failure
+}
+
+export async function executeEndpoints(
+  endpoints,
+  fixturesByFramework,
+  {
+    runEndpointImpl = runEndpoint,
+    operations = defaultEndpointOperations,
+    supervisor = null,
+  } = {},
+) {
+  const failures = []
 
   for (const endpoint of endpoints) {
-    const fixtures = await validateFixtures(endpoint)
-    selectedFixtures += 1
+    if (supervisor?.signal) break
+
     console.log(`framework-endpoints: ${endpoint.framework}@${endpoint.version}`)
-    await runEndpoint(endpoint, fixtures)
+
+    try {
+      await runEndpointImpl(
+        endpoint,
+        fixturesByFramework.get(endpoint.framework),
+        operations,
+        supervisor,
+      )
+    } catch (error) {
+      failures.push(endpointFailure(endpoint, error))
+    }
   }
 
-  if (selectedFixtures === 0) {
-    throw new Error('zero endpoint fixtures selected')
+  if (supervisor?.signal) {
+    const endpointFailures =
+      failures.length === 0
+        ? undefined
+        : new AggregateError(
+            failures,
+            failures.map((failure) => failure.message).join('; '),
+          )
+    throw new ParentTerminationError(supervisor.signal, {
+      cause: endpointFailures,
+    })
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      failures.map((failure) => failure.message).join('; '),
+    )
   }
 }
 
-main().catch((error) => {
-  console.error(`framework-endpoints: ${error.message}`)
-  process.exitCode = 1
-})
+async function main(arguments_ = process.argv.slice(2)) {
+  const endpoints = selectEndpoints(arguments_)
+  const supervisor = createSignalSupervisor()
+  supervisor.install()
+
+  try {
+    const fixturesByFramework = await preflightFixtureSets(endpoints)
+    supervisor.throwIfTerminating()
+    await executeEndpoints(endpoints, fixturesByFramework, { supervisor })
+  } finally {
+    supervisor.dispose()
+  }
+}
+
+const isDirectInvocation =
+  process.argv[1] &&
+  resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+
+if (isDirectInvocation) {
+  main().catch((error) => {
+    console.error(`framework-endpoints: ${error.message}`)
+    process.exitCode = error.exitCode || 1
+  })
+}
