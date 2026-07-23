@@ -2,6 +2,17 @@ const HTML_RANGE_REASON =
   'Unavailable for this Range: HTML cannot represent a Range without changing the document.';
 const JSON_RANGE_REASON =
   'Unavailable for this Range: an exact stable text locator has not been proven.';
+const CUSTOM_MARK_REASON =
+  'Unavailable for this custom mark: register it with hanamaru-annotations/plugins before running JavaScript or restoring JSON.';
+const BUILT_IN_MARKS = new Set([
+  'underline',
+  'highlight',
+  'circle',
+  'box',
+  'strike',
+  'bracket',
+]);
+const CUSTOM_MARK_OUTPUTS = new WeakSet();
 
 const ESCAPED_CODE_POINTS = Object.freeze({
   '<': '\\u003c',
@@ -135,10 +146,6 @@ function stableJson(value) {
   }
 }
 
-function safeSerialized(value) {
-  return stableJson(value).serialized;
-}
-
 function unavailable(reason) {
   return Object.freeze({ available: false, code: '', reason });
 }
@@ -154,18 +161,23 @@ function available(code) {
  * until `proveRangeLocator()` has verified an exact public locator round-trip.
  */
 export function createRangeOutput(options = {}) {
+  const stableOptions = stableJson(options);
+  const customMark = typeof stableOptions.snapshot.mark === 'string'
+    && !BUILT_IN_MARKS.has(stableOptions.snapshot.mark);
   const javascript = [
     "import { annotateSelection } from 'hanamaru-annotations/selection';",
     '',
-    `const annotation = annotateSelection(${safeSerialized(options)});`,
+    `const annotation = annotateSelection(${stableOptions.serialized});`,
     'annotation.show();',
   ].join('\n');
 
-  return Object.freeze({
+  const output = Object.freeze({
     html: unavailable(HTML_RANGE_REASON),
-    javascript: available(javascript),
-    json: unavailable(JSON_RANGE_REASON),
+    javascript: customMark ? unavailable(CUSTOM_MARK_REASON) : available(javascript),
+    json: customMark ? unavailable(CUSTOM_MARK_REASON) : unavailable(JSON_RANGE_REASON),
   });
+  if (customMark) CUSTOM_MARK_OUTPUTS.add(output);
+  return output;
 }
 
 function serializedLocator(text, occurrence) {
@@ -283,6 +295,7 @@ export function proveRangeLocator({
   resolveSerializedTarget,
   serialize,
 }) {
+  if (CUSTOM_MARK_OUTPUTS.has(previousOutput)) return previousOutput;
   const expected = range.cloneRange();
 
   for (let occurrence = 0; ; occurrence += 1) {

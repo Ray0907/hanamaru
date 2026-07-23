@@ -402,6 +402,41 @@ export function reduceInspector(model, event) {
         return change('editing', ['reuse-controller', 'focus-first-editor']);
       }
 
+      if (type === 'change-mark') {
+        const mark = readField(event, 'mark');
+        if (!mark.ok || typeof mark.value !== 'string' || mark.value.trim().length === 0) {
+          return noChange();
+        }
+        const changedMark = !Object.is(current.mark, mark.value);
+        return change(
+          'editing',
+          changedMark
+            ? ['reuse-controller', 'update-preview', 'refresh-output']
+            : ['reuse-controller'],
+          changedMark ? { mark: mark.value } : {},
+          { type, mark: mark.value },
+        );
+      }
+
+      if (type === 'valid-option') {
+        const name = readField(event, 'name');
+        const value = readField(event, 'value');
+        if (!name.ok || !value.ok || !isValidOption(name.value, value.value)) {
+          return noChange();
+        }
+        const changedOption = !Object.is(current.options[name.value], value.value);
+        return change(
+          'editing',
+          changedOption
+            ? ['reuse-controller', 'update-preview', 'refresh-output']
+            : ['reuse-controller'],
+          changedOption
+            ? { options: { ...current.options, [name.value]: value.value } }
+            : {},
+          { type, name: name.value, value: value.value },
+        );
+      }
+
       if (type === 'new-valid-selection') {
         const range = readField(event, 'range');
         if (!range.ok || range.value == null) return noChange();

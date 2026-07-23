@@ -215,6 +215,8 @@ export function createAnnotationInspector(root = document) {
   let controller = null;
   let currentOutput = null;
   let selectedFormat = 'javascript';
+  let openSessionEpoch = 0;
+  let clipboardOperationEpoch = 0;
   let listenersAttached = false;
   let selectionFrame = 0;
   let unregisterFlower = null;
@@ -273,6 +275,7 @@ export function createAnnotationInspector(root = document) {
   }
 
   function refreshOutput({ prove = false, mark = model.mark ?? 'underline' } = {}) {
+    clipboardOperationEpoch += 1;
     const base = createRangeOutput(annotationOptions(mark));
     currentOutput = base;
     if (prove && activeRange !== null && controller !== null) {
@@ -289,6 +292,7 @@ export function createAnnotationInspector(root = document) {
   }
 
   function selectOutput(format, { focus = false, announceChange = true } = {}) {
+    if (selectedFormat !== format) clipboardOperationEpoch += 1;
     selectedFormat = format;
     for (const tab of outputTabs) {
       const selected = tab.getAttribute('aria-controls') === `inspector-panel-${format}`;
@@ -416,6 +420,8 @@ export function createAnnotationInspector(root = document) {
         invoker = context.event.invoker;
         break;
       case 'mount':
+        openSessionEpoch += 1;
+        clipboardOperationEpoch += 1;
         resetDraft();
         ensureFlowerPlugin();
         canvas.after(inspector);
@@ -583,7 +589,10 @@ export function createAnnotationInspector(root = document) {
       dispatch({ type: 'choose-mark', mark });
       return;
     }
-    if (model.state === 'applied') dispatch({ type: 'edit' });
+    if (model.state === 'applied') {
+      dispatch({ type: 'change-mark', mark });
+      return;
+    }
     if (model.state === 'editing' && model.mark !== mark) {
       dispatch({ type: 'change-mark', mark });
     }
@@ -629,29 +638,41 @@ export function createAnnotationInspector(root = document) {
       duration.toggleAttribute('aria-invalid', !valid);
       if (!valid) return;
     }
-    if (model.state === 'applied') dispatch({ type: 'edit' });
-    if (model.state !== 'editing') return;
+    if (model.state !== 'applied' && model.state !== 'editing') return;
     draft[name] = value;
     dispatch({ type: 'valid-option', name, value });
   }
 
   async function copyCurrentOutput() {
-    const entry = currentOutput?.[selectedFormat];
+    const format = selectedFormat;
+    const entry = currentOutput?.[format];
     if (entry === undefined) return;
     const text = entry.available ? entry.code : entry.reason;
+    const label = OUTPUT_LABELS[format];
+    const session = openSessionEpoch;
+    const operation = clipboardOperationEpoch + 1;
+    clipboardOperationEpoch = operation;
+    const isCurrent = () => (
+      model.state !== 'closed'
+      && inspector.isConnected
+      && openSessionEpoch === session
+      && clipboardOperationEpoch === operation
+    );
     try {
       if (navigator.clipboard?.writeText === undefined) {
         throw new Error('Clipboard unavailable');
       }
       await navigator.clipboard.writeText(text);
+      if (!isCurrent()) return;
       copyFallbackWrap.hidden = true;
-      announce(`${OUTPUT_LABELS[selectedFormat]} output copied.`);
+      announce(`${label} output copied.`);
     } catch {
+      if (!isCurrent()) return;
       copyFallback.value = text;
       copyFallbackWrap.hidden = false;
       copyFallback.focus();
       copyFallback.select();
-      announce(`Copy blocked. ${OUTPUT_LABELS[selectedFormat]} output selected.`);
+      announce(`Copy blocked. ${label} output selected.`);
     }
   }
 

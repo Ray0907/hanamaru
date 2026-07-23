@@ -172,6 +172,28 @@ test('applied Edit reuses the same controller', () => {
   );
 });
 
+test('applied direct mark change reuses and updates without focus transfer', () => {
+  const model = transition(
+    { state: 'applied', transient: null, mark: 'underline', options: {} },
+    { type: 'change-mark', mark: 'circle' },
+    'editing',
+    ['reuse-controller', 'update-preview', 'refresh-output'],
+  );
+
+  assert.equal(model.mark, 'circle');
+});
+
+test('applied direct option change reuses and updates without focus transfer', () => {
+  const model = transition(
+    { state: 'applied', transient: null, mark: 'underline', options: {} },
+    { type: 'valid-option', name: 'duration', value: 800 },
+    'editing',
+    ['reuse-controller', 'update-preview', 'refresh-output'],
+  );
+
+  assert.equal(model.options.duration, 800);
+});
+
 test('applied new selection validates its clone before destroying the controller', () => {
   const result = reduceInspector(
     { state: 'applied', transient: null, mark: 'underline', options: {} },
@@ -319,6 +341,18 @@ const TRANSIENT_NORMATIVE_ROWS = [
     event: { type: 'edit' },
     next: 'editing',
     effects: ['reuse-controller', 'focus-first-editor'],
+  },
+  {
+    state: 'applied',
+    event: { type: 'change-mark', mark: 'circle' },
+    next: 'editing',
+    effects: ['reuse-controller', 'update-preview', 'refresh-output'],
+  },
+  {
+    state: 'applied',
+    event: { type: 'valid-option', name: 'placement', value: 'right' },
+    next: 'editing',
+    effects: ['reuse-controller', 'update-preview', 'refresh-output'],
   },
   {
     state: 'applied',

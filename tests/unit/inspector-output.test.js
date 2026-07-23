@@ -52,6 +52,52 @@ test('Range output is honest before a stable locator is proven', () => {
   });
 });
 
+test('custom marks never claim runnable JavaScript or standalone restorable JSON', () => {
+  const reason = 'Unavailable for this custom mark: register it with hanamaru-annotations/plugins before running JavaScript or restoring JSON.';
+  const output = createRangeOutput({
+    mark: 'hanamaru',
+    note: null,
+    duration: 420,
+  });
+
+  assert.deepEqual(output.javascript, {
+    available: false,
+    code: '',
+    reason,
+  });
+  assert.deepEqual(output.json, {
+    available: false,
+    code: '',
+    reason,
+  });
+
+  let dependencyCalls = 0;
+  const proven = proveRangeLocator({
+    range: {
+      cloneRange() {
+        dependencyCalls += 1;
+        throw new Error('custom output must not attempt locator proof');
+      },
+    },
+    selectedText: 'Portable',
+    controller: {
+      update() {
+        dependencyCalls += 1;
+      },
+    },
+    previousOutput: output,
+    resolveSerializedTarget() {
+      dependencyCalls += 1;
+    },
+    serialize() {
+      dependencyCalls += 1;
+    },
+  });
+
+  assert.equal(proven, output);
+  assert.equal(dependencyCalls, 0);
+});
+
 test('locator proof probes public resolver occurrences in order before update and serialize', () => {
   const start = { id: 'start' };
   const end = { id: 'end' };

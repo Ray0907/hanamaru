@@ -31,6 +31,22 @@ async function beginUnderlinePreview(page) {
   return inspector;
 }
 
+async function installDeferredClipboard(page) {
+  await page.addInitScript(() => {
+    window.__inspectorClipboardDeferred = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText(value) {
+          return new Promise((resolve, reject) => {
+            window.__inspectorClipboardDeferred.push({ reject, resolve, value });
+          });
+        },
+      },
+    });
+  });
+}
+
 test('five-second path authors one real annotation and closes without disturbing the demo', async ({
   page,
 }) => {
@@ -101,6 +117,17 @@ test('seven semantic mark controls include and render the example flower plugin'
   await plugin.click();
   await expect(page.locator('.hana-annotation[data-hana-mark="hanamaru"]:not([hidden])'))
     .toHaveCount(1);
+  const unavailable = 'Unavailable for this custom mark: register it with hanamaru-annotations/plugins before running JavaScript or restoring JSON.';
+  await expect(page.locator('[data-inspector-output-value="javascript"]'))
+    .toHaveValue(unavailable);
+  await inspector.getByRole('tab', { name: 'JSON' }).click();
+  await expect(page.locator('[data-inspector-output-value="json"]')).toHaveValue(unavailable);
+  await expect(page.locator('[data-inspector-status]'))
+    .toHaveText(`JSON output selected. ${unavailable}`);
+  await inspector.getByRole('button', { name: 'Apply annotation' }).click();
+  await expect(page.locator('[data-inspector-output-value="javascript"]'))
+    .toHaveValue(unavailable);
+  await expect(page.locator('[data-inspector-output-value="json"]')).toHaveValue(unavailable);
 
   const results = await new AxeBuilder({ page })
     .include('[data-inspector-root]')
@@ -288,6 +315,80 @@ test('copy announces success and selects a readonly fallback after rejection', a
   expect(failures).toEqual([]);
 });
 
+test('a deferred clipboard rejection cannot mutate a reopened Inspector session', async ({
+  page,
+}) => {
+  const failures = capturePageFailures(page);
+  await installDeferredClipboard(page);
+  await page.goto('/');
+  let inspector = await beginUnderlinePreview(page);
+  await inspector.getByRole('button', { name: 'Apply annotation' }).click();
+  await inspector.getByRole('button', { name: 'Copy current output' }).click();
+  await expect.poll(() => page.evaluate(
+    () => window.__inspectorClipboardDeferred.length,
+  )).toBe(1);
+
+  await page.getByRole('button', { name: 'Exit Inspector' }).click();
+  inspector = await openInspector(page);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(
+    () => requestAnimationFrame(resolve),
+  )));
+  const reopenedStatus = await page.locator('[data-inspector-status]').textContent();
+  await page.evaluate(() => {
+    window.__inspectorClipboardDeferred[0].reject(new Error('late rejection'));
+  });
+  await page.evaluate(() => Promise.resolve());
+
+  await expect(page.locator('[data-inspector-status]')).toHaveText(reopenedStatus);
+  await expect(inspector.getByLabel('Clipboard fallback')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Exit Inspector' })).toBeFocused();
+  expect(failures).toEqual([]);
+});
+
+test('switching output tabs invalidates a deferred clipboard completion', async ({ page }) => {
+  const failures = capturePageFailures(page);
+  await installDeferredClipboard(page);
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  await inspector.getByRole('button', { name: 'Apply annotation' }).click();
+  await inspector.getByRole('tab', { name: 'JSON' }).click();
+  await inspector.getByRole('button', { name: 'Copy current output' }).click();
+  await expect.poll(() => page.evaluate(
+    () => window.__inspectorClipboardDeferred.length,
+  )).toBe(1);
+
+  await inspector.getByRole('tab', { name: 'JavaScript' }).click();
+  await page.evaluate(() => window.__inspectorClipboardDeferred[0].resolve());
+  await page.evaluate(() => Promise.resolve());
+
+  await expect(page.locator('[data-inspector-status]'))
+    .toHaveText('JavaScript output selected.');
+  await expect(inspector.getByLabel('Clipboard fallback')).toBeHidden();
+  expect(failures).toEqual([]);
+});
+
+test('applied direct mark and option edits retain the activated control focus', async ({ page }) => {
+  const failures = capturePageFailures(page);
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  await inspector.getByRole('button', { name: 'Apply annotation' }).click();
+
+  const circle = inspector.getByRole('button', { name: 'Circle', exact: true });
+  await circle.click();
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
+  await expect(circle).toBeFocused();
+  await expect(page.locator('.hana-annotation[data-hana-mark="circle"]:not([hidden])'))
+    .toHaveCount(1);
+
+  await inspector.getByRole('button', { name: 'Apply annotation' }).click();
+  await inspector.getByText('Options', { exact: true }).click();
+  const duration = inspector.getByLabel('Duration');
+  await duration.fill('800');
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
+  await expect(duration).toBeFocused();
+  expect(failures).toEqual([]);
+});
+
 test('bounded command palette filters and executes through the current Inspector state', async ({
   page,
 }) => {
@@ -406,10 +507,15 @@ test('mark activation never reconstructs a native selection that the host cleare
   expect(failures).toEqual([]);
 });
 
-test('a detached replacement Range leaves the applied controller and output unchanged', async ({
+test('clone-before-validate rejects a deterministic disconnected replacement transactionally', async ({
   page,
 }) => {
-  const failures = capturePageFailures(page);
+  const consoleFailures = [];
+  const pageErrors = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleFailures.push(message.text());
+  });
+  page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
   const inspector = await beginUnderlinePreview(page);
   await inspector.getByRole('button', { name: 'Apply annotation' }).click();
@@ -417,24 +523,83 @@ test('a detached replacement Range leaves the applied controller and output unch
     groups: await page.locator('.hana-annotation').count(),
     json: await page.locator('[data-inspector-output-value="json"]').inputValue(),
   };
+  const appliedNode = await page.locator(
+    '.hana-annotation[data-hana-mark="underline"]:not([hidden])',
+  ).last().elementHandle();
+  expect(appliedNode).not.toBeNull();
 
   await page.evaluate(() => {
-    const detached = document.createElement('span');
-    detached.textContent = 'detached Inspector replacement';
-    const range = document.createRange();
-    range.selectNodeContents(detached);
+    const originalCloneRange = Range.prototype.cloneRange;
+    const originalRequestAnimationFrame = window.requestAnimationFrame;
+    const originalCancelAnimationFrame = window.cancelAnimationFrame;
+    const frames = new Map();
+    let nextFrame = 1;
+    window.requestAnimationFrame = (callback) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, callback);
+      return id;
+    };
+    window.cancelAnimationFrame = (id) => {
+      frames.delete(id);
+      originalCancelAnimationFrame(id);
+    };
+    window.__inspectorCloneAttempts = 0;
+
+    const target = document.querySelector('#inspector-document-title').firstChild;
+    const replacement = document.createRange();
+    replacement.setStart(target, 0);
+    replacement.setEnd(target, 1);
     const selection = getSelection();
     selection.removeAllRanges();
-    selection.addRange(range);
-  });
-  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(
-    () => requestAnimationFrame(resolve),
-  )));
+    selection.addRange(replacement);
+    Range.prototype.cloneRange = function inspectorDisconnectedClone() {
+      window.__inspectorCloneAttempts += 1;
+      const detached = document.createElement('span');
+      detached.textContent = 'detached Inspector replacement';
+      const clone = document.createRange();
+      clone.selectNodeContents(detached);
+      return clone;
+    };
+    document.dispatchEvent(new Event('selectionchange'));
 
+    const callback = [...frames.values()].at(-1);
+    frames.clear();
+    try {
+      callback(performance.now());
+    } catch (error) {
+      window.__inspectorCloneFailure = error.message;
+    } finally {
+      Range.prototype.cloneRange = originalCloneRange;
+    }
+
+    window.__restoreInspectorFrameTest = () => {
+      document.querySelector('[data-inspector-exit]').click();
+      window.requestAnimationFrame = originalRequestAnimationFrame;
+      window.cancelAnimationFrame = originalCancelAnimationFrame;
+    };
+  });
+
+  expect(await page.evaluate(() => window.__inspectorCloneAttempts)).toBe(1);
+  expect(await page.evaluate(() => window.__inspectorCloneFailure))
+    .toBe('Inspector rejected a disconnected replacement Range');
+  expect(pageErrors).toEqual([]);
+  expect(consoleFailures).toEqual([]);
   await expect(inspector).toHaveAttribute('data-inspector-state', 'applied');
   await expect(page.locator('.hana-annotation')).toHaveCount(before.groups);
   await expect(page.locator('[data-inspector-output-value="json"]')).toHaveValue(before.json);
-  expect(failures).toEqual([]);
+  expect(await appliedNode.evaluate((node) => node.isConnected)).toBe(true);
+  expect(await page.evaluate(() => getSelection().toString())).toBe('A');
+  await page.evaluate(() => window.__restoreInspectorFrameTest());
+});
+
+test('production Inspector code never reconstructs the native Selection', async ({ request }) => {
+  const inspectorSource = await request.get('/demo/inspector.js').then(
+    (response) => response.text(),
+  );
+
+  expect(inspectorSource).not.toContain('.removeAllRanges(');
+  expect(inspectorSource).not.toContain('.addRange(');
 });
 
 test('Inspector runtime imports use only documented bare public package specifiers', async ({
