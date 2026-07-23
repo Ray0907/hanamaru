@@ -20,6 +20,24 @@ import { shadowDomIntrinsics } from './shadow-target.js';
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 const MIRROR_CLASS = 'hana-shadow-mirror';
 const MIRROR_MARKER = 'data-hana-shadow-mirror';
+const ROOT_MUTATION_OPTIONS = {
+  childList: true,
+  subtree: true,
+  characterData: true,
+  attributes: true,
+  attributeFilter: [
+    'class',
+    'style',
+    'hidden',
+    'id',
+    MIRROR_MARKER,
+    'aria-describedby',
+  ],
+};
+const HOST_MUTATION_OPTIONS = {
+  attributes: true,
+  attributeFilter: ['class', 'style', 'hidden', 'aria-describedby'],
+};
 
 function stateError(cause, details = {}) {
   return new HanamaruStateError(
@@ -27,6 +45,23 @@ function stateError(cause, details = {}) {
     'Shadow root resources could not be managed',
     { ...details, cause },
   );
+}
+
+function attachCause(cause, key, value) {
+  if (cause === null
+    || (typeof cause !== 'object' && typeof cause !== 'function')) {
+    return;
+  }
+  try {
+    if (!Object.hasOwn(cause, key)) {
+      Object.defineProperty(cause, key, {
+        configurable: true,
+        value,
+      });
+    }
+  } catch {
+    // Preserve the originating observer failure.
+  }
 }
 
 function createPortal(document, root, rootId) {
@@ -65,27 +100,31 @@ function createPortal(document, root, rootId) {
   };
 }
 
-function observeMutationRoots(observer, host, roots) {
+function observeMutationRoots(observer, host, roots, assertCurrent = null) {
   for (const observedRoot of roots) {
-    observer.observe(observedRoot, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: [
-        'class',
-        'style',
-        'hidden',
-        'id',
-        MIRROR_MARKER,
-        'aria-describedby',
-      ],
-    });
+    observer.observe(observedRoot, ROOT_MUTATION_OPTIONS);
+    assertCurrent?.();
   }
-  observer.observe(host, {
-    attributes: true,
-    attributeFilter: ['class', 'style', 'hidden', 'aria-describedby'],
-  });
+  observer.observe(host, HOST_MUTATION_OPTIONS);
+  assertCurrent?.();
+}
+
+function restoreMutationRoots(observer, host, roots, cause) {
+  let failure = null;
+  const attempt = (operation) => {
+    try {
+      operation();
+    } catch (error) {
+      if (failure === null) failure = error;
+      else attachCause(failure, 'cleanupCause', error);
+    }
+  };
+  attempt(() => observer.disconnect());
+  for (const observedRoot of roots) {
+    attempt(() => observer.observe(observedRoot, ROOT_MUTATION_OPTIONS));
+  }
+  attempt(() => observer.observe(host, HOST_MUTATION_OPTIONS));
+  if (failure !== null) attachCause(cause, 'rollbackCause', failure);
 }
 
 function createMutationObserver(root, host, notify, roots = [root]) {
@@ -282,7 +321,12 @@ function browserAdapter() {
         },
       };
     },
-    updateMutationObserverRoots(_root, observer, layoutDependencies) {
+    updateMutationObserverRoots(
+      _root,
+      observer,
+      layoutDependencies,
+      isCurrent = () => true,
+    ) {
       const state = mutationObservers.get(observer);
       if (state === undefined) {
         throw new TypeError('Unknown Shadow root MutationObserver');
@@ -293,15 +337,28 @@ function browserAdapter() {
         return;
       }
       const previousRoots = state.roots;
-      observer.disconnect();
       try {
-        observeMutationRoots(observer, state.host, nextRoots);
+        observer.disconnect();
+        if (!isCurrent()) {
+          throw new Error('Shadow root resources changed during observer update');
+        }
+        observeMutationRoots(observer, state.host, nextRoots, () => {
+          if (!isCurrent()) {
+            throw new Error('Shadow root resources changed during observer update');
+          }
+        });
+        if (!isCurrent()) {
+          throw new Error('Shadow root resources changed during observer update');
+        }
         state.roots = nextRoots;
       } catch (error) {
-        try {
-          observer.disconnect();
-          observeMutationRoots(observer, state.host, previousRoots);
-        } catch {}
+        if (isCurrent()) {
+          restoreMutationRoots(observer, state.host, previousRoots, error);
+        } else {
+          try { observer.disconnect(); } catch (rollbackCause) {
+            attachCause(error, 'rollbackCause', rollbackCause);
+          }
+        }
         throw error;
       }
     },
@@ -928,7 +985,12 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
       : layoutDependencies;
     if (record?.phase === 'active'
       && typeof activeAdapter.updateMutationObserverRoots === 'function') {
-      activeAdapter.updateMutationObserverRoots(root, observerInstall.observer, next);
+      activeAdapter.updateMutationObserverRoots(
+        root,
+        observerInstall.observer,
+        next,
+        () => record?.phase === 'active',
+      );
     }
     let settled = false;
     return {
@@ -949,6 +1011,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
               root,
               observerInstall.observer,
               previous,
+              () => record?.phase === 'active',
             );
           }
         } finally {

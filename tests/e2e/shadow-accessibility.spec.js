@@ -2171,6 +2171,381 @@ test('dynamic Shadow dependency failures roll native registrations and observed 
   });
 });
 
+test('MutationObserver root rollback preserves next failure and attempts every previous observation', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const NativeMutationObserver = MutationObserver;
+    const nextCause = new Error('next Shadow root observe failed');
+    const restoreCause = new Error('previous Shadow root restore failed');
+    const observed = [];
+    let fail = false;
+    let nextRoot;
+    let oldRoot;
+    window.MutationObserver = class FaultingMutationObserver {
+      constructor(callback) {
+        this.native = new NativeMutationObserver(callback);
+      }
+
+      observe(target, options) {
+        observed.push(target);
+        this.native.observe(target, options);
+        if (fail && target === nextRoot) throw nextCause;
+        if (fail && target === oldRoot) throw restoreCause;
+      }
+
+      disconnect() {
+        this.native.disconnect();
+      }
+
+      takeRecords() {
+        return this.native.takeRecords();
+      }
+    };
+
+    const stage = document.createElement('div');
+    const oldHost = document.createElement('div');
+    const nextHost = document.createElement('div');
+    stage.append(oldHost, nextHost);
+    document.body.append(stage);
+    oldRoot = oldHost.attachShadow({ mode: 'open' });
+    nextRoot = nextHost.attachShadow({ mode: 'open' });
+    const innerHost = document.createElement('div');
+    oldRoot.append(innerHost);
+    const innerRoot = innerHost.attachShadow({ mode: 'open' });
+    const target = document.createElement('button');
+    target.textContent = 'Mutation rollback target';
+    innerRoot.append(target);
+    let scope;
+    try {
+      const { createShadowScope } = await import('/src/shadow.js');
+      scope = createShadowScope(innerRoot);
+      const controller = scope.annotate(target, {
+        mark: 'box', note: null, duration: 0,
+      });
+      controller.show();
+      await controller.finished;
+      const errors = [];
+      const onError = (event) => errors.push(event.detail.error);
+      oldHost.addEventListener('hana:error', onError);
+      nextHost.addEventListener('hana:error', onError);
+      fail = true;
+      nextRoot.append(innerHost);
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
+      fail = false;
+      oldHost.removeEventListener('hana:error', onError);
+      nextHost.removeEventListener('hana:error', onError);
+      const cause = errors[0]?.details?.cause;
+      const output = {
+        errorCount: errors.length,
+        hostObservations: observed.filter((value) => value === innerHost).length,
+        nextIdentity: cause === nextCause,
+        oldRootObservations: observed.filter((value) => value === oldRoot).length,
+        restoreIdentity: cause?.rollbackCause === restoreCause,
+      };
+      controller.destroy();
+      scope.destroy();
+      scope = null;
+      return output;
+    } finally {
+      fail = false;
+      scope?.destroy();
+      stage.remove();
+      window.MutationObserver = NativeMutationObserver;
+    }
+  });
+
+  expect(result).toEqual({
+    errorCount: 1,
+    hostObservations: 2,
+    nextIdentity: true,
+    oldRootObservations: 2,
+    restoreIdentity: true,
+  });
+});
+
+test('reentrant scope destroy during native dependency registration publishes no orphan', async ({
+  page,
+}) => {
+  const results = await page.evaluate(async () => {
+    const nativeAdd = EventTarget.prototype.addEventListener;
+    const nativeRemove = EventTarget.prototype.removeEventListener;
+    const NativeResizeObserver = ResizeObserver;
+    const active = {
+      mode: null,
+      scope: null,
+      target: null,
+    };
+    const adds = new Map();
+    const removes = new Map();
+    const observed = [];
+    const unobserved = [];
+    const increment = (map, target) => map.set(target, (map.get(target) ?? 0) + 1);
+    EventTarget.prototype.addEventListener = function addEventListener(
+      type,
+      listener,
+      options,
+    ) {
+      const result = nativeAdd.call(this, type, listener, options);
+      if (type === 'scroll') increment(adds, this);
+      if (type === 'scroll' && active.mode === 'scroll' && this === active.target) {
+        active.scope.destroy();
+        active.scope.destroy();
+      }
+      return result;
+    };
+    EventTarget.prototype.removeEventListener = function removeEventListener(
+      type,
+      listener,
+      options,
+    ) {
+      if (type === 'scroll') increment(removes, this);
+      return nativeRemove.call(this, type, listener, options);
+    };
+    window.ResizeObserver = class ReentrantResizeObserver {
+      constructor(callback) {
+        this.native = new NativeResizeObserver(callback);
+      }
+
+      observe(target) {
+        observed.push(target);
+        this.native.observe(target);
+        if (active.mode === 'resize' && target === active.target) {
+          active.scope.destroy();
+          active.scope.destroy();
+        }
+      }
+
+      unobserve(target) {
+        unobserved.push(target);
+        this.native.unobserve(target);
+      }
+
+      disconnect() {
+        this.native.disconnect();
+      }
+    };
+
+    const frames = () => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    const count = (values, target) => values.filter((value) => value === target).length;
+    const output = [];
+    let peerScope;
+    try {
+      const { createShadowScope } = await import('/src/shadow.js');
+      const peer = window.__shadowAccessibility.second;
+      peerScope = createShadowScope(peer.root);
+      const peerController = peerScope.annotate(peer.target, {
+        mark: 'box', note: null, duration: 0,
+      });
+      peerController.show();
+      await peerController.finished;
+
+      for (const mode of ['scroll', 'resize']) {
+        const stage = document.createElement('div');
+        const host = document.createElement('div');
+        stage.append(host);
+        document.body.append(stage);
+        const root = host.attachShadow({ mode: 'open' });
+        const target = document.createElement('button');
+        target.textContent = `Reentrant ${mode}`;
+        root.append(target);
+        const scope = createShadowScope(root);
+        const controller = scope.annotate(target, {
+          mark: 'box', note: null, duration: 0,
+        });
+        controller.show();
+        await controller.finished;
+        await frames();
+
+        const dependency = document.createElement('div');
+        if (mode === 'scroll') {
+          dependency.style.cssText = 'width:180px;height:80px;overflow:auto';
+        }
+        stage.append(dependency);
+        active.mode = mode;
+        active.scope = scope;
+        active.target = dependency;
+        dependency.append(host);
+        await frames();
+        active.mode = null;
+        active.scope = null;
+        active.target = null;
+        output.push({
+          adds: adds.get(dependency) ?? 0,
+          controllerState: controller.state,
+          mode,
+          observed: count(observed, dependency),
+          overlays: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+          peerState: peerController.state,
+          removes: removes.get(dependency) ?? 0,
+          unobserved: count(unobserved, dependency),
+        });
+        scope.destroy();
+        stage.remove();
+      }
+      peerController.destroy();
+      peerScope.destroy();
+      peerScope = null;
+      return output;
+    } finally {
+      active.mode = null;
+      peerScope?.destroy();
+      EventTarget.prototype.addEventListener = nativeAdd;
+      EventTarget.prototype.removeEventListener = nativeRemove;
+      window.ResizeObserver = NativeResizeObserver;
+    }
+  });
+
+  expect(results).toEqual([
+    {
+      adds: 1,
+      controllerState: 'destroyed',
+      mode: 'scroll',
+      observed: 0,
+      overlays: 1,
+      peerState: 'visible',
+      removes: 1,
+      unobserved: 0,
+    },
+    {
+      adds: 0,
+      controllerState: 'destroyed',
+      mode: 'resize',
+      observed: 1,
+      overlays: 1,
+      peerState: 'visible',
+      removes: 0,
+      unobserved: 1,
+    },
+  ]);
+});
+
+test('reentrant scope destroy during MutationObserver root registration leaves a reusable root', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const NativeMutationObserver = MutationObserver;
+    const observations = [];
+    let disconnects = 0;
+    let reentrantScope = null;
+    let triggerRoot = null;
+    window.MutationObserver = class ReentrantMutationObserver {
+      constructor(callback) {
+        this.native = new NativeMutationObserver(callback);
+      }
+
+      observe(target, options) {
+        observations.push(target);
+        this.native.observe(target, options);
+        if (target === triggerRoot && reentrantScope !== null) {
+          const scope = reentrantScope;
+          reentrantScope = null;
+          scope.destroy();
+          scope.destroy();
+        }
+      }
+
+      disconnect() {
+        disconnects += 1;
+        this.native.disconnect();
+      }
+
+      takeRecords() {
+        return this.native.takeRecords();
+      }
+    };
+
+    const stage = document.createElement('div');
+    const oldHost = document.createElement('div');
+    const nextHost = document.createElement('div');
+    stage.append(oldHost, nextHost);
+    document.body.append(stage);
+    const oldRoot = oldHost.attachShadow({ mode: 'open' });
+    const nextRoot = nextHost.attachShadow({ mode: 'open' });
+    const innerHost = document.createElement('div');
+    oldRoot.append(innerHost);
+    const innerRoot = innerHost.attachShadow({ mode: 'open' });
+    const target = document.createElement('button');
+    target.textContent = 'Reentrant observer target';
+    innerRoot.append(target);
+    let peerScope;
+    let scope;
+    let replacementScope;
+    try {
+      const { createShadowScope } = await import('/src/shadow.js');
+      const peer = window.__shadowAccessibility.second;
+      peerScope = createShadowScope(peer.root);
+      const peerController = peerScope.annotate(peer.target, {
+        mark: 'box', note: null, duration: 0,
+      });
+      peerController.show();
+      await peerController.finished;
+      scope = createShadowScope(innerRoot);
+      const controller = scope.annotate(target, {
+        mark: 'box', note: null, duration: 0,
+      });
+      controller.show();
+      await controller.finished;
+      reentrantScope = scope;
+      triggerRoot = nextRoot;
+      nextRoot.append(innerHost);
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
+      triggerRoot = null;
+      const afterDestroy = {
+        controllerState: controller.state,
+        nextRootObservations: observations.filter((value) => value === nextRoot).length,
+        overlays: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+        peerState: peerController.state,
+      };
+
+      replacementScope = createShadowScope(innerRoot);
+      const replacement = replacementScope.annotate(target, {
+        mark: 'underline', note: null, duration: 0,
+      });
+      replacement.show();
+      await replacement.finished;
+      const afterReuse = {
+        nextRootObservations: observations.filter((value) => value === nextRoot).length,
+        overlays: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+        replacementState: replacement.state,
+      };
+      replacement.destroy();
+      replacementScope.destroy();
+      replacementScope = null;
+      peerController.destroy();
+      peerScope.destroy();
+      peerScope = null;
+      return { afterDestroy, afterReuse, disconnects };
+    } finally {
+      reentrantScope = null;
+      replacementScope?.destroy();
+      scope?.destroy();
+      peerScope?.destroy();
+      stage.remove();
+      window.MutationObserver = NativeMutationObserver;
+    }
+  });
+
+  expect(result.afterDestroy).toEqual({
+    controllerState: 'destroyed',
+    nextRootObservations: 1,
+    overlays: 1,
+    peerState: 'visible',
+  });
+  expect(result.afterReuse).toEqual({
+    nextRootObservations: 2,
+    overlays: 2,
+    replacementState: 'visible',
+  });
+  expect(result.disconnects).toBeGreaterThanOrEqual(5);
+});
+
 test('dynamic composed topology diffs inserted siblings reparented closed hosts and scroll ancestors', async ({
   page,
 }) => {

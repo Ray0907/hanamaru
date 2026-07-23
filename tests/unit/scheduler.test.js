@@ -683,7 +683,12 @@ test('validates required injected callbacks and job callbacks clearly', () => {
 function createDependencyRegistrationHarness(mode) {
   const cause = new Error(`${mode} registration failed after its side effect`);
   const resizeEvents = [];
+  const observeCallbacks = new Map();
+  const removeFailures = new Map();
+  const scrollAddCallbacks = new Map();
+  const unobserveFailures = new Map();
   let fail = false;
+  let resizeObserver;
   let document;
 
   const element = (name, overflow = false) => {
@@ -701,12 +706,15 @@ function createDependencyRegistrationHarness(mode) {
         if (type !== 'scroll') return;
         events.push('add');
         listeners.add(listener);
+        scrollAddCallbacks.get(value)?.();
         if (fail && mode === 'scroll' && value === nextScrollB) throw cause;
       },
       removeEventListener(type, listener) {
         if (type !== 'scroll') return;
         events.push('remove');
         listeners.delete(listener);
+        const error = removeFailures.get(value);
+        if (error !== undefined) throw error;
       },
       contains(candidate) {
         let current = candidate;
@@ -722,7 +730,9 @@ function createDependencyRegistrationHarness(mode) {
 
   const target = element('target');
   const oldScroll = element('old-scroll', true);
+  const oldScrollB = element('old-scroll-b', true);
   const oldResize = element('old-resize');
+  const oldResizeB = element('old-resize-b');
   const nextScrollA = element('next-scroll-a', true);
   const nextScrollB = element('next-scroll-b', true);
   const nextResizeA = element('next-resize-a');
@@ -730,7 +740,9 @@ function createDependencyRegistrationHarness(mode) {
   const allElements = [
     target,
     oldScroll,
+    oldScrollB,
     oldResize,
+    oldResizeB,
     nextScrollA,
     nextScrollB,
     nextResizeA,
@@ -740,15 +752,22 @@ function createDependencyRegistrationHarness(mode) {
   class FakeResizeObserver {
     observed = new Set();
 
+    constructor() {
+      resizeObserver = this;
+    }
+
     observe(candidate) {
       resizeEvents.push(`observe:${candidate.name}`);
       this.observed.add(candidate);
+      observeCallbacks.get(candidate)?.();
       if (fail && mode === 'resize' && candidate === nextResizeB) throw cause;
     }
 
     unobserve(candidate) {
       resizeEvents.push(`unobserve:${candidate.name}`);
       this.observed.delete(candidate);
+      const error = unobserveFailures.get(candidate);
+      if (error !== undefined) throw error;
     }
 
     disconnect() {
@@ -800,7 +819,7 @@ function createDependencyRegistrationHarness(mode) {
     preceding: resizeTargets,
     roots: [],
   });
-  const oldDependencies = dependencies([oldScroll], [oldResize]);
+  const oldDependencies = dependencies([oldScroll, oldScrollB], [oldResize, oldResizeB]);
   const nextDependencies = dependencies(
     mode === 'scroll' ? [nextScrollA, nextScrollB] : [nextScrollA],
     mode === 'resize' ? [nextResizeA, nextResizeB] : [],
@@ -820,13 +839,22 @@ function createDependencyRegistrationHarness(mode) {
     nextScrollB,
     oldDependencies,
     oldResize,
+    oldResizeB,
     oldScroll,
+    oldScrollB,
+    observeCallbacks,
     nextDependencies,
     record,
+    removeFailures,
+    resizeObserver() {
+      return resizeObserver;
+    },
     resizeEvents,
+    scrollAddCallbacks,
     setFailure(value) {
       fail = value;
     },
+    unobserveFailures,
   };
 }
 
@@ -927,3 +955,221 @@ for (const mode of ['scroll', 'resize']) {
     }
   });
 }
+
+for (const terminalMode of ['scroll', 'resize', 'both']) {
+  test(`terminal ${terminalMode} cleanup never restores dead layout registrations`, () => {
+    const harness = createDependencyRegistrationHarness('none');
+    const lease = acquireDocumentScheduler(harness.document);
+    const id = `terminal-${terminalMode}`;
+    const scrollCause = new Error('terminal scroll removal failed after side effect');
+    const resizeCause = new Error('terminal resize removal failed after side effect');
+    lease.shared.registerController(id);
+    const binding = {
+      generation: 0,
+      id,
+      layoutDependencies: harness.oldDependencies,
+      onError() {},
+      read() {},
+      record: harness.record,
+      write() {},
+    };
+    lease.shared.observeLayout(binding);
+    if (terminalMode !== 'resize') {
+      harness.removeFailures.set(harness.oldScroll, scrollCause);
+    }
+    if (terminalMode !== 'scroll') {
+      harness.unobserveFailures.set(harness.oldResize, resizeCause);
+    }
+
+    let delivered;
+    assert.throws(
+      () => lease.shared.releaseController(id),
+      (error) => {
+        delivered = error;
+        return error === (terminalMode === 'resize' ? resizeCause : scrollCause);
+      },
+    );
+    if (terminalMode === 'both') {
+      assert.strictEqual(delivered.cleanupCause, resizeCause);
+    }
+
+    assert.throws(() => lease.shared.generationFor(id), /not registered/u);
+    assert.equal(harness.oldScroll.listeners.size, 0);
+    assert.equal(harness.oldScrollB.listeners.size, 0);
+    assert.equal(
+      harness.oldScroll.events.filter((event) => event === 'remove').length,
+      1,
+    );
+    assert.equal(
+      harness.oldScrollB.events.filter((event) => event === 'remove').length,
+      1,
+    );
+    for (const candidate of [
+      harness.record.element,
+      harness.oldScroll,
+      harness.oldScrollB,
+      harness.oldResize,
+      harness.oldResizeB,
+    ]) {
+      assert.equal(harness.resizeObserver().observed.has(candidate), false);
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === `unobserve:${candidate.name}`).length,
+        1,
+      );
+    }
+
+    harness.removeFailures.clear();
+    harness.unobserveFailures.clear();
+    assert.equal(lease.shared.registerController(id), 0);
+    lease.shared.observeLayout(binding);
+    assert.equal(
+      harness.oldScroll.events.filter((event) => event === 'add').length,
+      2,
+    );
+    assert.equal(
+      harness.resizeEvents.filter((event) => event === 'observe:old-resize').length,
+      2,
+    );
+    lease.shared.releaseController(id);
+    lease.release();
+    assert.equal(
+      harness.oldScroll.events.filter((event) => event === 'remove').length,
+      2,
+    );
+    assert.equal(
+      harness.resizeEvents.filter((event) => event === 'unobserve:old-resize').length,
+      2,
+    );
+  });
+}
+
+for (const registrationMode of ['scroll', 'resize']) {
+  test(`reentrant ${registrationMode} registration cannot publish a destroyed layout`, () => {
+    const harness = createDependencyRegistrationHarness('none');
+    const lease = acquireDocumentScheduler(harness.document);
+    const shared = lease.shared;
+    const peerId = `reentrant-${registrationMode}-peer`;
+    const victimId = `reentrant-${registrationMode}-victim`;
+    const dependencies = registrationMode === 'scroll'
+      ? {
+        ancestors: [harness.nextScrollA],
+        hosts: [],
+        preceding: [],
+        roots: [],
+      }
+      : {
+        ancestors: [harness.oldScroll],
+        hosts: [],
+        preceding: [harness.nextResizeA],
+        roots: [],
+      };
+    const binding = (id, layoutDependencies) => ({
+      generation: 0,
+      id,
+      layoutDependencies,
+      onError() {},
+      read() {},
+      record: harness.record,
+      write() {},
+    });
+
+    shared.registerController(peerId);
+    shared.observeLayout(binding(peerId, harness.oldDependencies));
+    shared.registerController(victimId);
+    const callbacks = registrationMode === 'scroll'
+      ? harness.scrollAddCallbacks
+      : harness.observeCallbacks;
+    const reentrantTarget = registrationMode === 'scroll'
+      ? harness.nextScrollA
+      : harness.nextResizeA;
+    let destroys = 0;
+    callbacks.set(reentrantTarget, () => {
+      destroys += 1;
+      shared.releaseController(victimId);
+      shared.releaseController(victimId);
+    });
+
+    assert.throws(
+      () => shared.observeLayout(binding(victimId, dependencies)),
+      /controller|layout|registration|changed|released|stale/i,
+    );
+    assert.equal(destroys, 1);
+    assert.throws(() => shared.generationFor(victimId), /not registered/u);
+    assert.equal(shared.generationFor(peerId), 0);
+    if (registrationMode === 'scroll') {
+      assert.equal(harness.nextScrollA.listeners.size, 0);
+      assert.deepEqual(harness.nextScrollA.events, ['add', 'remove']);
+    } else {
+      assert.equal(harness.resizeObserver().observed.has(harness.nextResizeA), false);
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'observe:next-resize-a').length,
+        1,
+      );
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'unobserve:next-resize-a').length,
+        1,
+      );
+    }
+    assert.equal(harness.oldScroll.listeners.size, 1);
+
+    callbacks.clear();
+    assert.equal(shared.registerController(victimId), 0);
+    shared.observeLayout(binding(victimId, dependencies));
+    if (registrationMode === 'scroll') {
+      assert.equal(harness.nextScrollA.events.filter((event) => event === 'add').length, 2);
+      assert.equal(harness.nextScrollA.listeners.size, 1);
+    } else {
+      assert.equal(
+        harness.resizeEvents.filter((event) => event === 'observe:next-resize-a').length,
+        2,
+      );
+      assert.equal(harness.resizeObserver().observed.has(harness.nextResizeA), true);
+    }
+    shared.releaseController(victimId);
+    shared.releaseController(peerId);
+    lease.release();
+  });
+}
+
+test('reentrant layout dependency provider cannot publish after releasing its controller', () => {
+  const harness = createDependencyRegistrationHarness('none');
+  const lease = acquireDocumentScheduler(harness.document);
+  const id = 'reentrant-provider';
+  let reads = 0;
+  lease.shared.registerController(id);
+
+  assert.throws(
+    () => lease.shared.observeLayout({
+      generation: 0,
+      id,
+      layoutDependencies() {
+        reads += 1;
+        lease.shared.releaseController(id);
+        return harness.oldDependencies;
+      },
+      onError() {},
+      read() {},
+      record: harness.record,
+      write() {},
+    }),
+    /controller|layout|registration|changed|released|stale/i,
+  );
+  assert.equal(reads, 1);
+  assert.throws(() => lease.shared.generationFor(id), /not registered/u);
+  assert.equal(harness.oldScroll.listeners.size, 0);
+  assert.equal(harness.resizeObserver().observed.size, 0);
+
+  assert.equal(lease.shared.registerController(id), 0);
+  lease.shared.observeLayout({
+    generation: 0,
+    id,
+    layoutDependencies: harness.oldDependencies,
+    onError() {},
+    read() {},
+    record: harness.record,
+    write() {},
+  });
+  assert.equal(harness.oldScroll.listeners.size, 1);
+  lease.shared.releaseController(id);
+  lease.release();
+});

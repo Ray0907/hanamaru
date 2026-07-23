@@ -23,6 +23,33 @@ function attachRollbackCause(cause, rollbackCause) {
   }
 }
 
+function attachCleanupCause(cause, cleanupCause) {
+  if (cause === null
+    || (typeof cause !== 'object' && typeof cause !== 'function')) {
+    return;
+  }
+  try {
+    if (!Object.hasOwn(cause, 'cleanupCause')) {
+      Object.defineProperty(cause, 'cleanupCause', {
+        configurable: true,
+        value: cleanupCause,
+      });
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(cause, 'cleanupCauses');
+    const previous = descriptor !== undefined
+      && Object.hasOwn(descriptor, 'value')
+      && Array.isArray(descriptor.value)
+      ? descriptor.value
+      : [];
+    Object.defineProperty(cause, 'cleanupCauses', {
+      configurable: true,
+      value: Object.freeze([...previous, cleanupCause]),
+    });
+  } catch {
+    // Preserve the first terminal cleanup failure when it cannot carry metadata.
+  }
+}
+
 function rollbackOperations(operations, cause) {
   const rethrow = arguments.length > 1;
   let failure = null;
@@ -63,6 +90,21 @@ function changeNativeRegistration(apply, rollback) {
       rollback();
     } catch (error) {
       attachRollbackCause(cause, error);
+    }
+    throw cause;
+  }
+}
+
+function changeNativeRegistrationWhileCurrent(apply, rollback, isCurrent) {
+  try {
+    apply();
+  } catch (cause) {
+    if (isCurrent()) {
+      try {
+        rollback();
+      } catch (error) {
+        attachRollbackCause(cause, error);
+      }
     }
     throw cause;
   }
@@ -717,7 +759,12 @@ class SharedDocumentResources {
 
     let failure = null;
     const cleanup = (operation) => {
-      try { operation(); } catch (error) { failure ??= error; }
+      try {
+        operation();
+      } catch (error) {
+        if (failure === null) failure = error;
+        else attachCleanupCause(failure, error);
+      }
     };
     cleanup(() => this.#removeLayout(id));
     for (const registration of [...this.#intersections.get(id) ?? []]) {
@@ -790,12 +837,27 @@ class SharedDocumentResources {
     const readLayoutDependencies = typeof options.layoutDependencies === 'function'
       ? options.layoutDependencies
       : null;
-    const dependencyChange = this.#prepareLayoutDependencies(
-      readLayoutDependencies ?? options.layoutDependencies,
+    const operationToken = controller.token;
+    const isCurrent = () => this.#layoutOperationIsCurrent(
+      id,
+      controller,
+      generation,
+      operationToken,
+      prior,
     );
+    const assertCurrent = () => {
+      if (!isCurrent()) {
+        throw new Error('Layout registration changed during dependency update');
+      }
+    };
+    let dependencyChange = null;
     let binding;
     let rollbackTargets = null;
     try {
+      dependencyChange = this.#prepareLayoutDependencies(
+        readLayoutDependencies ?? options.layoutDependencies,
+      );
+      assertCurrent();
       const layoutDependencies = dependencyChange.value;
       binding = {
         generation,
@@ -822,17 +884,22 @@ class SharedDocumentResources {
         binding.scrollTargets,
         prior?.resizeTargets ?? new Set(),
         binding.resizeTargets,
+        assertCurrent,
+        isCurrent,
       );
+      assertCurrent();
       dependencyChange.commit();
+      assertCurrent();
     } catch (cause) {
       rollbackOperations([
-        dependencyChange.rollback,
+        ...(dependencyChange === null ? [] : [dependencyChange.rollback]),
         ...(rollbackTargets === null ? [] : [rollbackTargets]),
       ], cause);
     }
     if (renewToken) {
-      controller.token = token;
       this.#cancelControllerJobs(controller);
+      assertCurrent();
+      controller.token = token;
     }
     this.#layouts.set(id, binding);
 
@@ -867,6 +934,14 @@ class SharedDocumentResources {
     } catch (cause) {
       rollbackOperations([rollback], cause);
     }
+  }
+
+  #layoutOperationIsCurrent(id, controller, generation, token, binding) {
+    return this.#alive
+      && this.#controllers.get(id) === controller
+      && controller.generation === generation
+      && controller.token === token
+      && this.#layouts.get(id) === binding;
   }
 
   #discoverLayoutDependencies(input) {
@@ -971,15 +1046,30 @@ class SharedDocumentResources {
 
   #refreshLayoutDependencies(binding) {
     if (binding.readLayoutDependencies === null) return;
-    const dependencyChange = this.#prepareLayoutDependencies(
-      binding.readLayoutDependencies,
+    const controller = this.#controllers.get(binding.id);
+    const isCurrent = () => this.#layoutOperationIsCurrent(
+      binding.id,
+      controller,
+      binding.generation,
+      binding.token,
+      binding,
     );
+    const assertCurrent = () => {
+      if (!isCurrent()) {
+        throw new Error('Layout registration changed during dependency refresh');
+      }
+    };
+    let dependencyChange = null;
     let layoutDependencies;
     let mutationScope;
     let resizeTargets;
     let scrollTargets;
     let rollbackTargets = null;
     try {
+      dependencyChange = this.#prepareLayoutDependencies(
+        binding.readLayoutDependencies,
+      );
+      assertCurrent();
       layoutDependencies = dependencyChange.value;
       mutationScope = this.#discoverMutationScope(
         binding.record,
@@ -1000,11 +1090,15 @@ class SharedDocumentResources {
         scrollTargets,
         binding.resizeTargets,
         resizeTargets,
+        assertCurrent,
+        isCurrent,
       );
+      assertCurrent();
       dependencyChange.commit();
+      assertCurrent();
     } catch (cause) {
       rollbackOperations([
-        dependencyChange.rollback,
+        ...(dependencyChange === null ? [] : [dependencyChange.rollback]),
         ...(rollbackTargets === null ? [] : [rollbackTargets]),
       ], cause);
     }
@@ -1059,6 +1153,8 @@ class SharedDocumentResources {
     nextScroll,
     previousResize,
     nextResize,
+    assertCurrent,
+    isCurrent,
   ) {
     const operations = [];
     const scrollOptions = { passive: true };
@@ -1066,8 +1162,10 @@ class SharedDocumentResources {
     for (const target of nextScroll) {
       if (previousScroll.has(target)) continue;
       operations.push(() => {
+        assertCurrent();
         let registration = this.#scrollTargets.get(target);
         if (registration !== undefined) {
+          assertCurrent();
           registration.ids.add(id);
           return () => registration.ids.delete(id);
         }
@@ -1080,9 +1178,13 @@ class SharedDocumentResources {
           },
         };
         changeNativeRegistration(
-          () => target.addEventListener('scroll', registration.listener, scrollOptions),
+          () => {
+            target.addEventListener('scroll', registration.listener, scrollOptions);
+            assertCurrent();
+          },
           () => target.removeEventListener('scroll', registration.listener, scrollOptions),
         );
+        assertCurrent();
         this.#scrollTargets.set(target, registration);
         return () => {
           let failure = null;
@@ -1103,16 +1205,22 @@ class SharedDocumentResources {
     for (const target of nextResize) {
       if (previousResize.has(target)) continue;
       operations.push(() => {
+        assertCurrent();
         let ids = this.#resizeTargets.get(target);
         if (ids !== undefined) {
+          assertCurrent();
           ids.add(id);
           return () => ids.delete(id);
         }
         ids = new Set([id]);
         changeNativeRegistration(
-          () => this.#resizeObserver?.observe(target),
+          () => {
+            this.#resizeObserver?.observe(target);
+            assertCurrent();
+          },
           () => this.#resizeObserver?.unobserve(target),
         );
+        assertCurrent();
         this.#resizeTargets.set(target, ids);
         return () => {
           let failure = null;
@@ -1133,19 +1241,28 @@ class SharedDocumentResources {
     for (const target of previousScroll) {
       if (nextScroll.has(target)) continue;
       operations.push(() => {
+        assertCurrent();
         const registration = this.#scrollTargets.get(target);
         if (registration === undefined || !registration.ids.has(id)) return () => {};
         if (registration.ids.size > 1) {
           registration.ids.delete(id);
-          return () => registration.ids.add(id);
+          return () => {
+            if (isCurrent()) registration.ids.add(id);
+          };
         }
-        changeNativeRegistration(
-          () => target.removeEventListener('scroll', registration.listener, scrollOptions),
+        changeNativeRegistrationWhileCurrent(
+          () => {
+            target.removeEventListener('scroll', registration.listener, scrollOptions);
+            assertCurrent();
+          },
           () => target.addEventListener('scroll', registration.listener, scrollOptions),
+          isCurrent,
         );
+        assertCurrent();
         registration.ids.delete(id);
         this.#scrollTargets.delete(target);
         return () => {
+          if (!isCurrent()) return;
           changeNativeRegistration(
             () => target.addEventListener('scroll', registration.listener, scrollOptions),
             () => target.removeEventListener('scroll', registration.listener, scrollOptions),
@@ -1159,19 +1276,28 @@ class SharedDocumentResources {
     for (const target of previousResize) {
       if (nextResize.has(target)) continue;
       operations.push(() => {
+        assertCurrent();
         const ids = this.#resizeTargets.get(target);
         if (ids === undefined || !ids.has(id)) return () => {};
         if (ids.size > 1) {
           ids.delete(id);
-          return () => ids.add(id);
+          return () => {
+            if (isCurrent()) ids.add(id);
+          };
         }
-        changeNativeRegistration(
-          () => this.#resizeObserver?.unobserve(target),
+        changeNativeRegistrationWhileCurrent(
+          () => {
+            this.#resizeObserver?.unobserve(target);
+            assertCurrent();
+          },
           () => this.#resizeObserver?.observe(target),
+          isCurrent,
         );
+        assertCurrent();
         ids.delete(id);
         this.#resizeTargets.delete(target);
         return () => {
+          if (!isCurrent()) return;
           changeNativeRegistration(
             () => this.#resizeObserver?.observe(target),
             () => this.#resizeObserver?.unobserve(target),
@@ -1190,16 +1316,37 @@ class SharedDocumentResources {
     if (binding === undefined) {
       return;
     }
-    this.#replaceDependencyTargets(
-      id,
-      binding.scrollTargets,
-      new Set(),
-      binding.resizeTargets,
-      new Set(),
-    );
     this.#layouts.delete(id);
+    let failure = null;
+    const cleanup = (operation) => {
+      try {
+        operation();
+      } catch (error) {
+        if (failure === null) failure = error;
+        else attachCleanupCause(failure, error);
+      }
+    };
+    for (const target of binding.scrollTargets) {
+      const registration = this.#scrollTargets.get(target);
+      if (registration === undefined || !registration.ids.delete(id)) continue;
+      if (registration.ids.size !== 0) continue;
+      this.#scrollTargets.delete(target);
+      cleanup(() => target.removeEventListener(
+        'scroll',
+        registration.listener,
+        { passive: true },
+      ));
+    }
+    for (const target of binding.resizeTargets) {
+      const ids = this.#resizeTargets.get(target);
+      if (ids === undefined || !ids.delete(id)) continue;
+      if (ids.size !== 0) continue;
+      this.#resizeTargets.delete(target);
+      cleanup(() => this.#resizeObserver?.unobserve(target));
+    }
     const layoutKey = this.#controllers.get(id)?.queueKeys.get('internal:layout');
-    if (layoutKey !== undefined) this.#frameQueue.cancel(layoutKey);
+    if (layoutKey !== undefined) cleanup(() => this.#frameQueue.cancel(layoutKey));
+    if (failure !== null) throw failure;
   }
 
   #signal(id) {
