@@ -757,44 +757,45 @@ class SharedDocumentResources {
       return;
     }
 
+    this.#controllers.delete(id);
+    const cleanups = this.#stageLayoutRemoval(id);
+    for (const registration of [...this.#intersections.get(id) ?? []]) {
+      cleanups.push(...this.#stageIntersectionRemoval(registration));
+    }
+    cleanups.push(() => this.#cancelControllerJobs(controller));
+    this.#runTerminalCleanup(cleanups);
+  }
+
+  #removeIntersection(registration) {
+    this.#runTerminalCleanup(this.#stageIntersectionRemoval(registration));
+  }
+
+  #stageIntersectionRemoval(registration) {
+    if (!registration.active) {
+      return [];
+    }
+    registration.active = false;
+    const registrations = this.#intersections.get(registration.id);
+    registrations?.delete(registration);
+    if (registrations?.size === 0
+      && this.#intersections.get(registration.id) === registrations) {
+      this.#intersections.delete(registration.id);
+    }
+    return [
+      () => registration.observer.unobserve(registration.target),
+      () => registration.observer.disconnect(),
+    ];
+  }
+
+  #runTerminalCleanup(cleanups) {
     let failure = null;
-    const cleanup = (operation) => {
+    for (const cleanup of cleanups) {
       try {
-        operation();
+        cleanup();
       } catch (error) {
         if (failure === null) failure = error;
         else attachCleanupCause(failure, error);
       }
-    };
-    cleanup(() => this.#removeLayout(id));
-    for (const registration of [...this.#intersections.get(id) ?? []]) {
-      cleanup(() => this.#removeIntersection(registration));
-    }
-    cleanup(() => this.#cancelControllerJobs(controller));
-    this.#controllers.delete(id);
-    if (failure !== null) throw failure;
-  }
-
-  #removeIntersection(registration) {
-    if (!registration.active) {
-      return;
-    }
-    registration.active = false;
-    let failure = null;
-    try {
-      registration.observer.unobserve(registration.target);
-    } catch (error) {
-      failure = error;
-    }
-    try {
-      registration.observer.disconnect();
-    } catch (error) {
-      failure ??= error;
-    }
-    const registrations = this.#intersections.get(registration.id);
-    registrations?.delete(registration);
-    if (registrations?.size === 0) {
-      this.#intersections.delete(registration.id);
     }
     if (failure !== null) throw failure;
   }
@@ -1312,26 +1313,32 @@ class SharedDocumentResources {
   }
 
   #removeLayout(id) {
+    const controller = this.#controllers.get(id);
+    const cleanups = this.#stageLayoutRemoval(id);
+    const layoutKey = controller?.queueKeys.get('internal:layout');
+    if (layoutKey !== undefined) {
+      cleanups.push(() => {
+        if (!this.#layouts.has(id)) this.#frameQueue.cancel(layoutKey);
+      });
+    }
+    this.#runTerminalCleanup(cleanups);
+  }
+
+  #stageLayoutRemoval(id) {
     const binding = this.#layouts.get(id);
     if (binding === undefined) {
-      return;
+      return [];
     }
     this.#layouts.delete(id);
-    let failure = null;
-    const cleanup = (operation) => {
-      try {
-        operation();
-      } catch (error) {
-        if (failure === null) failure = error;
-        else attachCleanupCause(failure, error);
-      }
-    };
+    const cleanups = [];
     for (const target of binding.scrollTargets) {
       const registration = this.#scrollTargets.get(target);
       if (registration === undefined || !registration.ids.delete(id)) continue;
       if (registration.ids.size !== 0) continue;
-      this.#scrollTargets.delete(target);
-      cleanup(() => target.removeEventListener(
+      if (this.#scrollTargets.get(target) === registration) {
+        this.#scrollTargets.delete(target);
+      }
+      cleanups.push(() => target.removeEventListener(
         'scroll',
         registration.listener,
         { passive: true },
@@ -1341,12 +1348,16 @@ class SharedDocumentResources {
       const ids = this.#resizeTargets.get(target);
       if (ids === undefined || !ids.delete(id)) continue;
       if (ids.size !== 0) continue;
-      this.#resizeTargets.delete(target);
-      cleanup(() => this.#resizeObserver?.unobserve(target));
+      if (this.#resizeTargets.get(target) === ids) {
+        this.#resizeTargets.delete(target);
+      }
+      cleanups.push(() => {
+        const replacement = this.#resizeTargets.get(target);
+        if (replacement !== undefined && replacement !== ids) return;
+        this.#resizeObserver?.unobserve(target);
+      });
     }
-    const layoutKey = this.#controllers.get(id)?.queueKeys.get('internal:layout');
-    if (layoutKey !== undefined) cleanup(() => this.#frameQueue.cancel(layoutKey));
-    if (failure !== null) throw failure;
+    return cleanups;
   }
 
   #signal(id) {
@@ -1503,16 +1514,14 @@ class SharedDocumentResources {
     }
 
     this.#alive = false;
-    let failure = null;
-    const cleanup = (operation) => {
-      try { operation(); } catch (error) { failure ??= error; }
-    };
+    const cleanups = [];
+    const controllers = [...this.#controllers.values()];
     for (const id of [...this.#layouts.keys()]) {
-      cleanup(() => this.#removeLayout(id));
+      cleanups.push(...this.#stageLayoutRemoval(id));
     }
     for (const registrations of [...this.#intersections.values()]) {
       for (const registration of [...registrations]) {
-        cleanup(() => this.#removeIntersection(registration));
+        cleanups.push(...this.#stageIntersectionRemoval(registration));
       }
     }
     this.#layouts.clear();
@@ -1520,15 +1529,18 @@ class SharedDocumentResources {
     this.#intersections.clear();
     this.#resizeTargets.clear();
     this.#scrollTargets.clear();
-    cleanup(() => this.#resizeObserver?.disconnect());
-    cleanup(() => this.#mutationObserver?.disconnect());
+    for (const controller of controllers) {
+      cleanups.push(() => this.#cancelControllerJobs(controller));
+    }
+    cleanups.push(() => this.#resizeObserver?.disconnect());
+    cleanups.push(() => this.#mutationObserver?.disconnect());
     if (this.#windowResizeInstalled) {
       this.#windowResizeInstalled = false;
-      cleanup(() => this.#window.removeEventListener('resize', this.#windowResize));
+      cleanups.push(() => this.#window.removeEventListener('resize', this.#windowResize));
     }
     if (this.#viewportResizeInstalled) {
       this.#viewportResizeInstalled = false;
-      cleanup(() => this.#visualViewport.removeEventListener(
+      cleanups.push(() => this.#visualViewport.removeEventListener(
         'resize',
         this.#windowResize,
         { passive: true },
@@ -1536,14 +1548,20 @@ class SharedDocumentResources {
     }
     if (this.#viewportScrollInstalled) {
       this.#viewportScrollInstalled = false;
-      cleanup(() => this.#visualViewport.removeEventListener(
+      cleanups.push(() => this.#visualViewport.removeEventListener(
         'scroll',
         this.#windowResize,
         { passive: true },
       ));
     }
-    cleanup(() => this.#frameQueue?.destroy());
-    cleanup(() => SharedDocumentResources.detachDefaultPortal(this));
+    cleanups.push(() => this.#frameQueue?.destroy());
+    cleanups.push(() => SharedDocumentResources.detachDefaultPortal(this));
+    let failure = null;
+    try {
+      this.#runTerminalCleanup(cleanups);
+    } catch (error) {
+      failure = error;
+    }
     resourceInternals.delete(this);
     if (failure !== null) throw failure;
   }

@@ -686,6 +686,9 @@ function createDependencyRegistrationHarness(mode) {
   const observeCallbacks = new Map();
   const removeFailures = new Map();
   const scrollAddCallbacks = new Map();
+  const scrollRemoveCallbacks = new Map();
+  const terminalEvents = [];
+  const unobserveCallbacks = new Map();
   const unobserveFailures = new Map();
   let fail = false;
   let resizeObserver;
@@ -712,7 +715,9 @@ function createDependencyRegistrationHarness(mode) {
       removeEventListener(type, listener) {
         if (type !== 'scroll') return;
         events.push('remove');
+        terminalEvents.push(`remove:${name}`);
         listeners.delete(listener);
+        scrollRemoveCallbacks.get(value)?.();
         const error = removeFailures.get(value);
         if (error !== undefined) throw error;
       },
@@ -765,7 +770,9 @@ function createDependencyRegistrationHarness(mode) {
 
     unobserve(candidate) {
       resizeEvents.push(`unobserve:${candidate.name}`);
+      terminalEvents.push(`unobserve:${candidate.name}`);
       this.observed.delete(candidate);
+      unobserveCallbacks.get(candidate)?.();
       const error = unobserveFailures.get(candidate);
       if (error !== undefined) throw error;
     }
@@ -851,9 +858,12 @@ function createDependencyRegistrationHarness(mode) {
     },
     resizeEvents,
     scrollAddCallbacks,
+    scrollRemoveCallbacks,
     setFailure(value) {
       fail = value;
     },
+    terminalEvents,
+    unobserveCallbacks,
     unobserveFailures,
   };
 }
@@ -1042,6 +1052,164 @@ for (const terminalMode of ['scroll', 'resize', 'both']) {
     );
   });
 }
+
+for (const reentryPoint of ['first-scroll', 'middle-resize']) {
+  test(`terminal cleanup stages every mixed dependency before ${reentryPoint} final-release reentry`, () => {
+    const harness = createDependencyRegistrationHarness('none');
+    const lease = acquireDocumentScheduler(harness.document);
+    const shared = lease.shared;
+    const id = `terminal-staged-${reentryPoint}`;
+    const cause = new Error(`${reentryPoint} cleanup failed after final release`);
+    const callbackTarget = reentryPoint === 'first-scroll'
+      ? harness.oldScroll
+      : harness.oldResize;
+    const callbacks = reentryPoint === 'first-scroll'
+      ? harness.scrollRemoveCallbacks
+      : harness.unobserveCallbacks;
+    const failures = reentryPoint === 'first-scroll'
+      ? harness.removeFailures
+      : harness.unobserveFailures;
+    let releases = 0;
+
+    shared.registerController(id);
+    shared.observeLayout({
+      generation: 0,
+      id,
+      layoutDependencies: harness.oldDependencies,
+      onError() {},
+      read() {},
+      record: harness.record,
+      write() {},
+    });
+    callbacks.set(callbackTarget, () => {
+      releases += 1;
+      lease.release();
+      lease.release();
+    });
+    failures.set(callbackTarget, cause);
+
+    assert.throws(
+      () => shared.releaseController(id),
+      (error) => error === cause,
+    );
+    assert.equal(releases, 1);
+    assert.deepEqual(harness.terminalEvents, [
+      'remove:old-scroll',
+      'remove:old-scroll-b',
+      'unobserve:target',
+      'unobserve:old-scroll',
+      'unobserve:old-scroll-b',
+      'unobserve:old-resize',
+      'unobserve:old-resize-b',
+    ]);
+    assert.equal(harness.oldScroll.listeners.size, 0);
+    assert.equal(harness.oldScrollB.listeners.size, 0);
+    assert.equal(harness.resizeObserver().observed.size, 0);
+    assert.throws(() => shared.generationFor(id), /not registered|released/u);
+  });
+}
+
+test('terminal cleanup preserves a same-ID replacement registered by its first native callback', () => {
+  const harness = createDependencyRegistrationHarness('none');
+  const lease = acquireDocumentScheduler(harness.document);
+  const shared = lease.shared;
+  const id = 'terminal-replacement';
+  const binding = {
+    generation: 0,
+    id,
+    layoutDependencies: harness.oldDependencies,
+    onError() {},
+    read() {},
+    record: harness.record,
+    write() {},
+  };
+  let replacements = 0;
+
+  shared.registerController(id);
+  const unsubscribe = shared.observeLayout(binding);
+  harness.scrollRemoveCallbacks.set(harness.oldScroll, () => {
+    harness.scrollRemoveCallbacks.delete(harness.oldScroll);
+    replacements += 1;
+    shared.observeLayout(binding);
+  });
+
+  unsubscribe();
+
+  assert.equal(replacements, 1);
+  assert.equal(harness.oldScroll.listeners.size, 1);
+  assert.equal(harness.oldScrollB.listeners.size, 1);
+  for (const candidate of [
+    harness.record.element,
+    harness.oldScroll,
+    harness.oldScrollB,
+    harness.oldResize,
+    harness.oldResizeB,
+  ]) {
+    assert.equal(harness.resizeObserver().observed.has(candidate), true);
+  }
+  assert.deepEqual(harness.terminalEvents, [
+    'remove:old-scroll',
+    'remove:old-scroll-b',
+  ]);
+
+  shared.releaseController(id);
+  lease.release();
+  assert.equal(harness.oldScroll.listeners.size, 0);
+  assert.equal(harness.oldScrollB.listeners.size, 0);
+  assert.equal(harness.resizeObserver().observed.size, 0);
+});
+
+test('releaseController terminalizes its ID before a native callback registers its replacement', () => {
+  const harness = createDependencyRegistrationHarness('none');
+  const lease = acquireDocumentScheduler(harness.document);
+  const shared = lease.shared;
+  const id = 'terminal-controller-replacement';
+  const binding = {
+    generation: 0,
+    id,
+    layoutDependencies: harness.oldDependencies,
+    onError() {},
+    read() {},
+    record: harness.record,
+    write() {},
+  };
+  let replacements = 0;
+
+  shared.registerController(id);
+  shared.observeLayout(binding);
+  harness.scrollRemoveCallbacks.set(harness.oldScroll, () => {
+    harness.scrollRemoveCallbacks.delete(harness.oldScroll);
+    replacements += 1;
+    assert.equal(shared.registerController(id), 0);
+    shared.observeLayout(binding);
+  });
+
+  shared.releaseController(id);
+
+  assert.equal(replacements, 1);
+  assert.equal(shared.generationFor(id), 0);
+  assert.equal(harness.oldScroll.listeners.size, 1);
+  assert.equal(harness.oldScrollB.listeners.size, 1);
+  for (const candidate of [
+    harness.record.element,
+    harness.oldScroll,
+    harness.oldScrollB,
+    harness.oldResize,
+    harness.oldResizeB,
+  ]) {
+    assert.equal(harness.resizeObserver().observed.has(candidate), true);
+  }
+  assert.deepEqual(harness.terminalEvents, [
+    'remove:old-scroll',
+    'remove:old-scroll-b',
+  ]);
+
+  shared.releaseController(id);
+  lease.release();
+  assert.equal(harness.oldScroll.listeners.size, 0);
+  assert.equal(harness.oldScrollB.listeners.size, 0);
+  assert.equal(harness.resizeObserver().observed.size, 0);
+});
 
 for (const registrationMode of ['scroll', 'resize']) {
   test(`reentrant ${registrationMode} registration cannot publish a destroyed layout`, () => {

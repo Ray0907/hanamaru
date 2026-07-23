@@ -2424,6 +2424,166 @@ test('reentrant scope destroy during native dependency registration publishes no
   ]);
 });
 
+test('terminal dependency teardown stages every target before reentrant final scope release', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const nativeAdd = EventTarget.prototype.addEventListener;
+    const nativeRemove = EventTarget.prototype.removeEventListener;
+    const NativeResizeObserver = ResizeObserver;
+    const scrollAdds = [];
+    const scrollRemoves = [];
+    const observed = [];
+    const unobserved = [];
+    const cause = new Error('first scroll cleanup failed after replacement registration');
+    const stage = document.createElement('div');
+    const outer = document.createElement('div');
+    const inner = document.createElement('div');
+    const host = document.createElement('div');
+    outer.dataset.cleanupTarget = 'outer';
+    inner.dataset.cleanupTarget = 'inner';
+    outer.style.cssText = 'width:360px;height:180px;overflow:auto';
+    inner.style.cssText = 'width:640px;height:320px;overflow:auto';
+    host.style.cssText = 'width:820px;height:440px';
+    inner.append(host);
+    outer.append(inner);
+    stage.append(outer);
+    document.body.append(stage);
+    const root = host.attachShadow({ mode: 'open' });
+    const target = document.createElement('button');
+    target.dataset.cleanupTarget = 'target';
+    target.textContent = 'Terminal replacement';
+    root.append(target);
+    let active = false;
+    let scope;
+    let controller;
+    let replacementScope;
+    let replacementController;
+    let reentries = 0;
+    const errors = [];
+    const name = (candidate) => candidate?.dataset?.cleanupTarget ?? null;
+
+    EventTarget.prototype.addEventListener = function addEventListener(
+      type,
+      listener,
+      options,
+    ) {
+      const result = nativeAdd.call(this, type, listener, options);
+      if (type === 'scroll' && name(this) !== null) scrollAdds.push(name(this));
+      return result;
+    };
+    EventTarget.prototype.removeEventListener = function removeEventListener(
+      type,
+      listener,
+      options,
+    ) {
+      const result = nativeRemove.call(this, type, listener, options);
+      if (type === 'scroll' && name(this) !== null) scrollRemoves.push(name(this));
+      if (type === 'scroll' && this === inner && active) {
+        active = false;
+        reentries += 1;
+        scope.destroy();
+        scope.destroy();
+        const { createShadowScope } = window.__terminalCleanupModule;
+        replacementScope = createShadowScope(root);
+        replacementController = replacementScope.annotate(target, {
+          mark: 'underline', note: null, duration: 0,
+        });
+        replacementController.show();
+        throw cause;
+      }
+      return result;
+    };
+    window.ResizeObserver = class TrackingResizeObserver {
+      constructor(callback) {
+        this.native = new NativeResizeObserver(callback);
+      }
+
+      observe(candidate) {
+        if (name(candidate) !== null) observed.push(name(candidate));
+        this.native.observe(candidate);
+      }
+
+      unobserve(candidate) {
+        if (name(candidate) !== null) unobserved.push(name(candidate));
+        this.native.unobserve(candidate);
+      }
+
+      disconnect() {
+        this.native.disconnect();
+      }
+    };
+
+    try {
+      window.__terminalCleanupModule = await import('/src/shadow.js');
+      const { createShadowScope } = window.__terminalCleanupModule;
+      root.addEventListener('hana:error', (event) => errors.push(event.detail));
+      scope = createShadowScope(root);
+      controller = scope.annotate(target, {
+        mark: 'box', note: null, duration: 0,
+      });
+      controller.show();
+      await controller.finished;
+      active = true;
+      controller.destroy();
+      await replacementController.finished;
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      });
+      const duringReplacement = {
+        errorCount: errors.length,
+        observed: [...observed],
+        overlays: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+        reentries,
+        replacementState: replacementController.state,
+        scrollAdds: [...scrollAdds],
+        scrollRemoves: [...scrollRemoves],
+        unobserved: [...unobserved],
+      };
+      replacementController.destroy();
+      replacementScope.destroy();
+      replacementScope = null;
+      const afterReplacement = {
+        overlays: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+        scrollRemoves: [...scrollRemoves],
+        unobserved: [...unobserved],
+      };
+      return { afterReplacement, duringReplacement };
+    } finally {
+      active = false;
+      replacementScope?.destroy();
+      scope?.destroy();
+      stage.remove();
+      EventTarget.prototype.addEventListener = nativeAdd;
+      EventTarget.prototype.removeEventListener = nativeRemove;
+      window.ResizeObserver = NativeResizeObserver;
+      delete window.__terminalCleanupModule;
+    }
+  });
+
+  expect(result.duringReplacement).toEqual({
+    errorCount: 0,
+    observed: [
+      'target', 'inner', 'outer',
+      'target', 'inner', 'outer',
+    ],
+    overlays: 1,
+    reentries: 1,
+    replacementState: 'visible',
+    scrollAdds: ['inner', 'outer', 'inner', 'outer'],
+    scrollRemoves: ['inner', 'outer'],
+    unobserved: ['target', 'inner', 'outer'],
+  });
+  expect(result.afterReplacement).toEqual({
+    overlays: 0,
+    scrollRemoves: ['inner', 'outer', 'inner', 'outer'],
+    unobserved: [
+      'target', 'inner', 'outer',
+      'target', 'inner', 'outer',
+    ],
+  });
+});
+
 test('reentrant scope destroy during MutationObserver root registration leaves a reusable root', async ({
   page,
 }) => {
