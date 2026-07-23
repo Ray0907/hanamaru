@@ -37,6 +37,28 @@ const componentSource = String.raw`
     second(controller) {
       remember(controller, state.secondTransitions)
     },
+    reenterDestroy(controller) {
+      remember(controller, state.transitions)
+      if (controller !== null) {
+        state.actionUpdate({
+          enabled: false,
+          mark: 'underline',
+          onController: controllerHandlers.record,
+          onError: errorHandlers.record,
+        })
+      }
+    },
+    reenterUpdate(controller) {
+      remember(controller, state.transitions)
+      if (controller !== null) {
+        state.actionUpdate({
+          mark: 'circle',
+          note: 'Nested winner',
+          onController: controllerHandlers.record,
+          onError: errorHandlers.record,
+        })
+      }
+    },
     throw(controller) {
       remember(controller, state.transitions)
       state.callbackSnapshots.push({
@@ -169,6 +191,19 @@ const componentSource = String.raw`
     }
   }
 
+  function instrumentedAnnotation(node, value) {
+    const action = annotation(node, value)
+    const update = (next) => action.update(next)
+    state.actionUpdate = update
+    return {
+      update,
+      destroy() {
+        action.destroy()
+        if (state.actionUpdate === update) state.actionUpdate = undefined
+      },
+    }
+  }
+
   let targetKey = raw.targetKey
   let present = raw.present
   let hidden = raw.hidden
@@ -192,7 +227,7 @@ const componentSource = String.raw`
       data-target=""
       style:display={hidden ? 'none' : 'inline-block'}
       use:patchListener={patched}
-      use:annotation={input}
+      use:instrumentedAnnotation={input}
     >Claim</span>
   {/if}
 {/key}
@@ -205,6 +240,7 @@ const applicationSource = String.raw`
     unmount,
   } from 'svelte'
   import Claim from './Claim.js'
+  import { annotation } from 'hanamaru-annotations/svelte'
 
   const state = window.__svelteAnnotation = {
     callbackSnapshots: [],
@@ -285,6 +321,135 @@ const applicationSource = String.raw`
         state.destroyCalls += 1
         return original()
       }
+    },
+    directReentry(mode) {
+      const node = document.createElement('span')
+      node.dataset.directTarget = mode
+      node.textContent = 'Direct target'
+      document.body.append(node)
+      const transitions = []
+      let controller = null
+      let action
+      let getterCause = null
+      const onController = (value) => {
+        controller = value
+        transitions.push(value === null ? null : value)
+      }
+      action = annotation(node, {
+        mark: 'underline',
+        duration: 0,
+        onController,
+      })
+      const first = controller
+      const outer = {
+        duration: 0,
+        onController,
+      }
+      Object.defineProperty(outer, 'mark', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          if (mode === 'nested-update') {
+            action.update({
+              mark: 'circle',
+              note: 'Nested winner',
+              duration: 0,
+              onController,
+            })
+            return 'box'
+          }
+          if (mode === 'nested-update-throw') {
+            action.update({
+              mark: 'circle',
+              note: 'Nested winner',
+              duration: 0,
+              onController,
+            })
+            getterCause = new Error('getter failed after nested update')
+            throw getterCause
+          }
+          action.destroy()
+          if (mode === 'destroy-throw') {
+            getterCause = new Error('getter failed after destroy')
+            throw getterCause
+          }
+          return 'box'
+        },
+      })
+      let thrown = null
+      try {
+        action.update(outer)
+      } catch (error) {
+        thrown = error
+      }
+      const result = {
+        annotationMark: document
+          .querySelector('[data-hana-overlay] .hana-annotation')
+          ?.getAttribute('data-hana-mark') ?? null,
+        controllerState: first.state,
+        exactGetterCause: getterCause !== null && thrown === getterCause,
+        overlays: document.querySelectorAll('[data-hana-overlay]').length,
+        thrown: thrown?.message ?? null,
+        transitionCount: transitions.length,
+        transitionNulls: transitions.filter((value) => value === null).length,
+      }
+      action.destroy()
+      node.remove()
+      return result
+    },
+    directCallbackReentry(mode) {
+      const node = document.createElement('span')
+      node.dataset.directCallbackTarget = mode
+      node.textContent = 'Callback target'
+      document.body.append(node)
+      const transitions = []
+      const callbackCause = new Error('controller callback failed')
+      let action
+      let controller = null
+      const record = (value) => {
+        controller = value
+        transitions.push(value === null ? null : value)
+      }
+      action = annotation(node, {
+        enabled: false,
+        mark: 'underline',
+        onController: record,
+      })
+      const reenter = (value) => {
+        record(value)
+        if (value === null) return
+        if (mode === 'update-throw') {
+          action.update({
+            mark: 'circle',
+            note: 'Nested before callback throw',
+            onController: record,
+          })
+        } else {
+          action.destroy()
+        }
+        throw callbackCause
+      }
+      let thrown = null
+      try {
+        action.update({
+          enabled: true,
+          mark: 'underline',
+          onController: reenter,
+        })
+      } catch (error) {
+        thrown = error
+      }
+      const result = {
+        current: controller === null ? null : controller.state,
+        exactCallbackCause: thrown === callbackCause,
+        overlays: document.querySelectorAll('[data-hana-overlay]').length,
+        thrown: thrown?.message ?? null,
+        transitionCount: transitions.length,
+        transitionNulls: transitions.filter((value) => value === null).length,
+      }
+      action.destroy()
+      node.remove()
+      return result
     },
     refreshHidden() {
       const controller = state.current
@@ -486,6 +651,128 @@ test('uses fresh callbacks without a controller transition or remount', async ({
     firstErrors: 0,
     secondErrors: 1,
     secondTransitions: [null],
+  })
+})
+
+test('keeps a nested direct-action update authoritative over a stale accessor snapshot', async ({ page }) => {
+  expect(await page.evaluate(
+    () => window.fixture.directReentry('nested-update'),
+  )).toEqual({
+    annotationMark: 'circle',
+    controllerState: 'showing',
+    exactGetterCause: false,
+    overlays: 1,
+    thrown: null,
+    transitionCount: 1,
+    transitionNulls: 0,
+  })
+})
+
+test('a direct-action accessor can destroy reentrantly without a stale remount', async ({ page }) => {
+  expect(await page.evaluate(
+    () => window.fixture.directReentry('destroy'),
+  )).toEqual({
+    annotationMark: null,
+    controllerState: 'destroyed',
+    exactGetterCause: false,
+    overlays: 0,
+    thrown: null,
+    transitionCount: 2,
+    transitionNulls: 1,
+  })
+})
+
+test('an accessor throw after reentrant destroy stays authoritative without output', async ({ page }) => {
+  expect(await page.evaluate(
+    () => window.fixture.directReentry('destroy-throw'),
+  )).toEqual({
+    annotationMark: null,
+    controllerState: 'destroyed',
+    exactGetterCause: true,
+    overlays: 0,
+    thrown: 'getter failed after destroy',
+    transitionCount: 2,
+    transitionNulls: 1,
+  })
+})
+
+test('an accessor throw after a nested update preserves both the winner and exact cause', async ({ page }) => {
+  expect(await page.evaluate(
+    () => window.fixture.directReentry('nested-update-throw'),
+  )).toEqual({
+    annotationMark: 'circle',
+    controllerState: 'showing',
+    exactGetterCause: true,
+    overlays: 1,
+    thrown: 'getter failed after nested update',
+    transitionCount: 1,
+    transitionNulls: 0,
+  })
+})
+
+for (const mode of ['update-throw', 'destroy-throw']) {
+  test(`a reentrant ${mode} keeps the exact onController throw authoritative after cleanup`, async ({ page }) => {
+    expect(await page.evaluate(
+      (kind) => window.fixture.directCallbackReentry(kind),
+      mode,
+    )).toEqual({
+      current: null,
+      exactCallbackCause: true,
+      overlays: 0,
+      thrown: 'controller callback failed',
+      transitionCount: 2,
+      transitionNulls: 1,
+    })
+  })
+}
+
+test('real compiled action callbacks can install a nested winner or destroy ownership', async ({ page }) => {
+  await render(page, {
+    controllerMode: 'reenterUpdate',
+    enabled: false,
+  })
+  await render(page, {
+    controllerMode: 'reenterUpdate',
+    enabled: true,
+  })
+  await page.waitForFunction(
+    () => document.querySelector('.hana-annotation')
+      ?.getAttribute('data-hana-mark') === 'circle',
+  )
+  expect(await page.evaluate(() => ({
+    mark: document.querySelector('.hana-annotation')
+      ?.getAttribute('data-hana-mark') ?? null,
+    overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    transitions: window.__svelteAnnotation.transitions,
+  }))).toEqual({
+    mark: 'circle',
+    overlays: 1,
+    transitions: [1],
+  })
+
+  await page.reload()
+})
+
+test('real compiled action callback reentrant destroy leaves exact cleanup transitions', async ({ page }) => {
+  await render(page, {
+    controllerMode: 'reenterDestroy',
+    enabled: false,
+  })
+  await render(page, {
+    controllerMode: 'reenterDestroy',
+    enabled: true,
+  })
+  await page.waitForFunction(
+    () => window.__svelteAnnotation.current === null,
+  )
+  expect(await page.evaluate(() => ({
+    current: window.__svelteAnnotation.current,
+    overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    transitions: window.__svelteAnnotation.transitions,
+  }))).toEqual({
+    current: null,
+    overlays: 0,
+    transitions: [1, null],
   })
 })
 

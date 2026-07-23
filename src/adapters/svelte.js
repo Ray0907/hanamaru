@@ -90,6 +90,7 @@ function sameRequest(previous, prepared) {
 
 export function annotation(node, input) {
   let destroyed = false;
+  let operationEpoch = 0;
   const slot = {
     onController: undefined,
     onError: undefined,
@@ -105,9 +106,15 @@ export function annotation(node, input) {
     return slot.onError?.(error, controller);
   }
 
+  function operationIsCurrent(operation) {
+    return !destroyed && operation === operationEpoch;
+  }
+
   function apply(nextInput, initial) {
+    const operation = ++operationEpoch;
     if (destroyed) return;
     const request = prepareSvelteRequest(nextInput);
+    if (!operationIsCurrent(operation)) return;
     const { prepared } = request;
     slot.onController = request.onController;
     slot.onError = prepared.config.onError;
@@ -126,8 +133,10 @@ export function annotation(node, input) {
       enabled: prepared.config.enabled,
       onError: handleError,
     };
+    if (!operationIsCurrent(operation)) return;
     if (initial) owner.mount(node, prepared.options, config);
     else owner.update(node, prepared.options, config);
+    if (!operationIsCurrent(operation)) return;
   }
 
   function update(nextInput) {
@@ -135,6 +144,7 @@ export function annotation(node, input) {
   }
 
   function destroy() {
+    operationEpoch += 1;
     if (destroyed) return;
     destroyed = true;
     const owner = slot.owner;
