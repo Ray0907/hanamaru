@@ -414,6 +414,11 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
 
         <aside aria-labelledby="inspector-output-title" data-inspector-output hidden>
           <h3 id="inspector-output-title">Current output</h3>
+          <button type="button" aria-controls="inspector-output-body"
+            aria-expanded="false" data-inspector-output-toggle hidden>
+            Expand output
+          </button>
+          <div id="inspector-output-body" data-inspector-output-body>
           <div role="tablist" aria-label="Inspector output format">
             <button id="inspector-tab-html" type="button" role="tab"
               aria-selected="false" aria-controls="inspector-panel-html" tabindex="-1">
@@ -431,19 +436,19 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
           <section id="inspector-panel-html" role="tabpanel"
             aria-labelledby="inspector-tab-html" hidden>
             <label for="inspector-output-html">HTML output</label>
-            <textarea id="inspector-output-html" rows="10" readonly
+            <textarea id="inspector-output-html" rows="10" readonly tabindex="-1"
               data-inspector-output-value="html"></textarea>
           </section>
           <section id="inspector-panel-javascript" role="tabpanel"
             aria-labelledby="inspector-tab-javascript">
             <label for="inspector-output-javascript">JavaScript output</label>
-            <textarea id="inspector-output-javascript" rows="10" readonly
+            <textarea id="inspector-output-javascript" rows="10" readonly tabindex="-1"
               data-inspector-output-value="javascript"></textarea>
           </section>
           <section id="inspector-panel-json" role="tabpanel"
             aria-labelledby="inspector-tab-json" hidden>
             <label for="inspector-output-json">JSON output</label>
-            <textarea id="inspector-output-json" rows="10" readonly
+            <textarea id="inspector-output-json" rows="10" readonly tabindex="-1"
               data-inspector-output-value="json"></textarea>
           </section>
 
@@ -490,6 +495,7 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
             <input id="inspector-seed" type="text" value="inspector-proof"
               data-inspector-option="seed">
           </details>
+          </div>
         </aside>
 
         <dialog aria-labelledby="inspector-command-title" data-inspector-palette>

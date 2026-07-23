@@ -141,6 +141,8 @@ export function createAnnotationInspector(root = document) {
   const noteError = inspector?.querySelector('#inspector-note-error');
   const noteDone = inspector?.querySelector('[data-inspector-note-done]');
   const output = inspector?.querySelector('[data-inspector-output]');
+  const outputToggle = inspector?.querySelector('[data-inspector-output-toggle]');
+  const outputBody = inspector?.querySelector('[data-inspector-output-body]');
   const outputTabs = [...(inspector?.querySelectorAll(
     '[data-inspector-output] [role="tab"]',
   ) ?? [])];
@@ -183,6 +185,8 @@ export function createAnnotationInspector(root = document) {
     noteError,
     noteDone,
     output,
+    outputToggle,
+    outputBody,
     copy,
     copyFallbackWrap,
     copyFallback,
@@ -219,10 +223,14 @@ export function createAnnotationInspector(root = document) {
   let clipboardOperationEpoch = 0;
   let listenersAttached = false;
   let selectionFrame = 0;
+  let positionFrame = 0;
+  let activeMarkIndex = 0;
+  let outputExpanded = false;
   let unregisterFlower = null;
   let disposed = false;
   const uiAbort = new AbortController();
   const draft = { ...DEFAULT_OPTIONS };
+  const mobileQuery = window.matchMedia('(max-width: 560px)');
 
   function announce(message) {
     status.textContent = message;
@@ -254,6 +262,106 @@ export function createAnnotationInspector(root = document) {
     motion.value = draft.motion;
     seed.value = draft.seed;
     addNote.textContent = 'Add note';
+    setActiveMark(0);
+  }
+
+  function setActiveMark(index, { focus = false } = {}) {
+    activeMarkIndex = (index + markButtons.length) % markButtons.length;
+    for (const [buttonIndex, button] of markButtons.entries()) {
+      button.tabIndex = buttonIndex === activeMarkIndex ? 0 : -1;
+    }
+    if (focus) markButtons[activeMarkIndex].focus();
+  }
+
+  function syncOutputDisclosure() {
+    const mobile = mobileQuery.matches;
+    const expanded = !mobile || outputExpanded;
+    outputToggle.hidden = !mobile;
+    outputToggle.setAttribute('aria-expanded', String(expanded));
+    outputToggle.textContent = expanded ? 'Collapse output' : 'Expand output';
+    outputBody.hidden = !expanded;
+    output.dataset.expanded = String(expanded);
+  }
+
+  function setOutputExpanded(expanded) {
+    outputExpanded = expanded;
+    syncOutputDisclosure();
+    positionToolbar();
+  }
+
+  function ensureActiveRangeVisible() {
+    if (!mobileQuery.matches || activeRange === null || toolbar.hidden) return;
+    const selection = activeRange.getBoundingClientRect();
+    const header = inspector.querySelector(':scope > header').getBoundingClientRect();
+    const statusRect = status.getBoundingClientRect();
+    const lowerLayer = output.hidden
+      ? toolbar.getBoundingClientRect()
+      : output.getBoundingClientRect();
+    const upper = Math.max(header.bottom, statusRect.bottom) + 12;
+    const lower = lowerLayer.top - 12;
+    if (selection.bottom > lower) {
+      window.scrollBy({ behavior: 'instant', top: selection.bottom - lower });
+    } else if (selection.top < upper) {
+      window.scrollBy({ behavior: 'instant', top: selection.top - upper });
+    }
+  }
+
+  function scheduleToolbarPosition() {
+    if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
+    positionFrame = requestAnimationFrame(positionToolbar);
+  }
+
+  function positionToolbar() {
+    positionFrame = 0;
+    const inspectorHeader = inspector.querySelector(':scope > header');
+    if (inspector.isConnected && inspectorHeader !== null) {
+      status.style.top = `${Math.ceil(inspectorHeader.getBoundingClientRect().bottom + 6)}px`;
+    }
+    if (toolbar.hidden || activeRange === null || model.state === 'closed') return;
+    if (mobileQuery.matches) {
+      toolbar.style.removeProperty('left');
+      toolbar.style.removeProperty('top');
+      toolbar.style.removeProperty('max-width');
+      inspector.style.setProperty(
+        '--inspector-toolbar-height',
+        `${Math.ceil(toolbar.getBoundingClientRect().height)}px`,
+      );
+      ensureActiveRangeVisible();
+      return;
+    }
+    const visual = window.visualViewport;
+    const viewport = {
+      bottom: (visual?.offsetTop ?? 0) + (visual?.height ?? window.innerHeight),
+      left: visual?.offsetLeft ?? 0,
+      right: (visual?.offsetLeft ?? 0) + (visual?.width ?? window.innerWidth),
+      top: visual?.offsetTop ?? 0,
+    };
+    const margin = 12;
+    const gap = 12;
+    const selection = activeRange.getBoundingClientRect();
+    const rail = output.hidden ? null : output.getBoundingClientRect();
+    const availableRight = rail === null
+      ? viewport.right - margin
+      : Math.min(viewport.right - margin, rail.left - gap);
+    const availableWidth = Math.max(280, availableRight - viewport.left - (margin * 2));
+    toolbar.style.maxWidth = `${availableWidth}px`;
+    const rect = toolbar.getBoundingClientRect();
+    const headerBottom = Math.max(
+      inspectorHeader.getBoundingClientRect().bottom,
+      status.getBoundingClientRect().bottom,
+    );
+    const minimumTop = Math.max(viewport.top + margin, headerBottom + gap);
+    const left = Math.min(
+      Math.max(viewport.left + margin, selection.left),
+      Math.max(viewport.left + margin, availableRight - rect.width),
+    );
+    const above = selection.top - rect.height - gap;
+    const below = selection.bottom + gap;
+    const top = above >= minimumTop
+      ? above
+      : Math.min(below, viewport.bottom - rect.height - margin);
+    toolbar.style.left = `${Math.round(left)}px`;
+    toolbar.style.top = `${Math.round(Math.max(minimumTop, top))}px`;
   }
 
   function ensureFlowerPlugin() {
@@ -386,6 +494,10 @@ export function createAnnotationInspector(root = document) {
     root.addEventListener('keyup', scheduleSelection);
     root.addEventListener('keydown', onInspectorKeydown);
     window.addEventListener('hashchange', closeForNavigation);
+    window.addEventListener('resize', scheduleToolbarPosition);
+    window.addEventListener('scroll', scheduleToolbarPosition, true);
+    window.visualViewport?.addEventListener('resize', scheduleToolbarPosition);
+    window.visualViewport?.addEventListener('scroll', scheduleToolbarPosition);
   }
 
   function removeListeners() {
@@ -396,8 +508,14 @@ export function createAnnotationInspector(root = document) {
     root.removeEventListener('keyup', scheduleSelection);
     root.removeEventListener('keydown', onInspectorKeydown);
     window.removeEventListener('hashchange', closeForNavigation);
+    window.removeEventListener('resize', scheduleToolbarPosition);
+    window.removeEventListener('scroll', scheduleToolbarPosition, true);
+    window.visualViewport?.removeEventListener('resize', scheduleToolbarPosition);
+    window.visualViewport?.removeEventListener('scroll', scheduleToolbarPosition);
     if (selectionFrame !== 0) cancelAnimationFrame(selectionFrame);
+    if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
     selectionFrame = 0;
+    positionFrame = 0;
   }
 
   function destroyOwned() {
@@ -423,6 +541,8 @@ export function createAnnotationInspector(root = document) {
         openSessionEpoch += 1;
         clipboardOperationEpoch += 1;
         resetDraft();
+        outputExpanded = false;
+        syncOutputDisclosure();
         ensureFlowerPlugin();
         canvas.after(inspector);
         inspector.hidden = false;
@@ -452,6 +572,7 @@ export function createAnnotationInspector(root = document) {
         break;
       case 'show-toolbar':
         toolbar.hidden = false;
+        scheduleToolbarPosition();
         announce('Selection ready. Choose an annotation mark.');
         break;
       case 'clear-selection':
@@ -487,6 +608,8 @@ export function createAnnotationInspector(root = document) {
         break;
       case 'show-output':
         output.hidden = false;
+        syncOutputDisclosure();
+        scheduleToolbarPosition();
         break;
       case 'hide-output':
         output.hidden = true;
@@ -531,6 +654,7 @@ export function createAnnotationInspector(root = document) {
         break;
       case 'reuse-controller':
         output.hidden = false;
+        syncOutputDisclosure();
         announce('Editing the applied annotation.');
         break;
       case 'focus-first-editor':
@@ -544,6 +668,8 @@ export function createAnnotationInspector(root = document) {
       case 'close-layers':
         closeTransient('note');
         closeTransient('palette');
+        outputExpanded = false;
+        syncOutputDisclosure();
         output.hidden = true;
         toolbar.hidden = true;
         copyFallbackWrap.hidden = true;
@@ -578,6 +704,7 @@ export function createAnnotationInspector(root = document) {
     for (const effect of result.effects) interpret(effect, context);
     model = result.model;
     updateState();
+    positionToolbar();
   }
 
   function chooseMark(mark) {
@@ -713,12 +840,25 @@ export function createAnnotationInspector(root = document) {
     listenerOptions,
   );
   exit.addEventListener('click', () => dispatch({ type: 'close' }), listenerOptions);
-  for (const button of markButtons) {
+  for (const [index, button] of markButtons.entries()) {
     button.addEventListener(
       'click',
-      () => chooseMark(button.dataset.inspectorMark),
+      () => {
+        setActiveMark(index);
+        chooseMark(button.dataset.inspectorMark);
+      },
       listenerOptions,
     );
+    button.addEventListener('keydown', (event) => {
+      let next = null;
+      if (event.key === 'ArrowRight') next = activeMarkIndex + 1;
+      else if (event.key === 'ArrowLeft') next = activeMarkIndex - 1;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = markButtons.length - 1;
+      if (next === null) return;
+      event.preventDefault();
+      setActiveMark(next, { focus: true });
+    }, listenerOptions);
   }
   addNote.addEventListener('click', () => openNoteEditor(addNote), listenerOptions);
   note.addEventListener('input', updateNote, listenerOptions);
@@ -760,6 +900,13 @@ export function createAnnotationInspector(root = document) {
     }, listenerOptions);
   }
   copy.addEventListener('click', () => void copyCurrentOutput(), listenerOptions);
+  outputToggle.addEventListener('click', () => {
+    setOutputExpanded(!outputExpanded);
+  }, listenerOptions);
+  mobileQuery.addEventListener('change', () => {
+    syncOutputDisclosure();
+    scheduleToolbarPosition();
+  }, listenerOptions);
 
   palette.addEventListener('cancel', (event) => {
     event.preventDefault();
@@ -797,6 +944,7 @@ export function createAnnotationInspector(root = document) {
   }
 
   resetDraft();
+  syncOutputDisclosure();
   selectOutput('javascript', { announceChange: false });
   updateState();
 

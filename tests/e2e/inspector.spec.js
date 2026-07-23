@@ -98,7 +98,7 @@ test('five-second path authors one real annotation and closes without disturbing
   expect(failures).toEqual([]);
 });
 
-test('seven semantic mark controls include and render the example flower plugin', async ({
+test('seven marks include six built-ins and render the visible example flower plugin', async ({
   page,
 }) => {
   const failures = capturePageFailures(page);
@@ -136,7 +136,7 @@ test('seven semantic mark controls include and render the example flower plugin'
   expect(failures).toEqual([]);
 });
 
-test('note editor validates 280 Unicode code points and Escape restores its opener', async ({
+test('note editor validation enforces 280 Unicode code points and Escape restores its opener', async ({
   page,
 }) => {
   const failures = capturePageFailures(page);
@@ -634,4 +634,540 @@ test('Inspector runtime imports use only documented bare public package specifie
   expect(inspectorSource).not.toMatch(/from\s+['"](?:\.\.\/)*src\//u);
   expect(inspectorSource).not.toMatch(/\.(?:removeAllRanges|addRange)\s*\(/u);
   expect(demoSource).toContain("await import('/demo/inspector.js')");
+});
+
+test('desktop Inspector keeps the Range toolbar and fixed output rail inside the visual viewport', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/');
+  const inspector = await openInspector(page);
+  await selectInspectorWord(page);
+
+  const toolbar = inspector.getByRole('toolbar', { name: 'Annotation marks' });
+  await expect(toolbar).toBeVisible();
+  await expect.poll(() => toolbar.evaluate((node) => getComputedStyle(node).position))
+    .toBe('fixed');
+
+  const selectedGeometry = await page.evaluate(() => {
+    const range = getSelection().getRangeAt(0);
+    const selection = range.getBoundingClientRect();
+    const toolbarNode = document.querySelector('[data-inspector-toolbar]');
+    const toolbarRect = toolbarNode.getBoundingClientRect();
+    const visual = visualViewport;
+    const intersects = selection.left < toolbarRect.right
+      && selection.right > toolbarRect.left
+      && selection.top < toolbarRect.bottom
+      && selection.bottom > toolbarRect.top;
+    return {
+      intersects,
+      selection: {
+        bottom: selection.bottom,
+        left: selection.left,
+        right: selection.right,
+        top: selection.top,
+      },
+      toolbar: {
+        bottom: toolbarRect.bottom,
+        left: toolbarRect.left,
+        right: toolbarRect.right,
+        top: toolbarRect.top,
+      },
+      visual: {
+        bottom: visual.offsetTop + visual.height,
+        left: visual.offsetLeft,
+        right: visual.offsetLeft + visual.width,
+        top: visual.offsetTop,
+      },
+    };
+  });
+  expect(selectedGeometry.intersects).toBe(false);
+  expect(selectedGeometry.toolbar.left).toBeGreaterThanOrEqual(selectedGeometry.visual.left + 8);
+  expect(selectedGeometry.toolbar.right).toBeLessThanOrEqual(selectedGeometry.visual.right - 8);
+  expect(selectedGeometry.toolbar.top).toBeGreaterThanOrEqual(selectedGeometry.visual.top + 8);
+  expect(selectedGeometry.toolbar.bottom).toBeLessThanOrEqual(selectedGeometry.visual.bottom - 8);
+
+  await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
+  const rail = inspector.locator('[data-inspector-output]');
+  await expect(rail).toBeVisible();
+  const railGeometry = await rail.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const visual = visualViewport;
+    return {
+      bottom: rect.bottom,
+      left: rect.left,
+      position: getComputedStyle(node).position,
+      right: rect.right,
+      top: rect.top,
+      visualBottom: visual.offsetTop + visual.height,
+      visualLeft: visual.offsetLeft,
+      visualRight: visual.offsetLeft + visual.width,
+      visualTop: visual.offsetTop,
+    };
+  });
+  expect(railGeometry.position).toBe('fixed');
+  expect(railGeometry.left).toBeGreaterThanOrEqual(railGeometry.visualLeft + 8);
+  expect(railGeometry.right).toBeLessThanOrEqual(railGeometry.visualRight - 8);
+  expect(railGeometry.top).toBeGreaterThanOrEqual(railGeometry.visualTop + 8);
+  expect(railGeometry.bottom).toBeLessThanOrEqual(railGeometry.visualBottom - 8);
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+  )).toBe(true);
+});
+
+test('roving seven marks support arrows Home End and activation with one tab stop', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const inspector = await openInspector(page);
+  await selectInspectorWord(page);
+  const marks = inspector.locator('[data-inspector-mark]');
+  await expect(marks).toHaveCount(7);
+  await expect(inspector.locator('[data-inspector-mark][tabindex="0"]')).toHaveCount(1);
+  await expect(inspector.locator('[data-inspector-mark][tabindex="-1"]')).toHaveCount(6);
+
+  const underline = inspector.getByRole('button', { name: 'Underline', exact: true });
+  await underline.focus();
+  await underline.press('End');
+  const flower = inspector.getByRole('button', {
+    name: 'Hanamaru flower (example plugin)',
+  });
+  await expect(flower).toBeFocused();
+  await expect(flower).toHaveAttribute('tabindex', '0');
+  await flower.press('Home');
+  await expect(underline).toBeFocused();
+  await underline.press('ArrowLeft');
+  await expect(flower).toBeFocused();
+  await flower.press('ArrowRight');
+  await expect(underline).toBeFocused();
+  await underline.press('Enter');
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
+  await expect(underline).toHaveAttribute('aria-pressed', 'true');
+  await underline.press(' ');
+  await expect(underline).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('Tab order follows Exit mark note actions output Copy and Options summary', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  const exit = inspector.getByRole('button', { name: 'Exit Inspector' });
+  await exit.focus();
+  await expect(exit).toBeFocused();
+
+  const sequence = [
+    inspector.getByRole('button', { name: 'Underline', exact: true }),
+    inspector.getByRole('button', { name: 'Add note' }),
+    inspector.getByRole('button', { name: 'Apply annotation' }),
+    inspector.getByRole('button', { name: 'Cancel preview' }),
+    inspector.getByRole('tab', { name: 'JavaScript' }),
+    inspector.getByRole('button', { name: 'Copy current output' }),
+    inspector.getByText('Options', { exact: true }),
+  ];
+  for (const expected of sequence) {
+    await page.keyboard.press('Tab');
+    await expect(expected).toBeFocused();
+  }
+  await expect(inspector.locator('[data-inspector-output-value][tabindex="0"]')).toHaveCount(0);
+
+  const focusStyle = await sequence.at(-1).evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth,
+    };
+  });
+  expect(focusStyle.outlineStyle).not.toBe('none');
+  expect(Number.parseFloat(focusStyle.outlineWidth)).toBeGreaterThanOrEqual(2);
+
+  const disabled = await inspector.getByRole('button', { name: 'Apply annotation' })
+    .evaluate((node) => {
+      node.disabled = true;
+      const style = getComputedStyle(node);
+      const result = {
+        cursor: style.cursor,
+        opacity: Number(style.opacity),
+        textDecoration: style.textDecorationLine,
+      };
+      node.disabled = false;
+      return result;
+    });
+  expect(disabled.opacity).toBeLessThan(1);
+  expect(disabled.cursor).toBe('not-allowed');
+  expect(disabled.textDecoration).toContain('line-through');
+});
+
+test('Escape focus returns from note to its exact opener then closes Inspector', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  const addNote = inspector.getByRole('button', { name: 'Add note' });
+  await addNote.click();
+  await expect(inspector.getByRole('textbox', { name: 'Annotation note' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(addNote).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(inspector).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Open Annotation Inspector' })).toBeFocused();
+});
+
+test('390px mobile dock and collapsed bottom sheet preserve the selected Range without overflow', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  const inspector = await openInspector(page);
+  await selectInspectorWord(page);
+  const toolbar = inspector.getByRole('toolbar', { name: 'Annotation marks' });
+  await expect(toolbar).toBeVisible();
+
+  const selectedDockGeometry = await page.evaluate(() => {
+    const selected = getSelection().getRangeAt(0).getBoundingClientRect();
+    const dock = document.querySelector('[data-inspector-toolbar]').getBoundingClientRect();
+    const visual = visualViewport;
+    return {
+      dock: {
+        bottom: dock.bottom,
+        left: dock.left,
+        position: getComputedStyle(
+          document.querySelector('[data-inspector-toolbar]'),
+        ).position,
+        right: dock.right,
+        top: dock.top,
+      },
+      selected: {
+        bottom: selected.bottom,
+        left: selected.left,
+        right: selected.right,
+        top: selected.top,
+      },
+      visual: {
+        bottom: visual.offsetTop + visual.height,
+        left: visual.offsetLeft,
+        right: visual.offsetLeft + visual.width,
+        top: visual.offsetTop,
+      },
+    };
+  });
+  expect(selectedDockGeometry.dock.position).toBe('fixed');
+  expect(selectedDockGeometry.dock.left).toBeGreaterThanOrEqual(selectedDockGeometry.visual.left);
+  expect(selectedDockGeometry.dock.right).toBeLessThanOrEqual(selectedDockGeometry.visual.right);
+  expect(selectedDockGeometry.dock.bottom)
+    .toBeLessThanOrEqual(selectedDockGeometry.visual.bottom);
+  expect(selectedDockGeometry.selected.bottom)
+    .toBeLessThanOrEqual(selectedDockGeometry.dock.top - 8);
+
+  await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
+  const output = inspector.locator('[data-inspector-output]');
+  const disclosure = inspector.locator('[data-inspector-output-toggle]');
+  await expect(output).toBeVisible();
+  await expect(output).toHaveAttribute('data-expanded', 'false');
+  await expect(disclosure).toBeVisible();
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+  await expect(inspector.locator('[data-inspector-output-body]')).toBeHidden();
+
+  const collapsed = await output.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const dock = document.querySelector('[data-inspector-toolbar]').getBoundingClientRect();
+    return {
+      bottom: rect.bottom,
+      dockTop: dock.top,
+      height: rect.height,
+      left: rect.left,
+      position: getComputedStyle(node).position,
+      right: rect.right,
+      top: rect.top,
+    };
+  });
+  expect(collapsed.position).toBe('fixed');
+  expect(collapsed.height).toBeLessThanOrEqual(112);
+  expect(collapsed.bottom).toBeLessThanOrEqual(collapsed.dockTop);
+  expect(collapsed.left).toBeGreaterThanOrEqual(0);
+  expect(collapsed.right).toBeLessThanOrEqual(390);
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+  )).toBe(true);
+
+  await disclosure.click();
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+  await expect(disclosure).toHaveAccessibleName('Collapse output');
+  await expect(inspector.locator('[data-inspector-output-body]')).toBeVisible();
+  const expanded = await page.evaluate(() => {
+    const selected = getSelection().getRangeAt(0).getBoundingClientRect();
+    const sheet = document.querySelector('[data-inspector-output]').getBoundingClientRect();
+    const dock = document.querySelector('[data-inspector-toolbar]').getBoundingClientRect();
+    const intersects = selected.left < sheet.right
+      && selected.right > sheet.left
+      && selected.top < sheet.bottom
+      && selected.bottom > sheet.top;
+    return {
+      dockTop: dock.top,
+      intersects,
+      sheet: {
+        bottom: sheet.bottom,
+        left: sheet.left,
+        right: sheet.right,
+        top: sheet.top,
+      },
+      visualTop: visualViewport.offsetTop,
+    };
+  });
+  expect(expanded.sheet.left).toBeGreaterThanOrEqual(0);
+  expect(expanded.sheet.right).toBeLessThanOrEqual(390);
+  expect(expanded.sheet.top).toBeGreaterThanOrEqual(expanded.visualTop);
+  expect(expanded.sheet.bottom).toBeLessThanOrEqual(expanded.dockTop);
+  expect(expanded.intersects).toBe(false);
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+  )).toBe(true);
+});
+
+test('mobile note sheet is bounded and Escape focus keeps the dock reachable', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  const addNote = inspector.getByRole('button', { name: 'Add note' });
+  await addNote.click();
+  const editor = inspector.locator('[data-inspector-note-editor]');
+  await expect(editor).toBeVisible();
+  await expect(inspector.getByRole('textbox', { name: 'Annotation note' })).toBeFocused();
+
+  const geometry = await editor.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const dock = document.querySelector('[data-inspector-toolbar]').getBoundingClientRect();
+    return {
+      bottom: rect.bottom,
+      dockTop: dock.top,
+      height: rect.height,
+      left: rect.left,
+      position: getComputedStyle(node).position,
+      right: rect.right,
+      top: rect.top,
+      visualTop: visualViewport.offsetTop,
+    };
+  });
+  expect(geometry.position).toBe('fixed');
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(390);
+  expect(geometry.top).toBeGreaterThanOrEqual(geometry.visualTop);
+  expect(geometry.bottom).toBeLessThanOrEqual(geometry.dockTop);
+  expect(geometry.height).toBeLessThan(844);
+
+  await page.keyboard.press('Escape');
+  await expect(addNote).toBeFocused();
+  await expect(editor).toBeHidden();
+  await expect(inspector.getByRole('toolbar', { name: 'Annotation marks' })).toBeVisible();
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+  )).toBe(true);
+});
+
+test('mobile bottom sheet and fixed layers are removed by hash navigation', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  await inspector.getByRole('button', { name: 'Expand output' }).click();
+  await expect(inspector.locator('[data-inspector-output-body]')).toBeVisible();
+
+  await page.evaluate(() => {
+    window.location.hash = 'quick-start';
+  });
+  await expect(page).toHaveURL(/#quick-start$/);
+  await expect(page.locator('[data-inspector-root]')).toHaveCount(0);
+  await expect(page.locator('[data-inspector-toolbar], [data-inspector-output], [data-inspector-note-editor]'))
+    .toHaveCount(0);
+});
+
+test('command palette arrows wrap through all 12 commands and Enter activates the focused command', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  await page.keyboard.press('Control+K');
+  const palette = page.getByRole('dialog', { name: 'Inspector commands' });
+  const filter = palette.getByLabel('Filter commands');
+  const commands = palette.locator('[data-inspector-command]');
+  await expect(commands).toHaveCount(12);
+
+  await filter.press('ArrowDown');
+  await expect(commands.first()).toBeFocused();
+  await commands.first().press('ArrowUp');
+  await expect(commands.last()).toBeFocused();
+  await commands.last().press('ArrowDown');
+  await expect(commands.first()).toBeFocused();
+  await commands.nth(2).focus();
+  await commands.nth(2).press('Enter');
+  await expect(palette).toBeHidden();
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
+  await expect(inspector.getByRole('button', { name: 'Circle', exact: true }))
+    .toHaveAttribute('aria-pressed', 'true');
+});
+
+test('new selection after Apply destroys the old preview and authors against the replacement Range', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const initialAnnotations = await page.locator('.hana-annotation').count();
+  const inspector = await beginUnderlinePreview(page);
+  await inspector.getByRole('button', { name: 'Apply annotation' }).click();
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'applied');
+
+  await page.evaluate(() => {
+    const text = document.querySelector('#inspector-document-title').firstChild;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 1);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'selected');
+  await expect.poll(() => page.locator('.hana-annotation').count()).toBe(initialAnnotations);
+  expect(await page.evaluate(() => getSelection().toString())).toBe('A');
+
+  await inspector.getByRole('button', { name: 'Circle', exact: true }).click();
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
+  await expect(page.locator('.hana-annotation[data-hana-mark="circle"]:not([hidden])'))
+    .toHaveCount(1);
+  expect(await page.evaluate(() => getSelection().toString())).toBe('A');
+});
+
+test('reduced motion makes Inspector reveal and public system-motion annotation immediately final', async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  const inspector = await openInspector(page);
+  await selectInspectorWord(page);
+  await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
+  await expect(page.locator('.hana-annotation[data-hana-mark="underline"]:not([hidden])'))
+    .toHaveCount(1);
+
+  const motion = await page.evaluate(() => {
+    const inspectorNode = document.querySelector('[data-inspector-root]');
+    const targets = [
+      ...inspectorNode.querySelectorAll('*'),
+      ...document.querySelectorAll('.hana-annotation, .hana-note'),
+    ];
+    const styles = targets.map((node) => {
+      const style = getComputedStyle(node);
+      return {
+        animationDelay: style.animationDelay,
+        animationDuration: style.animationDuration,
+        transitionDelay: style.transitionDelay,
+        transitionDuration: style.transitionDuration,
+      };
+    });
+    const active = document.getAnimations().filter((animation) => (
+      animation.playState === 'running'
+      && (inspectorNode.contains(animation.effect?.target)
+        || animation.effect?.target?.closest?.('.hana-annotation, .hana-note'))
+    ));
+    return {
+      active: active.length,
+      styles,
+    };
+  });
+  expect(motion.active).toBe(0);
+  for (const style of motion.styles) {
+    expect(style.animationDuration.split(',').every((value) => Number.parseFloat(value) === 0))
+      .toBe(true);
+    expect(style.transitionDuration.split(',').every((value) => Number.parseFloat(value) === 0))
+      .toBe(true);
+  }
+});
+
+test('desktop Inspector uses one restrained reveal motion for the settled mark toolbar', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/');
+  const inspector = await openInspector(page);
+  await selectInspectorWord(page);
+  const toolbar = inspector.getByRole('toolbar', { name: 'Annotation marks' });
+  const motion = await toolbar.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      duration: Number.parseFloat(style.animationDuration) * 1000,
+      name: style.animationName,
+    };
+  });
+  expect(motion.name).toBe('inspector-reveal');
+  expect(motion.duration).toBeGreaterThanOrEqual(180);
+  expect(motion.duration).toBeLessThanOrEqual(700);
+});
+
+test('Inspector status docket stays visibly below its fixed header at desktop and mobile', async ({
+  page,
+}) => {
+  for (const viewport of [
+    { height: 900, width: 1280 },
+    { height: 844, width: 390 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/');
+    const inspector = await openInspector(page);
+    const geometry = await inspector.evaluate((node) => {
+      const header = node.querySelector(':scope > header').getBoundingClientRect();
+      const status = node.querySelector('[data-inspector-status]').getBoundingClientRect();
+      return {
+        headerBottom: header.bottom,
+        statusBottom: status.bottom,
+        statusHeight: status.height,
+        statusTop: status.top,
+        viewportBottom: visualViewport.offsetTop + visualViewport.height,
+      };
+    });
+    expect(geometry.statusHeight).toBeGreaterThanOrEqual(32);
+    expect(geometry.statusTop).toBeGreaterThanOrEqual(geometry.headerBottom + 4);
+    expect(geometry.statusBottom).toBeLessThanOrEqual(geometry.viewportBottom);
+    await inspector.getByRole('button', { name: 'Exit Inspector' }).click();
+  }
+});
+
+test('axe finds no Inspector violations in idle selected editing and applied states', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const inspector = await openInspector(page);
+  const analyze = async (state) => {
+    await expect(inspector).toHaveAttribute('data-inspector-state', state);
+    const results = await new AxeBuilder({ page })
+      .include('[data-inspector-root]')
+      .analyze();
+    expect(results.violations, `axe violations in ${state}`).toEqual([]);
+  };
+
+  await analyze('idle');
+  await selectInspectorWord(page);
+  await analyze('selected');
+  await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
+  await analyze('editing');
+  await inspector.getByRole('button', { name: 'Apply annotation' }).click();
+  await analyze('applied');
+});
+
+test('mobile bottom sheet axe state remains valid when collapsed and expanded', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  const inspector = await beginUnderlinePreview(page);
+  const analyze = async (state) => {
+    const results = await new AxeBuilder({ page })
+      .include('[data-inspector-root]')
+      .analyze();
+    expect(results.violations, `mobile sheet ${state}`).toEqual([]);
+  };
+
+  await analyze('collapsed');
+  await inspector.locator('[data-inspector-output-toggle]').click();
+  await expect(inspector.locator('[data-inspector-output-body]')).toBeVisible();
+  await analyze('expanded');
 });
