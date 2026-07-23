@@ -1,15 +1,13 @@
 import { createAnnotation, createAnnotationEnvironment } from './annotation.js';
 import { HanamaruTargetError } from './errors.js';
+import {
+  intrinsicDocumentView,
+  intrinsicRootForNode,
+  intrinsicRootKind,
+} from './shadow-target.js';
 
 function targetError(code, message, details) {
   return new HanamaruTargetError(code, message, details);
-}
-
-function rootKind(root) {
-  if (root?.nodeType === 9) return 'document';
-  if (root?.nodeType === 11 && root.host !== undefined) return 'shadow-root';
-  if (root?.nodeType === 11) return 'document-fragment';
-  return 'unknown';
 }
 
 function boundaryDocument(boundary) {
@@ -103,16 +101,20 @@ function validateSelection(options, selection, env) {
 
   const startDocument = boundaryDocument(range.startContainer);
   const endDocument = boundaryDocument(range.endContainer);
-  const startRoot = range.startContainer?.getRootNode?.();
-  const endRoot = range.endContainer?.getRootNode?.();
-  const details = { startRoot: rootKind(startRoot), endRoot: rootKind(endRoot) };
+  const startRoot = intrinsicRootForNode(range.startContainer);
+  const endRoot = intrinsicRootForNode(range.endContainer);
+  const details = {
+    startRoot: intrinsicRootKind(startRoot),
+    endRoot: intrinsicRootKind(endRoot),
+  };
   if (startDocument === undefined || startDocument === null
     || endDocument === undefined || endDocument === null
     || startDocument !== endDocument
     || !isConnectedBoundary(range.startContainer, startDocument)
     || !isConnectedBoundary(range.endContainer, endDocument)
     || startRoot !== endRoot
-    || (rootKind(startRoot) !== 'document' && rootKind(startRoot) !== 'shadow-root')) {
+    || (intrinsicRootKind(startRoot) !== 'document'
+      && intrinsicRootKind(startRoot) !== 'shadow-root')) {
     throw targetError(
       'HANA_TARGET_INVALID',
       'Selection range boundaries must be connected in one DOM root',
@@ -120,7 +122,7 @@ function validateSelection(options, selection, env) {
     );
   }
 
-  const documentView = startDocument.defaultView;
+  const documentView = intrinsicDocumentView(startDocument);
   if (documentView !== null && documentView !== undefined) {
     selectionRangeCount(current, documentView);
   }
@@ -131,7 +133,7 @@ function validateSelection(options, selection, env) {
       details,
     );
   }
-  if (rootKind(startRoot) === 'shadow-root' && env.root === undefined) {
+  if (intrinsicRootKind(startRoot) === 'shadow-root' && env.root === undefined) {
     throw targetError(
       'HANA_TARGET_SHADOW_UNSCOPED',
       'ShadowRoot selections require a Shadow scope',

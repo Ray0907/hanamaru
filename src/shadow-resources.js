@@ -131,6 +131,9 @@ function browserAdapter() {
     documentForRoot(root) {
       return contextFor(root).document;
     },
+    viewForRoot(root) {
+      return contextFor(root).view;
+    },
     acquireDocumentResources: acquireDocumentScheduler,
     rollbackDocumentResources(_document, raw) {
       releaseRawRecord(raw);
@@ -304,6 +307,7 @@ function environmentFor(record) {
     rootId,
     scopedShared,
     styleConfig,
+    view,
   } = record;
   const mirrors = record.mirrors;
   const knownMirrors = record.knownMirrors;
@@ -529,6 +533,7 @@ function environmentFor(record) {
   return Object.freeze({
     root,
     document,
+    view,
     styleConfig,
     rootId,
     lease: passiveLease,
@@ -626,6 +631,9 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
   const document = typeof activeAdapter.documentForRoot === 'function'
     ? activeAdapter.documentForRoot(root)
     : root.ownerDocument;
+  const view = typeof activeAdapter.viewForRoot === 'function'
+    ? activeAdapter.viewForRoot(root)
+    : document?.defaultView;
   let rawDocumentLease;
   let rawPortalInstall;
   let rawObserverInstall;
@@ -701,6 +709,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
       scopedShared,
       styleConfig,
       unregisterPortal,
+      view,
     };
     record.environment = environmentFor(record);
     claimShadowRootSlot(root, 'resources', record);

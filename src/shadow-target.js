@@ -45,42 +45,155 @@ function captureGetter(constructor, key) {
   return typeof getter === 'function' ? getter : null;
 }
 
-const intrinsicOwnerDocument = captureGetter(globalThis.Node, 'ownerDocument');
-const intrinsicDefaultView = captureGetter(globalThis.Document, 'defaultView');
-const intrinsicShadowHost = captureGetter(globalThis.ShadowRoot, 'host');
+function captureMethod(constructor, key) {
+  if (typeof constructor !== 'function') return null;
+  const method = Object.getOwnPropertyDescriptor(constructor.prototype, key)?.value;
+  return typeof method === 'function' ? method : null;
+}
+
+function serverHarnessDataProperty(value, key) {
+  if (typeof globalThis.window !== 'undefined'
+    || value === null
+    || (typeof value !== 'object' && typeof value !== 'function')) {
+    return undefined;
+  }
+  try {
+    let current = value;
+    while (current !== null) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor !== undefined) {
+        return Object.hasOwn(descriptor, 'value')
+          ? descriptor.value
+          : undefined;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+let ownerDocumentGetter = null;
+let defaultViewGetter = null;
+let shadowHostGetter = null;
+let nodeTypeGetter = null;
+let getRootNodeMethod = null;
+
+function captureMissingDomIntrinsics() {
+  ownerDocumentGetter ??= captureGetter(globalThis.Node, 'ownerDocument');
+  defaultViewGetter ??= captureGetter(globalThis.Document, 'defaultView');
+  shadowHostGetter ??= captureGetter(globalThis.ShadowRoot, 'host');
+  nodeTypeGetter ??= captureGetter(globalThis.Node, 'nodeType');
+  getRootNodeMethod ??= captureMethod(globalThis.Node, 'getRootNode');
+}
+
+captureMissingDomIntrinsics();
 
 function initialOwnerDocument(value) {
-  if (intrinsicOwnerDocument === null) {
+  captureMissingDomIntrinsics();
+  if (ownerDocumentGetter === null) {
     throw new TypeError('Native Node ownerDocument getter is unavailable');
   }
-  return Reflect.apply(intrinsicOwnerDocument, value, []);
+  return Reflect.apply(ownerDocumentGetter, value, []);
 }
 
 function initialDefaultView(document) {
-  if (intrinsicDefaultView === null) {
+  captureMissingDomIntrinsics();
+  if (defaultViewGetter === null) {
     throw new TypeError('Native Document defaultView getter is unavailable');
   }
-  return Reflect.apply(intrinsicDefaultView, document, []);
+  return Reflect.apply(defaultViewGetter, document, []);
 }
 
 function initialShadowHost(root) {
-  if (intrinsicShadowHost === null) {
+  captureMissingDomIntrinsics();
+  if (shadowHostGetter === null) {
     throw new TypeError('Native ShadowRoot host getter is unavailable');
   }
-  return Reflect.apply(intrinsicShadowHost, root, []);
+  return Reflect.apply(shadowHostGetter, root, []);
+}
+
+export function intrinsicOwnerDocumentOf(value) {
+  captureMissingDomIntrinsics();
+  if (ownerDocumentGetter === null) {
+    return serverHarnessDataProperty(value, 'ownerDocument') ?? null;
+  }
+  try {
+    return initialOwnerDocument(value);
+  } catch {
+    return null;
+  }
+}
+
+export function intrinsicDocumentView(document) {
+  captureMissingDomIntrinsics();
+  if (defaultViewGetter === null) {
+    return serverHarnessDataProperty(document, 'defaultView') ?? null;
+  }
+  try {
+    return initialDefaultView(document);
+  } catch {
+    return null;
+  }
+}
+
+export function intrinsicRootForNode(value) {
+  captureMissingDomIntrinsics();
+  if (getRootNodeMethod === null) {
+    const fallback = serverHarnessDataProperty(value, 'getRootNode');
+    if (typeof fallback !== 'function') return null;
+    try {
+      return Reflect.apply(fallback, value, []);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return Reflect.apply(getRootNodeMethod, value, []);
+  } catch {
+    return null;
+  }
+}
+
+export function intrinsicRootKind(root) {
+  captureMissingDomIntrinsics();
+  if (shadowHostGetter !== null) {
+    try {
+      initialShadowHost(root);
+      return 'shadow-root';
+    } catch { /* Continue with other native root brands. */ }
+  }
+  if (defaultViewGetter !== null) {
+    try {
+      Reflect.apply(defaultViewGetter, root, []);
+      return 'document';
+    } catch { /* Continue with generic Node classification. */ }
+  }
+  if (nodeTypeGetter !== null) {
+    try {
+      if (Reflect.apply(nodeTypeGetter, root, []) === 11) {
+        return 'document-fragment';
+      }
+    } catch { /* Non-Node values are unknown. */ }
+  }
+  if (shadowHostGetter === null
+    && defaultViewGetter === null
+    && nodeTypeGetter === null
+    && typeof globalThis.window === 'undefined') {
+    const nodeType = root?.nodeType;
+    if (nodeType === 9) return 'document';
+    if (nodeType === 11) {
+      return root?.host === undefined
+        ? 'document-fragment'
+        : 'shadow-root';
+    }
+  }
+  return 'unknown';
 }
 
 export function isNativeShadowRoot(root) {
-  try {
-    const document = initialOwnerDocument(root);
-    const realm = initialDefaultView(document);
-    const host = initialShadowHost(root);
-    return realm !== null
-      && (typeof realm === 'object' || typeof realm === 'function')
-      && initialOwnerDocument(host) === document;
-  } catch {
-    return false;
-  }
+  return intrinsicRootKind(root) === 'shadow-root';
 }
 
 function shadowContext(root) {
@@ -146,6 +259,7 @@ export function shadowDomIntrinsics(root) {
   const dispatchEvent = methodReader(eventTargetPrototype, 'dispatchEvent');
   return Object.freeze({
     document: context.document,
+    view: context.realm,
     assertElement(element) {
       assertExactElement(element, context);
       return element;

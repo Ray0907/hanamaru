@@ -14,6 +14,11 @@ import {
   recordGroupMetadata,
 } from './controller-metadata.js';
 import { acquireDocumentResources } from './scheduler.js';
+import {
+  intrinsicOwnerDocumentOf,
+  intrinsicRootForNode,
+  intrinsicRootKind,
+} from './shadow-target.js';
 import { resolveTarget } from './target.js';
 
 const GROUP_KEYS = new Set(['trigger', 'motion']);
@@ -48,23 +53,17 @@ function normalizeGroupOptions(input) {
   return { trigger, motion };
 }
 
-function rootKind(root) {
-  if (root?.nodeType === 9) return 'document';
-  if (root?.nodeType === 11 && root.host !== undefined) return 'shadow-root';
-  if (root?.nodeType === 11) return 'document-fragment';
-  return 'unknown';
-}
-
 function validateRecordRoot(record, target, env) {
   if (env.root === undefined) return;
-  const actualRoot = record?.ownerElement?.getRootNode?.();
+  const actualRoot = intrinsicRootForNode(record?.ownerElement);
   if (actualRoot === env.root) return;
   const details = {
     target,
-    expectedRoot: rootKind(env.root),
-    actualRoot: rootKind(actualRoot),
+    expectedRoot: intrinsicRootKind(env.root),
+    actualRoot: intrinsicRootKind(actualRoot),
   };
-  if (rootKind(env.root) === 'document' && rootKind(actualRoot) === 'shadow-root') {
+  if (intrinsicRootKind(env.root) === 'document'
+    && intrinsicRootKind(actualRoot) === 'shadow-root') {
     throw new HanamaruTargetError(
       'HANA_TARGET_SHADOW_UNSCOPED',
       'ShadowRoot Group members require a Shadow scope',
@@ -79,35 +78,33 @@ function validateRecordRoot(record, target, env) {
 }
 
 function targetRoots(target) {
-  if (target?.nodeType === 1) {
-    return [target.getRootNode?.()];
-  }
+  const directRoot = intrinsicRootForNode(target);
+  if (directRoot !== null) return [directRoot];
   if (target?.startContainer !== undefined || target?.endContainer !== undefined) {
     return [
-      target.startContainer?.getRootNode?.(),
-      target.endContainer?.getRootNode?.(),
+      intrinsicRootForNode(target.startContainer),
+      intrinsicRootForNode(target.endContainer),
     ];
   }
-  if (target?.within?.nodeType === 1) {
-    return [target.within.getRootNode?.()];
-  }
+  const withinRoot = intrinsicRootForNode(target?.within);
+  if (withinRoot !== null) return [withinRoot];
   return [];
 }
 
 function validateTargetRoot(target, env) {
   if (env.root === undefined) return;
-  const roots = targetRoots(target).filter((root) => root !== undefined);
+  const roots = targetRoots(target).filter((root) => root !== null);
   if (roots.length === 0 || roots.every((root) => root === env.root)) return;
   const actualRoot = roots[0];
   const details = {
     target,
-    expectedRoot: rootKind(env.root),
+    expectedRoot: intrinsicRootKind(env.root),
     actualRoot: roots.every((root) => root === actualRoot)
-      ? rootKind(actualRoot)
+      ? intrinsicRootKind(actualRoot)
       : 'mixed',
   };
-  if (rootKind(env.root) === 'document'
-    && roots.every((root) => rootKind(root) === 'shadow-root')) {
+  if (intrinsicRootKind(env.root) === 'document'
+    && roots.every((root) => intrinsicRootKind(root) === 'shadow-root')) {
     throw new HanamaruTargetError(
       'HANA_TARGET_SHADOW_UNSCOPED',
       'ShadowRoot Group members require a Shadow scope',
@@ -223,7 +220,9 @@ export function createGroupEnvironmentWithResources({
 }) {
   if (resources === null || typeof resources !== 'object'
     || resources.root !== root
-    || resources.document !== root?.ownerDocument
+    || resources.document !== (
+      intrinsicOwnerDocumentOf(root) ?? root?.ownerDocument
+    )
     || typeof resources.allocateId !== 'function'
     || typeof resources.createEvent !== 'function'
     || resources.lease === null
@@ -234,7 +233,7 @@ export function createGroupEnvironmentWithResources({
     throw new TypeError('group target resolver must be a function');
   }
   const doc = resources.document;
-  const view = doc.defaultView;
+  const view = resources.view ?? doc.defaultView;
   const memberErrors = new WeakMap();
   let memberErrorObserver = null;
   return {

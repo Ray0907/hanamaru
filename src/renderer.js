@@ -146,20 +146,26 @@ function cssPixels(value, fallback) {
   return Number.isFinite(amount) && amount >= 0 && input.endsWith('px') ? amount : fallback;
 }
 
-export function readThemeMetrics(element) {
+export function readThemeMetrics(element, view = undefined) {
   // Controllers consume noteGap during their scheduler read before calling pure placement geometry.
-  const style = element.ownerDocument.defaultView.getComputedStyle(element);
+  const style = (view ?? element.ownerDocument.defaultView).getComputedStyle(element);
   return {
     duration: cssTime(style.getPropertyValue('--hana-duration'), 650),
     noteGap: cssPixels(style.getPropertyValue('--hana-note-gap'), 16),
   };
 }
 
-export function createRenderer({ id, record, options, lease }) {
+export function createRenderer({
+  id,
+  record,
+  options,
+  lease,
+  view = undefined,
+}) {
   const { shared } = lease;
   shared.generationFor(id);
   const doc = shared.overlay.ownerDocument;
-  const win = doc.defaultView;
+  const win = view ?? doc.defaultView;
   const noteId = `hana-note-${id}`;
   const group = doc.createElementNS(SVG_NAMESPACE, 'g');
   group.setAttribute('class', 'hana-annotation');

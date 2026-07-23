@@ -1,4 +1,9 @@
 import { runtimeState } from './runtime-state.js';
+import {
+  intrinsicDocumentView,
+  intrinsicOwnerDocumentOf,
+  intrinsicRootKind,
+} from './shadow-target.js';
 
 function isWeakKey(value) {
   return (typeof value === 'object' && value !== null)
@@ -26,13 +31,16 @@ function annotationOptions(options) {
 
 export function snapshotAnnotationTarget(target) {
   if (target === null || typeof target !== 'object' || Array.isArray(target)) return target;
-  const ElementConstructor = target.ownerDocument?.defaultView?.Element;
+  const targetDocument = intrinsicOwnerDocumentOf(target);
+  const ElementConstructor = intrinsicDocumentView(targetDocument)?.Element;
   if (typeof ElementConstructor === 'function' && target instanceof ElementConstructor) {
     return target;
   }
   const boundary = target.startContainer;
-  const rangeDocument = boundary?.nodeType === 9 ? boundary : boundary?.ownerDocument;
-  const RangeConstructor = rangeDocument?.defaultView?.Range;
+  const rangeDocument = intrinsicRootKind(boundary) === 'document'
+    ? boundary
+    : intrinsicOwnerDocumentOf(boundary);
+  const RangeConstructor = intrinsicDocumentView(rangeDocument)?.Range;
   if (typeof RangeConstructor === 'function' && target instanceof RangeConstructor) {
     return target;
   }

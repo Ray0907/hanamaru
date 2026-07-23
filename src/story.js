@@ -18,6 +18,7 @@ import {
   recordStoryMetadata,
 } from './controller-metadata.js';
 import { acquireDocumentResources } from './scheduler.js';
+import { intrinsicOwnerDocumentOf } from './shadow-target.js';
 
 const STORY_KEYS = new Set(['trigger', 'gap', 'once', 'motion']);
 const STEP_KEYS = new Set([
@@ -77,7 +78,9 @@ export function createStoryEnvironmentWithResources({
 }) {
   if (resources === null || typeof resources !== 'object'
     || resources.root !== root
-    || resources.document !== root?.ownerDocument
+    || resources.document !== (
+      intrinsicOwnerDocumentOf(root) ?? root?.ownerDocument
+    )
     || typeof resources.allocateId !== 'function'
     || typeof resources.createEvent !== 'function'
     || resources.lease === null
@@ -88,7 +91,7 @@ export function createStoryEnvironmentWithResources({
     throw new TypeError('story target resolver must be a function');
   }
   const doc = resources.document;
-  const win = doc.defaultView;
+  const win = resources.view ?? doc.defaultView;
   return {
     root,
     acquireDocumentResources() { return resources.lease; },

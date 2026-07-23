@@ -3,6 +3,10 @@ import {
   HanamaruTargetError,
 } from './errors.js';
 import { validateSerializedTarget } from './serialize-schema.js';
+import {
+  intrinsicDocumentView,
+  intrinsicRootKind,
+} from './shadow-target.js';
 import { resolveTarget } from './target.js';
 
 const INTERNAL_ERRORS = new WeakMap();
@@ -45,18 +49,15 @@ function targetError(message, details, code = 'HANA_TARGET_INVALID') {
 
 function activeDocument(root) {
   return reflectionBoundary(() => {
-    if (root?.nodeType === 11 && root?.host !== undefined) {
+    const kind = intrinsicRootKind(root);
+    if (kind === 'shadow-root') {
       targetError(
         'Serialized targets require an explicit Shadow scope',
         { root },
         'HANA_TARGET_SHADOW_UNSCOPED',
       );
     }
-    const DocumentConstructor = root?.defaultView?.Document;
-    if (typeof DocumentConstructor !== 'function'
-      || !(root instanceof DocumentConstructor)
-      || root.nodeType !== 9
-      || root.defaultView === null) {
+    if (kind !== 'document' || intrinsicDocumentView(root) === null) {
       configError('root', root);
     }
     return root;
@@ -85,7 +86,7 @@ function executionContext(input, allowed) {
 function connectedElement(value, root) {
   const message = 'Resolved key must be a connected Element in the target Document';
   return reflectionBoundary(() => {
-    const ElementConstructor = root.defaultView.Element;
+    const ElementConstructor = intrinsicDocumentView(root)?.Element;
     const readers = nodeReaders(root);
     if (!(value instanceof ElementConstructor)
       || readers.ownerDocument(value) !== root
@@ -160,7 +161,7 @@ function rangeOwner(ancestor, root, ElementConstructor, readers) {
 function connectedRange(value, root) {
   const message = 'Resolved key must be a connected Range in the target Document';
   return reflectionBoundary(() => {
-    const realm = root.defaultView;
+    const realm = intrinsicDocumentView(root);
     const RangeConstructor = realm.Range;
     const ElementConstructor = realm.Element;
     const rangePrototype = RangeConstructor.prototype;

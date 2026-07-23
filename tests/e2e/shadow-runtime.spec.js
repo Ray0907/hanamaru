@@ -809,6 +809,7 @@ test('scope annotate owns the exact Shadow root while standalone annotate stays 
 test('scope destroy is terminal, reverse ordered, idempotent, and releases after cleanup failures', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { createShadowScope } = await import('/src/shadow.js');
+    const { runtimeState } = await import('/src/runtime-state.js');
     const state = window.__shadowRuntime;
     const target = state.openRoot.querySelector('#open-target');
     const scope = createShadowScope(state.openRoot);
@@ -1044,6 +1045,174 @@ test('standalone scan intrinsically rejects masked open closed and iframe Shadow
       { annotations: 0, errors: 0 },
     ],
     portals: 0,
+  });
+});
+
+test('all standalone entrypoints intrinsically reject root identity masks', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/annotation.js');
+    const { group } = await import('/src/group.js');
+    const { annotateSelection } = await import('/src/selection.js');
+    const { resolveSerializedTarget } = await import('/src/serialize.js');
+    const { intrinsicRootKind } = await import('/src/shadow-target.js');
+    const { story } = await import('/src/story.js');
+    const state = window.__shadowRuntime;
+    const target = state.openRoot.appendChild(document.createElement('button'));
+    target.id = 'masked-standalone-target';
+    target.textContent = 'Masked standalone target';
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    const currentSelection = window.getSelection();
+    currentSelection.removeAllRanges();
+    currentSelection.addRange(range);
+    Object.defineProperties(state.openRoot, {
+      host: { configurable: true, value: undefined },
+      nodeType: { configurable: true, value: 9 },
+    });
+    let forgedReads = 0;
+    const forgedRoot = {};
+    for (const key of ['host', 'nodeType']) {
+      Object.defineProperty(forgedRoot, key, {
+        get() {
+          forgedReads += 1;
+          return key === 'nodeType' ? 11 : state.openHost;
+        },
+      });
+    }
+    const classifications = {
+      document: intrinsicRootKind(document),
+      element: intrinsicRootKind(target),
+      forged: intrinsicRootKind(forgedRoot),
+      shadow: intrinsicRootKind(state.openRoot),
+    };
+
+    const failures = {};
+    const attempt = (name, create) => {
+      try {
+        const controller = create();
+        controller?.destroy?.();
+        failures[name] = { returned: true };
+      } catch (error) {
+        failures[name] = { name: error.name, code: error.code };
+      }
+    };
+    attempt('annotation', () => annotate(target, {
+      mark: 'underline',
+      motion: 'never',
+    }));
+    attempt('selection', () => annotateSelection({
+      mark: 'highlight',
+      motion: 'never',
+    }, currentSelection));
+    attempt('story', () => story([{
+      target,
+      mark: 'underline',
+    }], { motion: 'never' }));
+    attempt('group', () => group([{
+      target,
+      mark: 'box',
+    }], { motion: 'never' }));
+    attempt('serialized', () => resolveSerializedTarget({
+      type: 'selector',
+      selector: '#masked-standalone-target',
+    }, { root: state.openRoot }));
+
+    delete state.openRoot.nodeType;
+    delete state.openRoot.host;
+    currentSelection.removeAllRanges();
+    target.remove();
+    return {
+      failures,
+      classifications,
+      forgedReads,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      owned: document.querySelectorAll('[data-hana-id]').length,
+    };
+  });
+
+  const unscoped = {
+    name: 'HanamaruTargetError',
+    code: 'HANA_TARGET_SHADOW_UNSCOPED',
+  };
+  expect(result).toEqual({
+    classifications: {
+      document: 'document',
+      element: 'unknown',
+      forged: 'unknown',
+      shadow: 'shadow-root',
+    },
+    forgedReads: 0,
+    failures: {
+      annotation: unscoped,
+      selection: unscoped,
+      story: unscoped,
+      group: unscoped,
+      serialized: unscoped,
+    },
+    overlays: 0,
+    owned: 0,
+  });
+});
+
+test('intrinsic classifiers retry missing DOM constructors and retain captured brands', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const frame = document.body.appendChild(document.createElement('iframe'));
+    frame.src = '/tests/fixtures/shadow.html?lazy-intrinsics';
+    await new Promise((resolve, reject) => {
+      frame.addEventListener('load', resolve, { once: true });
+      frame.addEventListener('error', reject, { once: true });
+    });
+    const view = frame.contentWindow;
+    const frameDocument = frame.contentDocument;
+    const keys = ['Node', 'Document', 'ShadowRoot'];
+    const descriptors = Object.fromEntries(keys.map((key) => [
+      key,
+      Object.getOwnPropertyDescriptor(view, key),
+    ]));
+    const hideConstructors = () => {
+      for (const key of keys) {
+        Object.defineProperty(view, key, {
+          configurable: true,
+          writable: true,
+          value: undefined,
+        });
+      }
+    };
+    const restoreConstructors = () => {
+      for (const key of keys) Object.defineProperty(view, key, descriptors[key]);
+    };
+
+    hideConstructors();
+    const importFromFrame = view.Function(
+      'specifier',
+      'return import(specifier)',
+    );
+    const module = await importFromFrame(new URL(
+      `/src/shadow-target.js?lazy-intrinsics=${Date.now()}`,
+      location.href,
+    ).href);
+    const beforeDom = module.intrinsicRootKind({});
+
+    restoreConstructors();
+    const host = frameDocument.body.appendChild(frameDocument.createElement('div'));
+    const root = host.attachShadow({ mode: 'open' });
+    const afterDom = module.intrinsicRootKind(root);
+
+    hideConstructors();
+    const afterConstructorsDisappear = module.intrinsicRootKind(root);
+    restoreConstructors();
+    frame.remove();
+    return {
+      beforeDom,
+      afterDom,
+      afterConstructorsDisappear,
+    };
+  });
+
+  expect(result).toEqual({
+    beforeDom: 'unknown',
+    afterDom: 'shadow-root',
+    afterConstructorsDisappear: 'shadow-root',
   });
 });
 
@@ -1617,38 +1786,236 @@ test('scope acquisition failure rolls back styles, resources, portals, and root 
   });
 });
 
-test('scope serialized resolver cannot return after its callback destroys the scope', async ({ page }) => {
+test('scope serialized resolvers stop immediately when callbacks destroy scopes with or without peers', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { createShadowScope } = await import('/src/shadow.js');
-    const state = window.__shadowRuntime;
-    const target = state.openRoot.querySelector('#open-target');
-    const scope = createShadowScope(state.openRoot);
-    let failure;
-    try {
-      scope.resolveSerializedTarget({
-        type: 'key',
-        key: 'destroy-during-resolve',
-        targetKind: 'element',
-      }, {
-        resolveTarget() {
-          scope.destroy();
-          return target;
-        },
-      });
-    } catch (error) {
-      failure = { name: error.name, code: error.code };
+    const { runtimeState } = await import('/src/runtime-state.js');
+    const cases = [];
+    for (const operation of ['restore', 'resolveSerializedTarget']) {
+      for (const withPeer of [false, true]) {
+        const host = document.body.appendChild(document.createElement('div'));
+        const root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = '<button id="target">Resolver target</button>';
+        const target = root.querySelector('#target');
+        const scope = createShadowScope(root);
+        const peer = withPeer ? createShadowScope(root) : null;
+        const context = {
+          resolveTarget() {
+            scope.destroy();
+            return target;
+          },
+        };
+        let failure;
+        try {
+          if (operation === 'restore') {
+            scope.restore({
+              schema: 'hanamaru/v1',
+              kind: 'annotation',
+              target: {
+                type: 'key',
+                key: 'destroy-during-restore',
+                targetKind: 'element',
+              },
+              options: {
+                mark: 'underline',
+                note: null,
+                placement: 'auto',
+                trigger: 'manual',
+                accessible: false,
+                seed: 'destroy-during-restore',
+                duration: 0,
+                motion: 'never',
+              },
+            }, context);
+          } else {
+            scope.resolveSerializedTarget({
+              type: 'key',
+              key: 'destroy-during-resolve',
+              targetKind: 'element',
+            }, context);
+          }
+        } catch (error) {
+          failure = {
+            name: error.name,
+            code: error.code,
+            operation: error.details?.operation,
+          };
+        }
+        cases.push({
+          operation,
+          withPeer,
+          failure,
+          resourceRefs: runtimeState.shadows.get(root)?.resources.count ?? 0,
+        });
+        peer?.destroy();
+        host.remove();
+      }
     }
     return {
-      failure,
+      cases,
       portals: document.querySelectorAll('[data-hana-shadow-overlay]').length,
     };
   });
 
   expect(result).toEqual({
-    failure: {
-      name: 'HanamaruStateError',
-      code: 'HANA_STATE_SHADOW_SCOPE',
+    cases: [
+      {
+        operation: 'restore',
+        withPeer: false,
+        failure: {
+          name: 'HanamaruStateError',
+          code: 'HANA_STATE_SHADOW_SCOPE',
+          operation: 'restore',
+        },
+        resourceRefs: 0,
+      },
+      {
+        operation: 'restore',
+        withPeer: true,
+        failure: {
+          name: 'HanamaruStateError',
+          code: 'HANA_STATE_SHADOW_SCOPE',
+          operation: 'restore',
+        },
+        resourceRefs: 1,
+      },
+      {
+        operation: 'resolveSerializedTarget',
+        withPeer: false,
+        failure: {
+          name: 'HanamaruStateError',
+          code: 'HANA_STATE_SHADOW_SCOPE',
+          operation: 'resolve serialized target',
+        },
+        resourceRefs: 0,
+      },
+      {
+        operation: 'resolveSerializedTarget',
+        withPeer: true,
+        failure: {
+          name: 'HanamaruStateError',
+          code: 'HANA_STATE_SHADOW_SCOPE',
+          operation: 'resolve serialized target',
+        },
+        resourceRefs: 1,
+      },
+    ],
+    portals: 0,
+  });
+});
+
+test('scope factories use authenticated resource snapshots after DOM properties are poisoned', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { createShadowScope } = await import('/src/shadow.js');
+    const { runtimeState } = await import('/src/runtime-state.js');
+    const state = window.__shadowRuntime;
+    const root = state.openRoot;
+    const target = root.querySelector('#open-target');
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const scope = createShadowScope(root);
+    const capturedView = runtimeState.shadows.get(root)?.resources
+      ?.environment.view === window;
+    const definition = {
+      schema: 'hanamaru/v1',
+      kind: 'annotation',
+      target: { type: 'selector', selector: '#open-target' },
+      options: {
+        mark: 'circle',
+        note: null,
+        placement: 'auto',
+        trigger: 'manual',
+        accessible: false,
+        seed: 'poisoned-resource-snapshot',
+        duration: 0,
+        motion: 'never',
+      },
+    };
+    let rootReads = 0;
+    let viewReads = 0;
+    Object.defineProperty(root, 'ownerDocument', {
+      configurable: true,
+      get() {
+        rootReads += 1;
+        throw new Error('poisoned ShadowRoot.ownerDocument');
+      },
+    });
+    Object.defineProperty(document, 'defaultView', {
+      configurable: true,
+      get() {
+        viewReads += 1;
+        throw new Error('poisoned Document.defaultView');
+      },
+    });
+
+    const controllers = [];
+    const outcomes = {};
+    const attempt = (name, callback) => {
+      try {
+        const controller = callback();
+        controllers.push(controller);
+        outcomes[name] = {
+          ok: true,
+          state: controller.state,
+        };
+      } catch (error) {
+        outcomes[name] = {
+          ok: false,
+          name: error.name,
+          code: error.code ?? null,
+          message: error.message,
+        };
+      }
+    };
+    attempt('annotation', () => scope.annotate(target, {
+      mark: 'underline',
+      motion: 'never',
+    }));
+    attempt('story', () => scope.story([{
+      target,
+      mark: 'box',
+      duration: 0,
+    }], { motion: 'never' }));
+    attempt('group', () => scope.group([{
+      target,
+      mark: 'highlight',
+      duration: 0,
+    }], { motion: 'never' }));
+    attempt('selection', () => scope.annotateSelection({
+      mark: 'circle',
+      motion: 'never',
+    }, selection));
+    attempt('restore', () => scope.restore(definition));
+
+    delete root.ownerDocument;
+    delete document.defaultView;
+    selection.removeAllRanges();
+    for (const controller of controllers) controller.destroy();
+    scope.destroy();
+    return {
+      outcomes,
+      capturedView,
+      rootReads,
+      viewReads,
+      portals: document.querySelectorAll('[data-hana-shadow-overlay]').length,
+    };
+  });
+
+  expect(result).toEqual({
+    capturedView: true,
+    outcomes: {
+      annotation: { ok: true, state: 'idle' },
+      story: { ok: true, state: 'idle' },
+      group: { ok: true, state: 'idle' },
+      selection: { ok: true, state: 'idle' },
+      restore: { ok: true, state: 'idle' },
     },
+    rootReads: 0,
+    viewReads: 0,
     portals: 0,
   });
 });

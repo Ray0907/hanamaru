@@ -120,7 +120,7 @@ export function createShadowScope(root, optionsInput = undefined) {
     return resolveShadowTarget(candidate, root);
   }
 
-  function resolveKey(target, resolveTargetCallback, context) {
+  function resolveKey(target, resolveTargetCallback, context, operation) {
     const protectedContext = resolverContext(
       target.targetKind,
       context.role,
@@ -149,6 +149,7 @@ export function createShadowScope(root, optionsInput = undefined) {
         { key: target.key, context: protectedContext, cause },
       );
     }
+    requireActive(operation);
     const record = targetResolver(resolved);
     if (target.targetKind === 'element' && record.kind !== 'element') {
       throw new HanamaruTargetError(
@@ -172,7 +173,7 @@ export function createShadowScope(root, optionsInput = undefined) {
     role = 'target',
     controllerKind = null,
     index = null,
-  }) {
+  }, operation) {
     const context = {
       resolveTarget: resolveTargetCallback,
       role,
@@ -184,7 +185,12 @@ export function createShadowScope(root, optionsInput = undefined) {
       return { resolved: record.element, source: target.selector };
     }
     if (target.type === 'key') {
-      const record = resolveKey(target, context.resolveTarget, context);
+      const record = resolveKey(
+        target,
+        context.resolveTarget,
+        context,
+        operation,
+      );
       return {
         resolved: target.targetKind === 'element' ? record.element : record.range,
         source: target.targetKind === 'element' ? record.element : record.range,
@@ -203,6 +209,7 @@ export function createShadowScope(root, optionsInput = undefined) {
           controllerKind: context.controllerKind,
           index: context.index,
         },
+        operation,
       );
       withinSource = withinRecord.element;
     }
@@ -212,9 +219,11 @@ export function createShadowScope(root, optionsInput = undefined) {
     return { resolved: record.range, source };
   }
 
-  function serializationEnvironment() {
+  function serializationEnvironment(operation) {
     return {
-      resolveTargetSource,
+      resolveTargetSource(target, context) {
+        return resolveTargetSource(target, context, operation);
+      },
       createAnnotation(target, rawOptions) {
         return createAnnotation(target, rawOptions, annotationEnvironment());
       },
@@ -300,7 +309,7 @@ export function createShadowScope(root, optionsInput = undefined) {
     return register(
       annotateSelectionWithEnvironment(rawOptions, selection, {
         root,
-        view: resources.document.defaultView,
+        view: resources.view ?? resources.document.defaultView,
         createAnnotation(range, options) {
           return createAnnotation(range, options, annotationEnvironment());
         },
@@ -315,7 +324,7 @@ export function createShadowScope(root, optionsInput = undefined) {
       restoreWithEnvironment(
         definition,
         context,
-        serializationEnvironment(),
+        serializationEnvironment('restore'),
       ),
       'restore',
     );
@@ -326,7 +335,7 @@ export function createShadowScope(root, optionsInput = undefined) {
     const resolved = resolveSerializedTargetWithEnvironment(
       target,
       context,
-      serializationEnvironment(),
+      serializationEnvironment('resolve serialized target'),
     );
     requireActive('resolve serialized target');
     return resolved;

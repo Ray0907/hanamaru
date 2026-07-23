@@ -22,6 +22,11 @@ import {
 } from './controller-metadata.js';
 import { runtimeState } from './runtime-state.js';
 import { acquireDocumentResources } from './scheduler.js';
+import {
+  intrinsicOwnerDocumentOf,
+  intrinsicRootForNode,
+  intrinsicRootKind,
+} from './shadow-target.js';
 import { resolveTarget } from './target.js';
 
 const MARKS = new Set(['underline', 'highlight', 'circle', 'box', 'strike', 'bracket']);
@@ -324,23 +329,11 @@ function hiddenTargetError(record) {
   );
 }
 
-function rootKind(root) {
-  if (root?.nodeType === 9) return 'document';
-  if (root?.nodeType === 11 && root.host !== undefined) return 'shadow-root';
-  return 'unknown';
-}
-
-function intrinsicRoot(node, doc) {
-  const method = doc?.defaultView?.Node?.prototype?.getRootNode;
-  if (typeof method !== 'function') return node?.getRootNode?.();
-  return Reflect.apply(method, node, []);
-}
-
 export function resolveStandaloneTarget(target, doc) {
   const record = resolveTarget(target, doc);
   const assertStandaloneRoot = () => {
-    const actualRoot = intrinsicRoot(record.ownerElement, doc);
-    if (rootKind(actualRoot) !== 'shadow-root') return;
+    const actualRoot = intrinsicRootForNode(record.ownerElement);
+    if (intrinsicRootKind(actualRoot) !== 'shadow-root') return;
     throw new HanamaruTargetError(
       'HANA_TARGET_SHADOW_UNSCOPED',
       'ShadowRoot targets require an explicit Shadow scope',
@@ -375,27 +368,30 @@ export function documentForTarget(target) {
 
 function createDomAnnotationEnvironment({
   doc,
+  view = undefined,
   id,
   lease,
   createEvent,
   createErrorEvent,
   resolveCandidate,
 }) {
+  const win = view ?? doc?.defaultView;
   if (doc === null || typeof doc !== 'object'
-    || doc.nodeType !== 9 || doc.defaultView === null) {
+    || doc.nodeType !== 9 || win === null || typeof win !== 'object') {
     throw new TypeError('annotation document must be a Document with a browsing context');
   }
-  const win = doc.defaultView;
 
   return {
     id,
     get lease() { return lease(); },
     createEvent,
     createErrorEvent,
-    createRenderer: createDomRenderer,
+    createRenderer(args) {
+      return createDomRenderer({ ...args, view: win });
+    },
     direction(owner) { return win.getComputedStyle(owner).direction; },
     microtask(callback) { win.queueMicrotask(callback); },
-    readThemeMetrics,
+    readThemeMetrics(element) { return readThemeMetrics(element, win); },
     reducedMotion(options) {
       return options.motion === 'never'
         || win.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -454,7 +450,9 @@ export function createAnnotationEnvironmentWithResources({
 }) {
   if (resources === null || typeof resources !== 'object'
     || resources.root !== root
-    || resources.document !== root?.ownerDocument
+    || resources.document !== (
+      intrinsicOwnerDocumentOf(root) ?? root?.ownerDocument
+    )
     || typeof resources.allocateId !== 'function'
     || typeof resources.createEvent !== 'function'
     || resources.lease === null
@@ -466,6 +464,7 @@ export function createAnnotationEnvironmentWithResources({
   }
   return createDomAnnotationEnvironment({
     doc: resources.document,
+    view: resources.view,
     id: resources.allocateId('hana'),
     lease() { return resources.lease; },
     createEvent(type, detail, owner) {
