@@ -110,7 +110,7 @@ test('target preserves native Element and Range identity only in private metadat
   expect(unhandled).toEqual([]);
 });
 
-test('serialized Range keys reject document Comments and invalid clone overrides', async ({ page }) => {
+test('serialized Range keys reject invalid native shapes and clone side effects', async ({ page }) => {
   await page.goto('/tests/fixtures/annotation.html');
 
   const result = await page.evaluate(async () => {
@@ -169,12 +169,49 @@ test('serialized Range keys reject document Comments and invalid clone overrides
     });
     const overrideResult = resolve(overridden);
 
+    const detachedHost = document.createElement('span');
+    const detachedText = document.createTextNode('detached text');
+    detachedHost.append(detachedText);
+    const disconnecting = document.createRange();
+    disconnecting.selectNodeContents(host);
+    Object.defineProperty(disconnecting, 'cloneRange', {
+      configurable: true,
+      value() {
+        disconnecting.setStart(detachedText, 0);
+        disconnecting.setEnd(detachedText, detachedText.data.length);
+        return Range.prototype.cloneRange.call(disconnecting);
+      },
+    });
+    const disconnectResult = resolve(disconnecting);
+
+    const nextHost = document.querySelector('#next-range-target');
+    const nextText = nextHost.firstChild;
+    const retargeting = document.createRange();
+    retargeting.selectNodeContents(host);
+    Object.defineProperty(retargeting, 'cloneRange', {
+      configurable: true,
+      value() {
+        retargeting.setStart(nextText, 0);
+        retargeting.setEnd(nextText, nextText.data.length);
+        return Range.prototype.cloneRange.call(retargeting);
+      },
+    });
+    const retargetResult = resolve(retargeting);
+
     valid.detach();
     commentRange.detach();
     overridden.detach();
+    disconnecting.detach();
+    retargeting.detach();
     comment.remove();
 
-    return { validProof, commentResult, overrideResult };
+    return {
+      validProof,
+      commentResult,
+      overrideResult,
+      disconnectResult,
+      retargetResult,
+    };
   });
 
   expect(result).toEqual({
@@ -193,6 +230,16 @@ test('serialized Range keys reject document Comments and invalid clone overrides
       hasCause: true,
     },
     overrideResult: {
+      returned: false,
+      code: 'HANA_TARGET_INVALID',
+      hasCause: true,
+    },
+    disconnectResult: {
+      returned: false,
+      code: 'HANA_TARGET_INVALID',
+      hasCause: true,
+    },
+    retargetResult: {
       returned: false,
       code: 'HANA_TARGET_INVALID',
       hasCause: true,

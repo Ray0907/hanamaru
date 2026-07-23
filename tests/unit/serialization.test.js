@@ -1256,6 +1256,66 @@ test('resolveSerializedTarget rejects invalid Range clone results with their cau
   );
 });
 
+test('resolveSerializedTarget rejects Range clone side effects against original boundaries', () => {
+  const realm = minimalNativeRealm();
+  const originalTextNode = {
+    nodeType: 3,
+    ownerDocument: realm.document,
+    isConnected: true,
+    parentElement: realm.element,
+    getRootNode() { return realm.document; },
+  };
+  const detachedOwner = new realm.RealmElement(realm.document);
+  detachedOwner.isConnected = false;
+  const detachedTextNode = {
+    nodeType: 3,
+    ownerDocument: realm.document,
+    isConnected: false,
+    parentElement: detachedOwner,
+    getRootNode() { return null; },
+  };
+  const retargetedTextNode = {
+    nodeType: 3,
+    ownerDocument: realm.document,
+    isConnected: true,
+    parentElement: realm.element,
+    getRootNode() { return realm.document; },
+  };
+
+  for (const [label, nextNode] of [
+    ['detached endpoints', detachedTextNode],
+    ['connected retargeted endpoints', retargetedTextNode],
+  ]) {
+    const range = new realm.RealmRange(realm.document, originalTextNode);
+    range.cloneRange = () => {
+      range.startContainer = nextNode;
+      range.endContainer = nextNode;
+      range.commonAncestorContainer = nextNode;
+      range.startOffset = 0;
+      range.endOffset = 1;
+      const clone = new realm.RealmRange(realm.document, nextNode);
+      clone.startOffset = range.startOffset;
+      clone.endOffset = range.endOffset;
+      return clone;
+    };
+
+    assert.throws(
+      () => resolveSerializedTarget({
+        type: 'key',
+        key: `side-effect-${label}`,
+        targetKind: 'range',
+      }, {
+        root: realm.document,
+        resolveTarget() { return range; },
+      }),
+      (error) => error instanceof HanamaruTargetError
+        && error.code === 'HANA_TARGET_INVALID'
+        && error.details.cause !== undefined,
+      label,
+    );
+  }
+});
+
 test('resolveSerializedTarget rejects a connected Range whose boundaries are in a ShadowRoot', () => {
   const realm = minimalNativeRealm();
   const shadow = { nodeType: 11, host: realm.element };

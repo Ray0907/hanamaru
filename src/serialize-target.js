@@ -96,29 +96,52 @@ function connectedElement(value, root) {
   }, (cause) => targetError(message, { target: value, cause }));
 }
 
+function connectedBoundary(node, root) {
+  return node === root
+    || (node?.ownerDocument === root
+      && node.isConnected
+      && node.getRootNode?.() === root);
+}
+
+function rangeOwner(range, root, ElementConstructor) {
+  const ancestor = range.commonAncestorContainer;
+  if (ancestor instanceof ElementConstructor) return ancestor;
+  if (ancestor === root) return root.documentElement;
+  return ancestor?.parentElement ?? null;
+}
+
 function connectedRange(value, root) {
   const message = 'Resolved key must be a connected Range in the target Document';
   return reflectionBoundary(() => {
     const RangeConstructor = root.defaultView.Range;
+    const ElementConstructor = root.defaultView.Element;
     if (!(value instanceof RangeConstructor)) {
       targetError(message, { target: value });
     }
-    const boundaries = [value.startContainer, value.endContainer];
-    if (!boundaries.every((node) => (
-      node === root
-        || (node?.ownerDocument === root
-          && node.isConnected
-          && node.getRootNode?.() === root)
-    ))) {
+    const original = {
+      startContainer: value.startContainer,
+      endContainer: value.endContainer,
+      startOffset: value.startOffset,
+      endOffset: value.endOffset,
+    };
+    if (![original.startContainer, original.endContainer]
+      .every((node) => connectedBoundary(node, root))) {
       targetError(message, { target: value });
     }
     const clone = resolveTarget(value, root).range;
+    const cloneBoundaries = [clone?.startContainer, clone?.endContainer];
+    const owner = rangeOwner(clone, root, ElementConstructor);
     if (!(clone instanceof RangeConstructor)
       || clone === value
-      || clone.startContainer !== value.startContainer
-      || clone.endContainer !== value.endContainer
-      || clone.startOffset !== value.startOffset
-      || clone.endOffset !== value.endOffset) {
+      || !cloneBoundaries.every((node) => connectedBoundary(node, root))
+      || !(owner instanceof ElementConstructor)
+      || owner.ownerDocument !== root
+      || !owner.isConnected
+      || owner.getRootNode() !== root
+      || clone.startContainer !== original.startContainer
+      || clone.endContainer !== original.endContainer
+      || clone.startOffset !== original.startOffset
+      || clone.endOffset !== original.endOffset) {
       throw new TypeError('Resolved Range clone must be a distinct equivalent Range');
     }
     return clone;
