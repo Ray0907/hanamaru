@@ -35,6 +35,14 @@ test.afterEach(async ({ page }) => {
 test('three unequal members draw in one frame and complete only after every animation', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const output = await page.evaluate(async () => {
+    const descriptors = {
+      animate: Object.getOwnPropertyDescriptor(Element.prototype, 'animate'),
+      cancelAnimationFrame: Object.getOwnPropertyDescriptor(window, 'cancelAnimationFrame'),
+      clearTimeout: Object.getOwnPropertyDescriptor(window, 'clearTimeout'),
+      now: Object.getOwnPropertyDescriptor(performance, 'now'),
+      requestAnimationFrame: Object.getOwnPropertyDescriptor(window, 'requestAnimationFrame'),
+      setTimeout: Object.getOwnPropertyDescriptor(window, 'setTimeout'),
+    };
     let clockNow = 0;
     let nextFrameId = 1;
     let nextTimerId = 1;
@@ -43,66 +51,8 @@ test('three unequal members draw in one frame and complete only after every anim
     const timers = new Map();
     let activeFrame = null;
     const animations = [];
-
-    Object.defineProperty(performance, 'now', {
-      configurable: true,
-      value: () => clockNow,
-    });
-    window.requestAnimationFrame = (callback) => {
-      const id = nextFrameId;
-      nextFrameId += 1;
-      frames.set(id, callback);
-      return id;
-    };
-    window.cancelAnimationFrame = (id) => frames.delete(id);
-    window.setTimeout = (callback, delay = 0) => {
-      const id = nextTimerId;
-      nextTimerId += 1;
-      timers.set(id, { callback, due: clockNow + Number(delay) });
-      return id;
-    };
-    window.clearTimeout = (id) => timers.delete(id);
-
-    class ControlledAnimation {
-      constructor(mark) {
-        this.mark = mark;
-        this.playState = 'running';
-        this.finished = new Promise((resolve, reject) => {
-          this.resolve = resolve;
-          this.reject = reject;
-        });
-        this.finished.catch(() => {});
-      }
-
-      cancel() {
-        if (this.playState === 'idle') return;
-        this.playState = 'idle';
-        this.reject(new DOMException('Animation cancelled', 'AbortError'));
-      }
-
-      finish() {
-        if (this.playState === 'finished') return;
-        this.playState = 'finished';
-        this.resolve();
-      }
-
-      pause() { this.playState = 'paused'; }
-
-      play() { this.playState = 'running'; }
-    }
-
-    Element.prototype.animate = function controlledAnimate() {
-      const ownerId = this.getAttribute('data-hana-id');
-      const ownerGroup = ownerId === null
-        ? this.closest('.hana-annotation')
-        : document.querySelector(`.hana-annotation[data-hana-id="${ownerId}"]`);
-      const animation = new ControlledAnimation(
-        ownerGroup?.getAttribute('data-hana-mark') ?? this.getAttribute('data-hana-mark'),
-      );
-      animations.push({ animation, frame: activeFrame, mark: animation.mark });
-      return animation;
-    };
-
+    let controller = null;
+    let result;
     const flushMicrotasks = async () => {
       for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
     };
@@ -114,26 +64,38 @@ test('three unequal members draw in one frame and complete only after every anim
       for (const callback of pending) callback(clockNow);
       activeFrame = null;
       await flushMicrotasks();
+      return pending.length;
     };
-    const completeNextMember = async (mark) => {
+    const completeMemberAt = async (mark, timestamp) => {
+      const dueTimers = [...timers.entries()]
+        .filter(([, timer]) => timer.due <= timestamp)
+        .sort(([, first], [, second]) => first.due - second.due);
+      if (dueTimers.length !== 1
+        || dueTimers[0][1].due !== timestamp
+        || dueTimers[0][1].mark !== mark) {
+        throw new Error(
+          `Expected only ${mark}@${timestamp}; got ${dueTimers
+            .map(([, timer]) => `${timer.mark}@${timer.due}`).join(',')}`,
+        );
+      }
       const active = animations.filter((entry) => (
         entry.mark === mark && entry.animation.playState !== 'finished'
       ));
+      if (active.length === 0) throw new Error(`No controlled animations for ${mark}`);
       for (const { animation } of active) animation.finish();
-      const next = [...timers.entries()]
-        .sort(([, first], [, second]) => first.due - second.due)[0];
-      if (next === undefined) throw new Error(`No lifecycle timer for ${mark}`);
-      const [id, timer] = next;
+      const [id, timer] = dueTimers[0];
       timers.delete(id);
-      clockNow = timer.due;
+      clockNow = timestamp;
       timer.callback();
       await flushMicrotasks();
       return {
         allAnimationsFinished: active.every(({ animation }) => (
           animation.playState === 'finished'
         )),
+        due: timestamp,
         hadAnimations: active.length > 0,
         mark,
+        timerMark: timer.mark,
       };
     };
     const tokenState = (id) => {
@@ -150,102 +112,236 @@ test('three unequal members draw in one frame and complete only after every anim
         unique: new Set(tokens).size,
       };
     };
+    const restore = (owner, key, descriptor) => {
+      if (descriptor === undefined) delete owner[key];
+      else Object.defineProperty(owner, key, descriptor);
+    };
 
-    const events = [];
-    let controller;
-    for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
-      document.body.addEventListener(type, (event) => {
-        if (event.detail.controller === controller) {
-          events.push({ type, state: event.detail.controller.state });
-        }
+    try {
+      Object.defineProperty(performance, 'now', {
+        configurable: true,
+        value: () => clockNow,
       });
-    }
-    const { group } = await import('/src/group.js');
-    controller = group([
-      {
-        target: '#group-first',
-        mark: 'underline',
-        note: 'First note',
-        accessible: true,
-        duration: 120,
-      },
-      {
-        target: '#group-second',
-        mark: 'circle',
-        note: 'Second note',
-        accessible: true,
-        duration: 240,
-      },
-      { target: '#group-third', mark: 'highlight', duration: 480 },
-    ]);
-    const surface = Object.keys(controller).sort();
-    controller.show();
-    const firstRun = controller.finished;
-    const immediateState = controller.state;
-    await runFrame();
-    const drawFrames = [...new Set(animations.map(({ frame }) => frame))];
-    const startedMarks = [...new Set(animations.map(({ mark }) => mark))].sort();
+      Object.defineProperty(window, 'requestAnimationFrame', {
+        configurable: true,
+        value(callback) {
+          const id = nextFrameId;
+          nextFrameId += 1;
+          frames.set(id, callback);
+          return id;
+        },
+      });
+      Object.defineProperty(window, 'cancelAnimationFrame', {
+        configurable: true,
+        value(id) { frames.delete(id); },
+      });
+      Object.defineProperty(window, 'setTimeout', {
+        configurable: true,
+        value(callback, delay = 0) {
+          const id = nextTimerId;
+          nextTimerId += 1;
+          timers.set(id, {
+            callback,
+            due: clockNow + Number(delay),
+            mark: null,
+          });
+          return id;
+        },
+      });
+      Object.defineProperty(window, 'clearTimeout', {
+        configurable: true,
+        value(id) { timers.delete(id); },
+      });
 
-    const completions = [];
-    completions.push(await completeNextMember('underline'));
-    const stateAfterFirstAnimation = controller.state;
-    completions.push(await completeNextMember('circle'));
-    const stateAfterSecondAnimation = controller.state;
-    completions.push(await completeNextMember('highlight'));
-    await firstRun;
-    const stateAfterFinalAnimation = controller.state;
+      class ControlledAnimation {
+        constructor(mark) {
+          this.mark = mark;
+          this.playState = 'running';
+          this.finished = new Promise((resolve, reject) => {
+            this.resolve = resolve;
+            this.reject = reject;
+          });
+        }
 
-    controller.refresh();
-    await runFrame();
-    const afterRefresh = {
-      overlays: document.querySelectorAll('[data-hana-overlay]').length,
-      tokenSets: ['group-first', 'group-second', 'group-third'].map(tokenState),
-      visible: document.querySelectorAll('.hana-annotation:not([hidden])').length,
-    };
-    controller.hide();
-    const afterHide = {
-      state: controller.state,
-      descriptions: ['group-first', 'group-second', 'group-third'].map((id) => (
-        document.querySelector(`#${id}`).getAttribute('aria-describedby')
-      )),
-      visible: document.querySelectorAll('.hana-annotation:not([hidden])').length,
-    };
-    controller.replay();
-    const replayRun = controller.finished;
-    await runFrame();
-    await completeNextMember('underline');
-    await completeNextMember('circle');
-    await completeNextMember('highlight');
-    await replayRun;
-    const afterReplay = {
-      freshRun: replayRun !== firstRun,
-      overlays: document.querySelectorAll('[data-hana-overlay]').length,
-      state: controller.state,
-      tokenSets: ['group-first', 'group-second', 'group-third'].map(tokenState),
-      visible: document.querySelectorAll('.hana-annotation:not([hidden])').length,
-    };
-    controller.destroy();
-    return {
-      afterDestroy: {
+        cancel() {
+          if (this.playState === 'idle' || this.playState === 'finished') return;
+          this.playState = 'idle';
+          this.reject(new DOMException('Animation cancelled', 'AbortError'));
+        }
+
+        finish() {
+          if (this.playState === 'finished') return;
+          this.playState = 'finished';
+          this.resolve();
+        }
+
+        pause() { this.playState = 'paused'; }
+
+        play() { this.playState = 'running'; }
+      }
+
+      Object.defineProperty(Element.prototype, 'animate', {
+        configurable: true,
+        value() {
+          const ownerId = this.getAttribute('data-hana-id');
+          const ownerGroup = ownerId === null
+            ? this.closest('.hana-annotation')
+            : document.querySelector(`.hana-annotation[data-hana-id="${ownerId}"]`);
+          const mark = ownerGroup?.getAttribute('data-hana-mark')
+            ?? this.getAttribute('data-hana-mark');
+          const pendingTimers = [...timers.values()].filter(({ mark: owner }) => owner === null);
+          if (pendingTimers.length > 1) {
+            throw new Error(`Multiple unowned lifecycle timers before ${mark}`);
+          }
+          if (pendingTimers.length === 1) pendingTimers[0].mark = mark;
+          const animation = new ControlledAnimation(mark);
+          animations.push({ animation, frame: activeFrame, mark });
+          return animation;
+        },
+      });
+
+      const events = [];
+      for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
+        document.body.addEventListener(type, (event) => {
+          if (event.detail.controller === controller) {
+            events.push({ type, state: event.detail.controller.state });
+          }
+        });
+      }
+      const { group } = await import('/src/group.js');
+      controller = group([
+        {
+          target: '#group-first',
+          mark: 'underline',
+          note: 'First note',
+          accessible: true,
+          duration: 120,
+        },
+        {
+          target: '#group-second',
+          mark: 'circle',
+          note: 'Second note',
+          accessible: true,
+          duration: 240,
+        },
+        { target: '#group-third', mark: 'highlight', duration: 480 },
+      ]);
+      const surface = Object.keys(controller).sort();
+      controller.show();
+      const firstRun = controller.finished;
+      const immediateState = controller.state;
+      const initialFrameCallbacks = await runFrame();
+      const drawFrames = [...new Set(animations.map(({ frame }) => frame))];
+      const startedMarks = [...new Set(animations.map(({ mark }) => mark))].sort();
+
+      const completions = [];
+      completions.push(await completeMemberAt('underline', 120));
+      const stateAfterFirstAnimation = controller.state;
+      completions.push(await completeMemberAt('circle', 240));
+      const stateAfterSecondAnimation = controller.state;
+      completions.push(await completeMemberAt('highlight', 480));
+      await firstRun;
+      const stateAfterFinalAnimation = controller.state;
+
+      controller.refresh();
+      await runFrame();
+      const afterRefresh = {
+        overlays: document.querySelectorAll('[data-hana-overlay]').length,
+        tokenSets: ['group-first', 'group-second', 'group-third'].map(tokenState),
+        visible: document.querySelectorAll('.hana-annotation:not([hidden])').length,
+      };
+      controller.hide();
+      const afterHide = {
+        state: controller.state,
         descriptions: ['group-first', 'group-second', 'group-third'].map((id) => (
           document.querySelector(`#${id}`).getAttribute('aria-describedby')
         )),
+        visible: document.querySelectorAll('.hana-annotation:not([hidden])').length,
+      };
+      controller.replay();
+      const replayRun = controller.finished;
+      await runFrame();
+      await completeMemberAt('underline', 600);
+      await completeMemberAt('circle', 720);
+      await completeMemberAt('highlight', 960);
+      await replayRun;
+      const afterReplay = {
+        freshRun: replayRun !== firstRun,
         overlays: document.querySelectorAll('[data-hana-overlay]').length,
-        owned: document.querySelectorAll('[data-hana-id]').length,
-      },
-      afterHide,
-      afterRefresh,
-      afterReplay,
-      completions,
-      drawFrames,
-      events,
-      immediateState,
-      startedMarks,
-      stateAfterFinalAnimation,
-      stateAfterFirstAnimation,
-      stateAfterSecondAnimation,
-      surface,
-    };
+        state: controller.state,
+        tokenSets: ['group-first', 'group-second', 'group-third'].map(tokenState),
+        visible: document.querySelectorAll('.hana-annotation:not([hidden])').length,
+      };
+      controller.replay();
+      const cancelledRun = controller.finished;
+      await runFrame();
+      const cancelledAnimations = animations.filter(({ animation }) => (
+        animation.playState === 'running'
+      ));
+      controller.destroy();
+      const cancellation = {
+        allIdle: cancelledAnimations.every(({ animation }) => animation.playState === 'idle'),
+        animations: cancelledAnimations.length,
+        runOutcome: await cancelledRun.then(
+          () => 'resolved',
+          (error) => error.name,
+        ),
+      };
+      await flushMicrotasks();
+      const cleanup = {
+        activeAnimations: animations.filter(({ animation }) => (
+          animation.playState === 'running' || animation.playState === 'paused'
+        )).length,
+        frames: frames.size,
+        timers: timers.size,
+      };
+      if (cleanup.activeAnimations !== 0 || cleanup.frames !== 0 || cleanup.timers !== 0) {
+        throw new Error(`Controlled harness leaked ${JSON.stringify(cleanup)}`);
+      }
+      result = {
+        afterDestroy: {
+          descriptions: ['group-first', 'group-second', 'group-third'].map((id) => (
+            document.querySelector(`#${id}`).getAttribute('aria-describedby')
+          )),
+          overlays: document.querySelectorAll('[data-hana-overlay]').length,
+          owned: document.querySelectorAll('[data-hana-id]').length,
+        },
+        afterHide,
+        afterRefresh,
+        afterReplay,
+        cancellation,
+        cleanup,
+        completions,
+        drawFrames,
+        events,
+        immediateState,
+        initialFrameCallbacks,
+        startedMarks,
+        stateAfterFinalAnimation,
+        stateAfterFirstAnimation,
+        stateAfterSecondAnimation,
+        surface,
+      };
+    } finally {
+      controller?.destroy();
+      const cleanup = {
+        activeAnimations: animations.filter(({ animation }) => (
+          animation.playState === 'running' || animation.playState === 'paused'
+        )).length,
+        frames: frames.size,
+        timers: timers.size,
+      };
+      restore(performance, 'now', descriptors.now);
+      restore(window, 'requestAnimationFrame', descriptors.requestAnimationFrame);
+      restore(window, 'cancelAnimationFrame', descriptors.cancelAnimationFrame);
+      restore(window, 'setTimeout', descriptors.setTimeout);
+      restore(window, 'clearTimeout', descriptors.clearTimeout);
+      restore(Element.prototype, 'animate', descriptors.animate);
+      if (cleanup.activeAnimations !== 0 || cleanup.frames !== 0 || cleanup.timers !== 0) {
+        throw new Error(`Controlled harness leaked before restore ${JSON.stringify(cleanup)}`);
+      }
+    }
+    return result;
   });
 
   expect(output.surface).toEqual([
@@ -253,11 +349,30 @@ test('three unequal members draw in one frame and complete only after every anim
   ]);
   expect(output.immediateState).toBe('showing');
   expect(output.drawFrames).toEqual([1]);
+  expect(output.initialFrameCallbacks).toBe(1);
   expect(output.startedMarks).toEqual(['circle', 'highlight', 'underline']);
   expect(output.completions).toEqual([
-    { allAnimationsFinished: true, hadAnimations: true, mark: 'underline' },
-    { allAnimationsFinished: true, hadAnimations: true, mark: 'circle' },
-    { allAnimationsFinished: true, hadAnimations: true, mark: 'highlight' },
+    {
+      allAnimationsFinished: true,
+      due: 120,
+      hadAnimations: true,
+      mark: 'underline',
+      timerMark: 'underline',
+    },
+    {
+      allAnimationsFinished: true,
+      due: 240,
+      hadAnimations: true,
+      mark: 'circle',
+      timerMark: 'circle',
+    },
+    {
+      allAnimationsFinished: true,
+      due: 480,
+      hadAnimations: true,
+      mark: 'highlight',
+      timerMark: 'highlight',
+    },
   ]);
   expect([
     output.stateAfterFirstAnimation,
@@ -270,6 +385,9 @@ test('three unequal members draw in one frame and complete only after every anim
     { type: 'hana:cancel', state: 'hidden' },
     { type: 'hana:start', state: 'showing' },
     { type: 'hana:complete', state: 'visible' },
+    { type: 'hana:cancel', state: 'hidden' },
+    { type: 'hana:start', state: 'showing' },
+    { type: 'hana:cancel', state: 'destroyed' },
   ]);
   expect(output.afterRefresh).toEqual({
     overlays: 1,
@@ -324,6 +442,16 @@ test('three unequal members draw in one frame and complete only after every anim
     descriptions: ['author-first', null, null],
     overlays: 0,
     owned: 0,
+  });
+  expect(output.cancellation).toEqual({
+    allIdle: true,
+    animations: 10,
+    runOutcome: 'AbortError',
+  });
+  expect(output.cleanup).toEqual({
+    activeAnimations: 0,
+    frames: 0,
+    timers: 0,
   });
 });
 
@@ -844,18 +972,31 @@ test('reduced motion keeps one run lifecycle without live animations', async ({ 
     };
     await run;
     const markPaths = [...document.querySelectorAll('.hana-mark-path')];
+    const pathsFor = (mark) => [
+      ...document.querySelectorAll(
+        `.hana-annotation[data-hana-mark="${mark}"] .hana-mark-path`,
+      ),
+    ];
     const result = {
       animations: document.getAnimations().length,
       events,
       immediate,
+      markStyles: {
+        circle: pathsFor('circle').map((path) => ({
+          dasharray: path.style.strokeDasharray,
+          dashoffset: path.style.strokeDashoffset,
+        })),
+        highlight: pathsFor('highlight').map((path) => ({
+          clipPath: path.style.clipPath,
+        })),
+        underline: pathsFor('underline').map((path) => ({
+          dasharray: path.style.strokeDasharray,
+          dashoffset: path.style.strokeDashoffset,
+        })),
+      },
       pathCount: markPaths.length,
       sameRun: controller.finished === run,
       state: controller.state,
-      stylesFinal: markPaths.every((path) => (
-        getComputedStyle(path).strokeDashoffset === '0px'
-          || getComputedStyle(path).clipPath === 'inset(0px 0%)'
-          || getComputedStyle(path).clipPath === 'inset(0px 0% 0px)'
-      )),
       visible: document.querySelectorAll('.hana-annotation:not([hidden])').length,
     };
     controller.destroy();
@@ -869,10 +1010,17 @@ test('reduced motion keeps one run lifecycle without live animations', async ({ 
       { state: 'visible', type: 'hana:complete' },
     ],
     immediate: { animations: 0, sameRun: true, state: 'showing' },
+    markStyles: {
+      circle: [
+        { dasharray: '1', dashoffset: '0' },
+        { dasharray: '1', dashoffset: '0' },
+      ],
+      highlight: [{ clipPath: 'inset(0px 0% 0px 0px)' }],
+      underline: [{ dasharray: '1', dashoffset: '0' }],
+    },
     pathCount: 4,
     sameRun: true,
     state: 'visible',
-    stylesFinal: true,
     visible: 3,
   });
 });
@@ -1143,14 +1291,28 @@ test('viewport trigger follows a replacement first selector target before entry'
   });
 
   await page.waitForFunction(() => window.groupController.state === 'visible');
-  expect(await page.evaluate(() => ({
-    state: window.groupController.state,
-    starts: window.groupStarts,
-    visibleMarks: document.querySelectorAll('.hana-annotation:not([hidden])').length,
-  }))).toEqual({
-    state: 'visible',
-    starts: [true],
-    visibleMarks: 2,
+  expect(await page.evaluate(() => {
+    const visible = {
+      state: window.groupController.state,
+      starts: window.groupStarts,
+      visibleMarks: document.querySelectorAll('.hana-annotation:not([hidden])').length,
+    };
+    window.groupController.destroy();
+    return {
+      afterDestroy: {
+        overlays: document.querySelectorAll('[data-hana-overlay]').length,
+        owned: document.querySelectorAll('[data-hana-id]').length,
+        visibleMarks: document.querySelectorAll('.hana-annotation:not([hidden])').length,
+      },
+      visible,
+    };
+  })).toEqual({
+    afterDestroy: { overlays: 0, owned: 0, visibleMarks: 0 },
+    visible: {
+      state: 'visible',
+      starts: [true],
+      visibleMarks: 2,
+    },
   });
 });
 
