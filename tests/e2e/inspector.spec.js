@@ -411,10 +411,15 @@ test('bounded command palette filters and executes through the current Inspector
   await expect(page.locator('.hana-annotation[data-hana-mark="hanamaru"]:not([hidden])'))
     .toHaveCount(1);
 
+  const circle = inspector.getByRole('button', { name: 'Circle', exact: true });
+  await circle.click();
+  await expect(circle).toBeFocused();
+  await expect(circle).toHaveAttribute('aria-pressed', 'true');
   await page.keyboard.press('Control+K');
   await expect(palette).toBeVisible();
   await filter.press('Escape');
   await expect(palette).toBeHidden();
+  await expect(circle).toBeFocused();
   await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
   expect(failures).toEqual([]);
 });
@@ -710,6 +715,39 @@ test('desktop Inspector keeps the Range toolbar and fixed output rail inside the
   expect(railGeometry.right).toBeLessThanOrEqual(railGeometry.visualRight - 8);
   expect(railGeometry.top).toBeGreaterThanOrEqual(railGeometry.visualTop + 8);
   expect(railGeometry.bottom).toBeLessThanOrEqual(railGeometry.visualBottom - 8);
+  const settledGeometry = await page.evaluate(() => {
+    const selection = getSelection().getRangeAt(0).getBoundingClientRect();
+    const toolbar = document.querySelector('[data-inspector-toolbar]').getBoundingClientRect();
+    const railRect = document.querySelector('[data-inspector-output]').getBoundingClientRect();
+    const intersects = (first, second) => (
+      first.left < second.right
+      && first.right > second.left
+      && first.top < second.bottom
+      && first.bottom > second.top
+    );
+    return {
+      railToolbarIntersect: intersects(railRect, toolbar),
+      selectionToolbarIntersect: intersects(selection, toolbar),
+      toolbar: {
+        bottom: toolbar.bottom,
+        left: toolbar.left,
+        right: toolbar.right,
+        top: toolbar.top,
+      },
+      visual: {
+        bottom: visualViewport.offsetTop + visualViewport.height,
+        left: visualViewport.offsetLeft,
+        right: visualViewport.offsetLeft + visualViewport.width,
+        top: visualViewport.offsetTop,
+      },
+    };
+  });
+  expect(settledGeometry.selectionToolbarIntersect).toBe(false);
+  expect(settledGeometry.railToolbarIntersect).toBe(false);
+  expect(settledGeometry.toolbar.left).toBeGreaterThanOrEqual(settledGeometry.visual.left + 8);
+  expect(settledGeometry.toolbar.right).toBeLessThanOrEqual(settledGeometry.visual.right - 8);
+  expect(settledGeometry.toolbar.top).toBeGreaterThanOrEqual(settledGeometry.visual.top + 8);
+  expect(settledGeometry.toolbar.bottom).toBeLessThanOrEqual(settledGeometry.visual.bottom - 8);
   expect(await page.evaluate(
     () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
   )).toBe(true);
@@ -743,8 +781,19 @@ test('roving seven marks support arrows Home End and activation with one tab sto
   await underline.press('Enter');
   await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
   await expect(underline).toHaveAttribute('aria-pressed', 'true');
-  await underline.press(' ');
-  await expect(underline).toHaveAttribute('aria-pressed', 'true');
+  await underline.press('ArrowRight');
+  const highlight = inspector.getByRole('button', { name: 'Highlight', exact: true });
+  await expect(highlight).toBeFocused();
+  await highlight.press(' ');
+  await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
+  await expect(highlight).toHaveAttribute('aria-pressed', 'true');
+  await expect(underline).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.hana-annotation[data-hana-mark="highlight"]:not([hidden])'))
+    .toHaveCount(1);
+  await expect(page.locator('.hana-annotation[data-hana-mark="underline"]:not([hidden])'))
+    .toHaveCount(0);
+  await expect(page.locator('[data-inspector-output-value="javascript"]'))
+    .toHaveValue(/"mark": "highlight"/);
 });
 
 test('Tab order follows Exit mark note actions output Copy and Options summary', async ({
@@ -1069,12 +1118,30 @@ test('reduced motion makes Inspector reveal and public system-motion annotation 
       && (inspectorNode.contains(animation.effect?.target)
         || animation.effect?.target?.closest?.('.hana-annotation, .hana-note'))
     ));
+    const owned = [...document.querySelectorAll(
+      '.hana-annotation[data-hana-mark="underline"]:not([hidden])',
+    )].at(-1);
+    const finalPaths = [...owned.querySelectorAll('.hana-path')].map((path) => {
+      const style = getComputedStyle(path);
+      return {
+        opacity: style.opacity,
+        strokeDashoffset: style.strokeDashoffset,
+      };
+    });
     return {
       active: active.length,
+      finalPaths,
+      groupAnimating: owned.classList.contains('hana-is-animating'),
       styles,
     };
   });
   expect(motion.active).toBe(0);
+  expect(motion.groupAnimating).toBe(false);
+  expect(motion.finalPaths.length).toBeGreaterThan(0);
+  for (const path of motion.finalPaths) {
+    expect(path.strokeDashoffset).toBe('0px');
+    expect(path.opacity).toBe('1');
+  }
   for (const style of motion.styles) {
     expect(style.animationDuration.split(',').every((value) => Number.parseFloat(value) === 0))
       .toBe(true);
