@@ -29,6 +29,7 @@ const storySteps = [
 const status = document.querySelector('.demo-status');
 const version = document.querySelector('[data-demo-version]');
 const locatorProof = document.querySelector('#locator-proof');
+const storyProof = document.querySelector('.demo-proof-fields');
 const storyState = document.querySelector('[data-demo-story-state]');
 const storyStep = document.querySelector('[data-demo-story-step]');
 const storyRun = document.querySelector('[data-demo-story-run]');
@@ -84,12 +85,18 @@ let ledgerMark = 'underline';
 let modeController = null;
 let reflowRequested = false;
 let appliedMode = null;
+let proofStoryActivated = false;
+let proofStoryRestoring = false;
 
-const proofStory = story(storySteps, {
-  trigger: 'manual',
-  gap: 180,
-  motion: 'system',
-});
+function createProofStory() {
+  return story(storySteps, {
+    trigger: 'manual',
+    gap: 180,
+    motion: 'system',
+  });
+}
+
+let proofStory = createProofStory();
 
 function setSequenceStage(name) {
   for (const stage of sequenceStages) {
@@ -103,7 +110,7 @@ function followRuntimeMotion(annotation) {
   const epoch = phaseEpoch;
   const readAnimations = () => {
     if (epoch !== phaseEpoch || activeAnnotation !== annotation
-      || proofStory.state !== 'playing') return;
+      || proofStory?.state !== 'playing') return;
     const animations = (document.getAnimations?.() ?? []).filter((animation) => {
       const target = animation.effect?.target;
       return animation.playState !== 'finished'
@@ -139,15 +146,15 @@ function synchronizeCodeStep() {
 }
 
 function renderStoryState() {
-  const state = proofStory.state;
+  const state = proofStory?.state ?? 'offscreen';
   storyState.textContent = state;
   storyStep.textContent = activeIndex < 0 ? `— / ${storySteps.length}` : `${activeIndex + 1} / ${storySteps.length}`;
   storyRun.textContent = String(runCount);
   completion.textContent = `${acceptedSteps} of ${storySteps.length} accepted · ${state}`;
-  storyButtons.play.disabled = state !== 'idle';
-  storyButtons.pause.disabled = state !== 'playing';
-  storyButtons.resume.disabled = state !== 'paused';
-  storyButtons.replay.disabled = state === 'idle' || state === 'destroyed';
+  storyButtons.play.disabled = proofStory === null || state !== 'idle';
+  storyButtons.pause.disabled = proofStory === null || state !== 'playing';
+  storyButtons.resume.disabled = proofStory === null || state !== 'paused';
+  storyButtons.replay.disabled = proofStory === null || state === 'idle' || state === 'destroyed';
   modeApplyButton.disabled = state === 'playing' || state === 'paused';
 }
 
@@ -208,17 +215,19 @@ for (const tab of tabs) {
 storyButtons.play.addEventListener('click', () => {
   suspendSectionProofs();
   destroyModeProof({ forget: true });
+  proofStoryActivated = true;
+  proofStoryRestoring = false;
   proofStory.play();
   renderStoryState();
 });
 storyButtons.pause.addEventListener('click', () => {
-  proofStory.pause();
+  proofStory?.pause();
   renderStoryState();
   status.textContent = `Story paused at step ${activeIndex + 1}.`;
 });
 storyButtons.resume.addEventListener('click', () => {
-  proofStory.resume();
-  if (proofStory.state === 'playing' && activeAnnotation !== null) {
+  proofStory?.resume();
+  if (proofStory?.state === 'playing' && activeAnnotation !== null) {
     followRuntimeMotion(activeAnnotation);
   }
   renderStoryState();
@@ -227,6 +236,8 @@ storyButtons.resume.addEventListener('click', () => {
 storyButtons.replay.addEventListener('click', () => {
   suspendSectionProofs();
   destroyModeProof({ forget: true });
+  proofStoryActivated = true;
+  proofStoryRestoring = false;
   proofStory.replay();
   renderStoryState();
 });
@@ -239,7 +250,9 @@ locatorProof.addEventListener('hana:start', (event) => {
   acceptedSteps = 0;
   renderStoryState();
   synchronizeCodeStep();
-  status.textContent = `Story run ${runCount} started.`;
+  status.textContent = proofStoryRestoring
+    ? `Restoring story run ${runCount}.`
+    : `Story run ${runCount} started.`;
 });
 
 locatorProof.addEventListener('hana:step', (event) => {
@@ -266,7 +279,10 @@ locatorProof.addEventListener('hana:complete', (event) => {
   if (event.detail.controller !== proofStory) return;
   acceptedSteps = storySteps.length;
   renderStoryState();
-  status.textContent = 'Story complete.';
+  status.textContent = proofStoryRestoring
+    ? 'Story restored after returning to proof.'
+    : 'Story complete.';
+  proofStoryRestoring = false;
 });
 
 locatorProof.addEventListener('hana:cancel', (event) => {
@@ -282,7 +298,7 @@ locatorProof.addEventListener('hana:error', (event) => {
 });
 
 document.addEventListener('animationstart', (event) => {
-  if (proofStory.state !== 'playing') return;
+  if (proofStory?.state !== 'playing') return;
   if (event.target.matches('.hana-note')) setSequenceStage('note');
   else if (event.target.matches('.hana-connector-path')) setSequenceStage('connector');
   else if (event.target.matches('.hana-mark-path')) setSequenceStage('mark');
@@ -316,12 +332,12 @@ playgroundLink.addEventListener('click', () => {
 function createReflowProof() {
   reflowController?.destroy();
   reflowController = annotate({
-    within: '#reflow-copy',
+    within: '#reflow-target-line',
     text: 'this note stays attached',
   }, {
     mark: 'underline',
     note: 'Placed again after reflow.',
-    placement: 'auto',
+    placement: 'bottom',
     motion: 'never',
     duration: 0,
     seed: 'demo-reflow-proof',
@@ -511,7 +527,30 @@ function observeViewport(node, onChange) {
   };
 }
 
+function suspendProofStoryForViewport() {
+  if (!proofStoryActivated || proofStory === null) return;
+  phaseEpoch += 1;
+  activeAnnotation = null;
+  const exitingStory = proofStory;
+  proofStory = null;
+  exitingStory.destroy();
+  renderStoryState();
+  status.textContent = 'Story proof is offscreen · return to redraw.';
+}
+
+function restoreProofStoryForViewport() {
+  if (!proofStoryActivated || proofStory !== null) return;
+  proofStoryRestoring = true;
+  proofStory = createProofStory();
+  proofStory.play();
+  renderStoryState();
+}
+
 const visibilityCleanups = [
+  observeViewport(storyProof, (visible) => {
+    if (visible) restoreProofStoryForViewport();
+    else suspendProofStoryForViewport();
+  }),
   observeViewport(reflowSpecimen, (visible) => {
     if (!reflowRequested) return;
     if (!visible) {
@@ -619,7 +658,7 @@ rangeButton.addEventListener('click', () => {
 window.addEventListener('pagehide', (event) => {
   if (event.persisted) return;
   for (const cleanup of visibilityCleanups) cleanup();
-  proofStory.destroy();
+  proofStory?.destroy();
   rangeProof.destroy();
   suspendSectionProofs();
   destroyModeProof({ forget: true });

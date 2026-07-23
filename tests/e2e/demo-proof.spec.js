@@ -303,8 +303,10 @@ test('390px ruler preserves the exact 320 to 760 measure inside a contained prev
   const specimen = page.locator('[data-demo-reflow-specimen]');
   const stage = page.locator('.demo-reflow-stage');
   const target = page.locator('[data-demo-reflow-target]');
+  const targetLine = page.locator('[data-demo-reflow-target-line]');
   await ruler.scrollIntoViewIfNeeded();
   await expect(target).toHaveCount(1);
+  await expect(targetLine).toHaveCount(1);
 
   for (const width of [320, 400, 540, 760]) {
     await ruler.fill(String(width));
@@ -328,10 +330,76 @@ test('390px ruler preserves the exact 320 to 760 measure inside a contained prev
         rect.left >= stageRect.left && rect.right <= stageRect.right
       ));
     })).toBe(true);
+    const { connector, note } = await noteAndConnector(page, 'underline');
+    const [noteRect, viewport, ...protectedRects] = await Promise.all([
+      clientRect(note),
+      page.evaluate(() => ({ height: innerHeight, width: innerWidth })),
+      clientRect(page.locator('#reflow-title')),
+      clientRect(page.locator('.demo-width-control')),
+      clientRect(page.locator('.demo-reflow-specimen__register')),
+      clientRect(page.locator('#reflow-copy')),
+      clientRect(targetLine),
+    ]);
+    for (const protectedRect of protectedRects) {
+      expect(overlaps(noteRect, protectedRect), `${width}px note collision`).toBe(false);
+    }
+    expect(noteRect.left).toBeGreaterThanOrEqual(12);
+    expect(noteRect.top).toBeGreaterThanOrEqual(12);
+    expect(noteRect.right).toBeLessThanOrEqual(viewport.width - 12 + 1);
+    expect(noteRect.bottom).toBeLessThanOrEqual(viewport.height - 12 + 1);
+    await expect(connector).toHaveAttribute('d', /\S/);
   }
   await expect(page.locator('.hana-note:not(.hana-is-hidden)', {
     hasText: 'Placed again after reflow.',
   })).toBeVisible();
+  expect(failures).toEqual([]);
+});
+
+test('completed main story leaves with its proof and restores once without cross-flow leaks', async ({ page }) => {
+  const failures = capturePageFailures(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await expect(page.locator('[data-demo-story-state]')).toHaveText('idle');
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Play story', exact: true }).click();
+  await expect(page.locator('[data-demo-story-state]')).toHaveText('complete', { timeout: 8_000 });
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(2);
+  const firstRun = await page.locator('[data-demo-story-run]').textContent();
+
+  const applyJson = async () => {
+    await page.getByRole('tab', { name: 'JSON', exact: true }).click();
+    await page.getByRole('button', { name: 'Apply active mode' }).click();
+    await expect(page.locator('.hana-note:not(.hana-is-hidden)', {
+      hasText: 'Parsed locally, rendered through annotate().',
+    })).toBeVisible();
+    await expect(page.locator('.hana-note:not(.hana-is-hidden)', {
+      hasText: /Still attached|Measured again/,
+    })).toHaveCount(0);
+    await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(1);
+  };
+
+  await applyJson();
+  await page.locator('#quick-start').scrollIntoViewIfNeeded();
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
+
+  const locatorProof = page.locator('#locator-proof');
+  await locatorProof.scrollIntoViewIfNeeded();
+  await expect(page.locator('[data-demo-story-state]')).toHaveText('complete', { timeout: 8_000 });
+  await expect(page.locator('[data-demo-completion]')).toContainText('2 of 2 accepted · complete');
+  await expect(page.getByRole('button', { name: 'Replay story' })).toBeEnabled();
+  await expect(page.locator('[data-demo-story-run]')).not.toHaveText(firstRun);
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(2);
+  await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
+  const secondRun = await page.locator('[data-demo-story-run]').textContent();
+
+  await applyJson();
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(1);
+  await locatorProof.scrollIntoViewIfNeeded();
+  await expect(page.locator('[data-demo-story-state]')).toHaveText('complete', { timeout: 8_000 });
+  await expect(page.locator('[data-demo-story-run]')).not.toHaveText(secondRun);
+  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(2);
+  await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
   expect(failures).toEqual([]);
 });
 

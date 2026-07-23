@@ -783,7 +783,7 @@
   width: 760px;
   max-width: none;
   min-height: 10rem;
-  padding: 1.25rem clamp(1rem, 4vw, 2rem);
+  padding: 1.25rem clamp(1rem, 4vw, 2rem) 7rem;
   border-top: 3px solid var(--demo-ink);
   border-bottom: 1px solid rgb(31 39 51 / 34%);
   background: var(--demo-paper-strong);
@@ -801,6 +801,11 @@
   margin-bottom: 0.85rem;
   color: var(--demo-muted);
   font: 750 0.7rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.demo-reflow-specimen .demo-reflow-target-line {
+  margin-top: 1rem;
+  font-weight: 700;
 }
 
 .demo-mark-controls {
