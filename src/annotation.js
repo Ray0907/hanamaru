@@ -155,7 +155,7 @@ function layoutFor(
   const targetRects = targetRectsSnapshot ?? env.targetRects(record);
   const targetRect = unionRects(targetRects);
   const measured = renderer.measure();
-  const metrics = env.readThemeMetrics(renderer.group);
+  const metrics = measured.theme ?? env.readThemeMetrics(renderer.group);
   const markPaths = markPathsSnapshot
     ?? buildMarkPaths(options.mark, targetRects, options.seed, 5, markPlugin);
   const targetVisible = targetRects.some((item) => intersectsViewport(item, measured.viewport));
@@ -170,6 +170,7 @@ function layoutFor(
       connector: { shaft: '', head: '' },
       viewport: measured.viewport,
       targetVisible,
+      ...(measured.theme === undefined ? {} : { theme: measured.theme }),
     };
   }
 
@@ -191,6 +192,7 @@ function layoutFor(
     connector: buildConnector(targetRect, placement.rect, placement.side),
     viewport: measured.viewport,
     targetVisible,
+    ...(measured.theme === undefined ? {} : { theme: measured.theme }),
   };
   if (targetVisible) renderer.reserveNote?.(layout.noteRect);
   return layout;
@@ -374,6 +376,7 @@ function createDomAnnotationEnvironment({
   lease,
   createEvent,
   createErrorEvent,
+  description = null,
   resolveCandidate,
 }) {
   const win = view ?? intrinsicDocumentView(doc);
@@ -389,7 +392,7 @@ function createDomAnnotationEnvironment({
     createEvent,
     createErrorEvent,
     createRenderer(args) {
-      return createDomRenderer({ ...args, view: win });
+      return createDomRenderer({ ...args, description, view: win });
     },
     direction(owner) { return win.getComputedStyle(owner).direction; },
     microtask(callback) { win.queueMicrotask(callback); },
@@ -475,6 +478,19 @@ export function createAnnotationEnvironmentWithResources({
         ? resources.createErrorEvent(type, detail, owner)
         : resources.createEvent(type, detail, owner);
     },
+    description: Object.freeze({
+      create(owner, text) {
+        return resources.createMirror(owner, text);
+      },
+      update(mirror, text) {
+        return resources.updateMirror(mirror, text);
+      },
+      remove(mirror) {
+        return resources.removeMirror(mirror);
+      },
+      host: resources.host,
+      portal: resources.portal,
+    }),
     resolveCandidate,
   });
 }

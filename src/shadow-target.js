@@ -266,6 +266,7 @@ export function shadowDomIntrinsics(root) {
   const dispatchEvent = methodReader(eventTargetPrototype, 'dispatchEvent');
   return Object.freeze({
     document: context.document,
+    host: context.readers.host(context.root),
     view: context.realm,
     assertElement(element) {
       assertExactElement(element, context);

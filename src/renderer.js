@@ -13,6 +13,19 @@ export function removeDescriptionToken(current, id) {
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 const MAX_TIMEOUT_DELAY = 2_147_483_647;
+const DEFAULT_SHADOW_Z_INDEX = '2147483000';
+const SHADOW_THEME_PROPERTIES = Object.freeze([
+  '--hana-color',
+  '--hana-mark-color',
+  '--hana-highlight-color',
+  '--hana-note-background',
+  '--hana-note-color',
+  '--hana-stroke-width',
+  '--hana-padding',
+  '--hana-note-gap',
+  '--hana-font',
+  '--hana-duration',
+]);
 
 export function createDurationClock({
   duration,
@@ -155,11 +168,31 @@ export function readThemeMetrics(element, view = undefined) {
   };
 }
 
+function readShadowTheme(description, owner, view) {
+  if (description === null || description.host === null) return null;
+  const ownerStyle = view.getComputedStyle(owner);
+  const hostStyle = view.getComputedStyle(description.host);
+  const values = {};
+  for (const name of SHADOW_THEME_PROPERTIES) {
+    const value = ownerStyle.getPropertyValue(name).trim()
+      || hostStyle.getPropertyValue(name).trim();
+    if (value !== '') values[name] = value;
+  }
+  return {
+    duration: cssTime(values['--hana-duration'] ?? '', 650),
+    noteGap: cssPixels(values['--hana-note-gap'] ?? '', 16),
+    values,
+    zIndex: hostStyle.getPropertyValue('--hana-z-index').trim()
+      || DEFAULT_SHADOW_Z_INDEX,
+  };
+}
+
 export function createRenderer({
   id,
   record,
   options,
   lease,
+  description = null,
   view = undefined,
 }) {
   const { shared } = lease;
@@ -182,7 +215,7 @@ export function createRenderer({
     noteElement.id = noteId;
     noteElement.textContent = options.note;
     noteElement.classList.add('hana-is-hidden');
-    if (!options.accessible) {
+    if (!options.accessible || description !== null) {
       noteElement.setAttribute('aria-hidden', 'true');
     }
     shared.noteLayer.append(noteElement);
@@ -190,14 +223,93 @@ export function createRenderer({
 
   let owner = record.ownerElement ?? null;
   let descriptionAssociated = false;
+  let descriptionMirror = null;
   let destroyed = false;
   let activeAnimations = [];
+  let blurCheckInstalled = false;
   let layoutVisible = true;
   let motionRun = null;
   let overflowSequence = 0;
 
+  function onOverflowNoteKeydown(event) {
+    if (noteElement?.getAttribute('role') !== 'note') return;
+    const page = Math.max(1, noteElement.clientHeight);
+    const commands = {
+      ArrowDown: () => { noteElement.scrollTop += 24; },
+      ArrowUp: () => { noteElement.scrollTop -= 24; },
+      End: () => { noteElement.scrollTop = noteElement.scrollHeight; },
+      Home: () => { noteElement.scrollTop = 0; },
+      PageDown: () => { noteElement.scrollTop += page; },
+      PageUp: () => { noteElement.scrollTop -= page; },
+    };
+    const command = commands[event.key];
+    if (command === undefined) return;
+    event.preventDefault();
+    command();
+  }
+
+  if (noteElement !== null && description !== null && options.accessible) {
+    noteElement.addEventListener('keydown', onOverflowNoteKeydown);
+  }
+
+  function noteIsFocused() {
+    return noteElement !== null && doc.activeElement === noteElement;
+  }
+
+  function onOverflowNoteBlur() {
+    blurCheckInstalled = false;
+    if (!destroyed) scheduleOverflowCheck();
+  }
+
+  function deferOrdinaryNoteState() {
+    if (noteElement === null) return;
+    noteElement.removeAttribute('aria-hidden');
+    noteElement.setAttribute('role', 'note');
+    noteElement.setAttribute('tabindex', '0');
+    if (blurCheckInstalled) return;
+    blurCheckInstalled = true;
+    noteElement.addEventListener('blur', onOverflowNoteBlur, { once: true });
+  }
+
+  function applyOverflowState(overflowing) {
+    if (noteElement === null) return;
+    if (description === null) {
+      if (overflowing) noteElement.setAttribute('tabindex', '0');
+      else noteElement.removeAttribute('tabindex');
+      return;
+    }
+    if (overflowing) {
+      noteElement.removeAttribute('aria-hidden');
+      noteElement.setAttribute('role', 'note');
+      noteElement.setAttribute('tabindex', '0');
+      return;
+    }
+    if (noteIsFocused()) {
+      deferOrdinaryNoteState();
+      return;
+    }
+    noteElement.setAttribute('aria-hidden', 'true');
+    noteElement.removeAttribute('role');
+    noteElement.removeAttribute('tabindex');
+  }
+
+  function resetScopedNoteAccessibility() {
+    if (noteElement === null || description === null || !options.accessible) return;
+    if (noteIsFocused()) noteElement.blur();
+    noteElement.setAttribute('aria-hidden', 'true');
+    noteElement.removeAttribute('role');
+    noteElement.removeAttribute('tabindex');
+  }
+
   function associateDescription() {
     if (noteElement === null || !options.accessible) {
+      return;
+    }
+    if (description !== null) {
+      if (descriptionMirror === null) {
+        descriptionMirror = description.create(owner, options.note);
+      }
+      descriptionAssociated = true;
       return;
     }
     const ownerHasToken = typeof owner?.getAttribute === 'function'
@@ -211,7 +323,13 @@ export function createRenderer({
     if (!descriptionAssociated) {
       return;
     }
-    writeDescription(owner, noteId, false);
+    if (descriptionMirror !== null) {
+      const mirror = descriptionMirror;
+      descriptionMirror = null;
+      description.remove(mirror);
+    } else {
+      writeDescription(owner, noteId, false);
+    }
     descriptionAssociated = false;
   }
 
@@ -226,7 +344,8 @@ export function createRenderer({
       generation,
       read() {
         return {
-          overflowing: noteElement.scrollHeight > noteElement.clientHeight,
+          overflowing: noteElement.scrollHeight > noteElement.clientHeight
+            || noteElement.scrollWidth > noteElement.clientWidth,
           sequence,
         };
       },
@@ -234,11 +353,7 @@ export function createRenderer({
         if (destroyed || result.sequence !== overflowSequence) {
           return;
         }
-        if (result.overflowing) {
-          noteElement.setAttribute('tabindex', '0');
-        } else {
-          noteElement.removeAttribute('tabindex');
-        }
+        applyOverflowState(result.overflowing);
       },
     });
   }
@@ -255,7 +370,8 @@ export function createRenderer({
       if (noteElement !== null) {
         noteElement.classList.add('hana-is-hidden');
         noteElement.classList.remove('hana-is-visible');
-        noteElement.removeAttribute('tabindex');
+        if (description === null) noteElement.removeAttribute('tabindex');
+        else resetScopedNoteAccessibility();
       }
       return;
     }
@@ -270,6 +386,7 @@ export function createRenderer({
 
   function measure() {
     const visualViewport = win.visualViewport;
+    const theme = readShadowTheme(description, owner, win);
     const noteRect = noteElement === null ? null : copyRect(noteElement.getBoundingClientRect());
     const peerNoteRects = [];
     const addPeerRect = (input) => {
@@ -295,6 +412,7 @@ export function createRenderer({
         left: visualViewport?.offsetLeft ?? 0,
         top: visualViewport?.offsetTop ?? 0,
       },
+      ...(theme === null ? {} : { theme }),
     };
   }
 
@@ -325,6 +443,19 @@ export function createRenderer({
       ));
     }
     layoutVisible = layout.targetVisible !== false;
+    if (layout.theme !== undefined) {
+      for (const name of SHADOW_THEME_PROPERTIES) {
+        const value = layout.theme.values[name];
+        if (value === undefined) {
+          group.style.removeProperty(name);
+          noteElement?.style.removeProperty(name);
+        } else {
+          group.style.setProperty(name, value);
+          noteElement?.style.setProperty(name, value);
+        }
+      }
+      description.portal.style.zIndex = layout.theme.zIndex;
+    }
     group.replaceChildren(fragment);
 
     if (noteElement !== null) {
@@ -339,6 +470,12 @@ export function createRenderer({
 
   function updateOwner(nextOwner) {
     if (destroyed || nextOwner === owner) {
+      return;
+    }
+    if (descriptionAssociated && description !== null) {
+      removeDescription();
+      owner = nextOwner;
+      associateDescription();
       return;
     }
     if (descriptionAssociated) {
@@ -564,7 +701,8 @@ export function createRenderer({
     if (noteElement !== null) {
       noteElement.classList.add('hana-is-hidden');
       noteElement.classList.remove('hana-is-visible');
-      noteElement.removeAttribute('tabindex');
+      if (description === null) noteElement.removeAttribute('tabindex');
+      else resetScopedNoteAccessibility();
     }
   }
 
@@ -573,6 +711,11 @@ export function createRenderer({
       return;
     }
     destroyed = true;
+    if (blurCheckInstalled) {
+      blurCheckInstalled = false;
+      noteElement?.removeEventListener('blur', onOverflowNoteBlur);
+    }
+    noteElement?.removeEventListener('keydown', onOverflowNoteKeydown);
     cancelMotion();
     removeDescription();
     overflowSequence += 1;

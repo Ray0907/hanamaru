@@ -646,17 +646,19 @@ class SharedDocumentResources {
     const prior = this.#layouts.get(id);
     const token = renewToken ? {} : controller.token;
     const mutationRoot = options.mutationRoot ?? this.#doc;
+    const mutationHost = options.mutationHost ?? null;
     const binding = {
       generation,
       id,
       mutationRoot,
+      mutationHost,
       mutationScope: this.#discoverMutationScope(record, mutationRoot),
       note,
       onError,
       read,
       record,
-      resizeTargets: this.#discoverResizeTargets(record, note),
-      scrollTargets: this.#discoverScrollTargets(record),
+      resizeTargets: this.#discoverResizeTargets(record, note, mutationHost),
+      scrollTargets: this.#discoverScrollTargets(record, mutationHost),
       token,
       write,
     };
@@ -680,12 +682,13 @@ class SharedDocumentResources {
     };
   }
 
-  #discoverScrollTargets(record) {
+  #discoverScrollTargets(record, mutationHost) {
     const targets = new Set();
     let current = this.#isElement(record.ownerElement)
       ? record.ownerElement
       : this.#isElement(record.element) ? record.element : null;
     const scrollingElement = this.#doc.scrollingElement;
+    let crossedShadowBoundary = false;
 
     while (current !== null) {
       const style = this.#window.getComputedStyle(current);
@@ -696,13 +699,21 @@ class SharedDocumentResources {
       if (current === scrollingElement) {
         break;
       }
-      current = current.parentElement;
+      const parent = current.parentElement;
+      if (parent === null
+        && !crossedShadowBoundary
+        && this.#isElement(mutationHost)) {
+        current = mutationHost;
+        crossedShadowBoundary = true;
+      } else {
+        current = parent;
+      }
     }
     targets.add(this.#window);
     return targets;
   }
 
-  #discoverResizeTargets(record, note) {
+  #discoverResizeTargets(record, note, mutationHost) {
     const targets = new Set();
     if (this.#isElement(record.element)) {
       targets.add(record.element);
@@ -711,6 +722,9 @@ class SharedDocumentResources {
     }
     if (this.#isElement(note)) {
       targets.add(note);
+    }
+    if (this.#isElement(mutationHost)) {
+      targets.add(mutationHost);
     }
     return targets;
   }
@@ -730,7 +744,7 @@ class SharedDocumentResources {
     return mutationRoot;
   }
 
-  #signalMutations(records, mutationRoot) {
+  #signalMutations(records, mutationRoot, mutationHost = null) {
     if (!this.#alive) {
       return;
     }
@@ -749,7 +763,8 @@ class SharedDocumentResources {
 
       for (const binding of this.#layouts.values()) {
         if (binding.mutationRoot !== mutationRoot) continue;
-        if (binding.mutationScope === mutationRoot
+        if (record.target === mutationHost
+          || binding.mutationScope === mutationRoot
           || record.target === binding.mutationScope
           || binding.mutationScope.contains?.(record.target)) {
           ids.add(binding.id);
@@ -976,8 +991,8 @@ class SharedDocumentResources {
     return id;
   }
 
-  static signalMutations(shared, records, root) {
-    shared.#signalMutations(records, root);
+  static signalMutations(shared, records, root, host) {
+    shared.#signalMutations(records, root, host);
   }
 
   #destroy() {
@@ -1163,6 +1178,6 @@ export function allocateDocumentResourceId(shared, root, prefix = 'hana-shadow')
   return SharedDocumentResources.allocateId(shared, root, prefix);
 }
 
-export function signalDocumentResourceMutations(shared, records, root) {
-  SharedDocumentResources.signalMutations(shared, records, root);
+export function signalDocumentResourceMutations(shared, records, root, host = null) {
+  SharedDocumentResources.signalMutations(shared, records, root, host);
 }

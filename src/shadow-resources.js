@@ -63,7 +63,7 @@ function createPortal(document, root, rootId) {
   };
 }
 
-function createMutationObserver(root, notify) {
+function createMutationObserver(root, host, notify) {
   const Observer = root.ownerDocument.defaultView.MutationObserver;
   if (typeof Observer !== 'function') {
     throw new TypeError('Shadow resources require MutationObserver');
@@ -74,6 +74,10 @@ function createMutationObserver(root, notify) {
       childList: true,
       subtree: true,
       characterData: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'hidden'],
+    });
+    observer.observe(host, {
       attributes: true,
       attributeFilter: ['class', 'style', 'hidden'],
     });
@@ -131,6 +135,9 @@ function browserAdapter() {
     documentForRoot(root) {
       return contextFor(root).document;
     },
+    hostForRoot(root) {
+      return contextFor(root).host;
+    },
     viewForRoot(root) {
       return contextFor(root).view;
     },
@@ -143,7 +150,9 @@ function browserAdapter() {
     rollbackPortal(_root, raw) {
       releaseRawRecord(raw);
     },
-    createMutationObserver,
+    createMutationObserver(root, notify) {
+      return createMutationObserver(root, contextFor(root).host, notify);
+    },
     rollbackObserver(_root, raw) {
       releaseRawRecord(raw);
     },
@@ -178,7 +187,9 @@ function browserAdapter() {
       return contextFor(root).dispatchFromHost(type, detail);
     },
     registerPortal: registerDocumentResourcePortal,
-    signalMutations: signalDocumentResourceMutations,
+    signalMutations(shared, records, root, _portal, host) {
+      signalDocumentResourceMutations(shared, records, root, host);
+    },
   };
 }
 
@@ -246,7 +257,7 @@ function rollbackRaw(activeAdapter, method, context, raw, install) {
   return releaseRawRecord(raw);
 }
 
-function createScopedShared(documentShared, root, portal) {
+function createScopedShared(documentShared, root, host, portal) {
   const methodCache = new Map();
   const local = {
     noteLayer: portal.noteLayer,
@@ -262,6 +273,7 @@ function createScopedShared(documentShared, root, portal) {
         if (!methodCache.has(key)) {
           methodCache.set(key, (options) => documentShared.observeLayout({
             ...options,
+            mutationHost: host,
             mutationRoot: root,
           }));
         }
@@ -271,6 +283,7 @@ function createScopedShared(documentShared, root, portal) {
         if (!methodCache.has(key)) {
           methodCache.set(key, (id, options) => documentShared.rebindLayout(id, {
             ...options,
+            mutationHost: host,
             mutationRoot: root,
           }));
         }
@@ -307,6 +320,7 @@ function environmentFor(record) {
     rootId,
     scopedShared,
     styleConfig,
+    host,
     view,
   } = record;
   const mirrors = record.mirrors;
@@ -532,6 +546,7 @@ function environmentFor(record) {
 
   return Object.freeze({
     root,
+    host,
     document,
     view,
     styleConfig,
@@ -634,6 +649,9 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
   const view = typeof activeAdapter.viewForRoot === 'function'
     ? activeAdapter.viewForRoot(root)
     : document?.defaultView;
+  const host = typeof activeAdapter.hostForRoot === 'function'
+    ? activeAdapter.hostForRoot(root)
+    : null;
   let rawDocumentLease;
   let rawPortalInstall;
   let rawObserverInstall;
@@ -677,6 +695,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
         records,
         root,
         portalInstall.overlay,
+        ...(host === null ? [] : [host]),
       );
     });
     hasRawObserverInstall = true;
@@ -688,6 +707,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
     const scopedShared = createScopedShared(
       documentLease.shared,
       root,
+      host,
       portalInstall,
     );
     record = {
@@ -696,6 +716,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
       document,
       documentLease,
       environment: null,
+      host,
       knownMirrors: new WeakSet(),
       mirrors: new Map(),
       observerInstall,
