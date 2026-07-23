@@ -589,9 +589,20 @@ export function createAnnotation(target, rawOptions, env) {
     if (snapshot === null) {
       return { paths: null, snapshot: null, targetRects };
     }
+    if (snapshot.status === 'rebuilding' || snapshot.status === 'failed') return null;
     const geometry = snapshotRectGeometry(targetRects);
     if (rectGeometryMatches(snapshot.geometry, geometry)) {
       return { paths: snapshot.paths, snapshot, targetRects: geometry };
+    }
+    const rebuildingSnapshot = Object.freeze({
+      generation: snapshot.generation,
+      operation: snapshot.operation,
+      status: 'rebuilding',
+      geometry,
+      paths: null,
+    });
+    if (pendingMarkPathsSnapshot === snapshot) {
+      pendingMarkPathsSnapshot = rebuildingSnapshot;
     }
     let paths;
     try {
@@ -599,16 +610,28 @@ export function createAnnotation(target, rawOptions, env) {
         ...buildMarkPaths(options.mark, geometry, options.seed, 5, markPlugin),
       ]);
     } catch (error) {
-      consumeMarkPathsSnapshot(snapshot);
+      if (pendingMarkPathsSnapshot === rebuildingSnapshot) {
+        pendingMarkPathsSnapshot = Object.freeze({
+          generation: snapshot.generation,
+          operation: snapshot.operation,
+          status: 'failed',
+          geometry,
+          paths: null,
+          error,
+        });
+      }
       throw error;
     }
     const replacement = Object.freeze({
       generation: snapshot.generation,
       operation: snapshot.operation,
+      status: 'ready',
       geometry,
       paths,
     });
-    if (pendingMarkPathsSnapshot === snapshot) pendingMarkPathsSnapshot = replacement;
+    if (pendingMarkPathsSnapshot === rebuildingSnapshot) {
+      pendingMarkPathsSnapshot = replacement;
+    }
     return { paths, snapshot: replacement, targetRects: geometry };
   }
 
@@ -619,14 +642,16 @@ export function createAnnotation(target, rawOptions, env) {
       record,
       note: renderer.noteElement,
       read: () => {
+        const snapshot = currentMarkPathsSnapshot();
+        if (snapshot?.status === 'rebuilding' || snapshot?.status === 'failed') return null;
         const previousOwner = record.ownerElement;
         resolveCurrentTarget();
         const owner = record.ownerElement;
-        const snapshot = currentMarkPathsSnapshot();
         let resolvedSnapshot = { paths: null, snapshot: null, targetRects: null };
         let layout;
         if (requestedVisible) {
           resolvedSnapshot = resolveMarkPathsSnapshot(snapshot, env.targetRects(record));
+          if (resolvedSnapshot === null) return null;
           layout = layoutFor(
             record,
             renderer,
@@ -649,6 +674,7 @@ export function createAnnotation(target, rawOptions, env) {
         };
       },
       write: (result) => {
+        if (result === null) return;
         consumeMarkPathsSnapshot(result.snapshot);
         knownOwners.add(result.owner);
         renderer.updateOwner(result.owner);
@@ -724,9 +750,10 @@ export function createAnnotation(target, rawOptions, env) {
     const activeRun = run;
     const read = () => {
       if (!isCurrentOperation(operation)) return null;
+      const snapshot = currentMarkPathsSnapshot(operation);
+      if (snapshot?.status === 'rebuilding' || snapshot?.status === 'failed') return null;
       resolveCurrentTarget();
       const owner = record.ownerElement;
-      const snapshot = currentMarkPathsSnapshot(operation);
       let resolvedSnapshot = { paths: null, snapshot: null, targetRects: null };
       let layout;
       if (validate) {
@@ -734,6 +761,7 @@ export function createAnnotation(target, rawOptions, env) {
         layout = null;
       } else {
         resolvedSnapshot = resolveMarkPathsSnapshot(snapshot, env.targetRects(record));
+        if (resolvedSnapshot === null) return null;
         layout = layoutFor(
           record,
           renderer,
@@ -1065,6 +1093,7 @@ export function createAnnotation(target, rawOptions, env) {
       pendingMarkPathsSnapshot = Object.freeze({
         generation,
         operation,
+        status: 'ready',
         geometry: nextMarkPathsSnapshot.geometry,
         paths: nextMarkPathsSnapshot.paths,
       });

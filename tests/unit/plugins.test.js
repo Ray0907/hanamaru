@@ -470,7 +470,7 @@ test('factory throws and invalid results preserve cause under the plugin state e
   );
 });
 
-function annotationHarness({ deferEnqueue = false } = {}) {
+function annotationHarness({ deferEnqueue = false, trackRendererHide = false } = {}) {
   const calls = [];
   const events = [];
   const jobs = [];
@@ -484,15 +484,18 @@ function annotationHarness({ deferEnqueue = false } = {}) {
   };
   let generation = 0;
   let layoutBinding = null;
+  let targetRectReads = 0;
   function execute(entries) {
     const reads = [];
+    const readErrors = [];
     for (const entry of entries) {
       try {
         reads.push({ entry, value: entry.read() });
       } catch (error) {
-        entry.onError?.(error);
+        readErrors.push({ entry, error });
       }
     }
+    for (const { entry, error } of readErrors) entry.onError?.(error);
     for (const { entry, value } of reads) {
       try {
         entry.write(value);
@@ -522,7 +525,10 @@ function annotationHarness({ deferEnqueue = false } = {}) {
     id: `plugin-annotation-${++nextHarnessId}`,
     lease: { shared, release() {} },
     resolveTarget(target) { return target?.record ?? record; },
-    targetRects(targetRecord) { return targetRecord.rects; },
+    targetRects(targetRecord) {
+      targetRectReads += 1;
+      return targetRecord.rects;
+    },
     readThemeMetrics() { return { noteGap: 16 }; },
     reducedMotion() { return true; },
     createEvent(type, detail, eventOwner) { events.push({ type, detail, owner: eventOwner }); },
@@ -540,7 +546,9 @@ function annotationHarness({ deferEnqueue = false } = {}) {
         },
         animate() { return { finished: Promise.resolve() }; },
         finish() {},
-        hide() {},
+        hide() {
+          if (trackRendererHide) calls.push(['hide', options.mark]);
+        },
         destroy() {},
       };
     },
@@ -556,6 +564,7 @@ function annotationHarness({ deferEnqueue = false } = {}) {
     },
     owner,
     record,
+    get targetRectReads() { return targetRectReads; },
   };
 }
 
@@ -696,6 +705,55 @@ test('update rebuilds custom paths once when geometry changes before the deferre
   assert.equal(factoryCalls, 4);
   assert.equal(harness.calls.at(-1)[3][0].left, 100);
   assert.deepEqual(harness.calls.at(-1)[2], ['M 100 0 L 130 1']);
+  controller.destroy();
+  unregister();
+});
+
+test('same-frame sibling reads do not retry or report a failed update reflow', async () => {
+  let factoryCalls = 0;
+  const reflowCause = new Error('reflow rejected');
+  const unregister = registerMark('failed-update-reflow', ({ rects }) => {
+    factoryCalls += 1;
+    if (rects[0].left === 100) throw reflowCause;
+    return { paths: [`M ${rects[0].left} 0 L ${rects[0].right} 1`] };
+  });
+  const harness = annotationHarness({
+    deferEnqueue: true,
+    trackRendererHide: true,
+  });
+  const controller = createAnnotation(
+    harness.owner,
+    { mark: 'failed-update-reflow', seed: 'before' },
+    harness.env,
+  );
+  controller.show();
+  harness.flush();
+  await controller.finished;
+  assert.equal(factoryCalls, 1);
+
+  controller.update({ seed: 'after' });
+  assert.equal(factoryCalls, 2);
+  assert.equal(harness.targetRectReads, 2);
+  const drawCount = harness.calls.filter(([name]) => name === 'draw').length;
+  const hideCount = harness.calls.filter(([name]) => name === 'hide').length;
+  harness.record.rects = [rect(100, 20, 30, 8)];
+  harness.flush({ includeLayout: true });
+
+  assert.equal(factoryCalls, 3);
+  assert.equal(harness.targetRectReads, 3);
+  assert.equal(controller.state, 'suspended');
+  assert.equal(
+    harness.calls.filter(([name]) => name === 'draw').length,
+    drawCount,
+  );
+  assert.equal(
+    harness.calls.filter(([name]) => name === 'hide').length,
+    hideCount + 1,
+  );
+  assert.equal(harness.events.filter(({ type }) => type === 'hana:error').length, 1);
+  const error = harness.events.find(({ type }) => type === 'hana:error').detail.error;
+  assert.equal(error.code, 'HANA_STATE_MARK_PLUGIN');
+  assert.equal(error.details.cause, reflowCause);
   controller.destroy();
   unregister();
 });
