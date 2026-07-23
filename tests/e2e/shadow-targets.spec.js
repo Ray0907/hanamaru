@@ -106,6 +106,73 @@ test('root validates connected native open, retained closed, nested, and iframe 
   });
 });
 
+test('root iframe scope resolves selector, Element, Range, and parent-realm locator records', async ({ page }) => {
+  const result = await evaluateShadow(page, `(() => {
+    const fixture = window.__shadowFixture;
+    const root = fixture.frameRoot;
+    const target = root.querySelector('#frame-target');
+    const frame = document.querySelector('#foreign-frame');
+    const source = frame.contentDocument.createRange();
+    source.setStart(target.firstChild, 0);
+    source.setEnd(target.firstChild, 11);
+
+    const selector = resolveShadowTarget('#frame-target', root);
+    const element = resolveShadowTarget(target, root);
+    const range = resolveShadowTarget(source, root);
+    const parentLiteral = {
+      within: '#frame-target',
+      text: 'root phrase',
+    };
+    const locator = resolveShadowTarget(parentLiteral, root);
+    const clonedRange = range.range;
+    const locatorRange = locator.range;
+    source.selectNodeContents(target);
+
+    return {
+      selector: selector.kind === 'selector'
+        && selector.element === target
+        && selector.ownerElement === target
+        && selector.refresh() === selector,
+      element: element.kind === 'element'
+        && element.element === target
+        && element.ownerElement === target
+        && element.refresh() === element,
+      range: range.kind === 'range'
+        && clonedRange !== source
+        && clonedRange instanceof frame.contentWindow.Range
+        && clonedRange.startOffset === 0
+        && clonedRange.endOffset === 11
+        && range.ownerElement === target
+        && range.refresh() === range
+        && range.range === clonedRange,
+      locator: locator.kind === 'locator'
+        && locator.source !== parentLiteral
+        && locator.source.within === '#frame-target'
+        && locator.range.toString() === 'root phrase'
+        && locator.ownerElement === target
+        && locator.refresh() === locator
+        && locator.range !== locatorRange,
+      exactRoots: [
+        selector.element,
+        element.element,
+        clonedRange.startContainer,
+        clonedRange.endContainer,
+        locator.range.startContainer,
+        locator.range.endContainer,
+        locator.ownerElement,
+      ].every((node) => node.getRootNode() === root),
+    };
+  })()`);
+
+  expect(result).toEqual({
+    selector: true,
+    element: true,
+    range: true,
+    locator: true,
+    exactRoots: true,
+  });
+});
+
 test('direct nested-root targets resolve only when that exact nested root is supplied', async ({ page }) => {
   const result = await evaluateShadow(page, `(() => {
     const fixture = window.__shadowFixture;
@@ -236,6 +303,85 @@ test('direct Element targets reject nested, other-root, document, iframe, detach
   expect(result).toEqual({
     outcomes: Array(6).fill(['HanamaruTargetError', 'HANA_TARGET_INVALID', true]),
     calls: 0,
+  });
+});
+
+test('direct retained closed-root Range and locator records refresh and clean up exactly', async ({ page }) => {
+  const result = await evaluateShadow(page, `(() => {
+    const fixture = window.__shadowFixture;
+    const root = fixture.closedRoot;
+    const host = document.querySelector('#closed-host');
+    const target = root.querySelector('#closed-target');
+    const source = document.createRange();
+    source.setStart(target.firstChild, 0);
+    source.setEnd(target.firstChild, 8);
+
+    const range = resolveShadowTarget(source, root);
+    const selectorLocator = resolveShadowTarget({
+      within: '#closed-target',
+      text: 'closed root',
+    }, root);
+    const elementLocator = resolveShadowTarget({
+      within: target,
+      text: 'root phrase',
+    }, root);
+    const rangeClone = range.range;
+    const initial = {
+      retained: host.shadowRoot === null && assertShadowRoot(root) === root,
+      range: rangeClone !== source
+        && rangeClone.toString() === 'Retained'
+        && range.ownerElement === target
+        && range.refresh() === range,
+      selectorLocator: selectorLocator.range.toString() === 'closed root'
+        && selectorLocator.ownerElement === target
+        && selectorLocator.refresh() === selectorLocator,
+      elementLocator: elementLocator.range.toString() === 'root phrase'
+        && elementLocator.ownerElement === target
+        && elementLocator.refresh() === elementLocator,
+      exactRoots: [
+        rangeClone.startContainer,
+        rangeClone.endContainer,
+        range.ownerElement,
+        selectorLocator.range.startContainer,
+        selectorLocator.range.endContainer,
+        elementLocator.range.startContainer,
+        elementLocator.range.endContainer,
+      ].every((node) => node.getRootNode() === root),
+    };
+
+    host.remove();
+    const outcomes = [
+      () => assertShadowRoot(root),
+      () => range.refresh(),
+      () => selectorLocator.refresh(),
+      () => elementLocator.refresh(),
+    ].map((action) => {
+      try {
+        action();
+        return 'ok';
+      } catch (error) {
+        return [error.name, error.code];
+      }
+    });
+    root.replaceChildren();
+
+    return {
+      initial,
+      outcomes,
+      cleanup: !target.isConnected && root.childNodes.length === 0,
+    };
+  })()`);
+
+  expect(result).toEqual({
+    initial: {
+      retained: true,
+      range: true,
+      selectorLocator: true,
+      elementLocator: true,
+      exactRoots: true,
+    },
+    outcomes: Array(4).fill(['HanamaruTargetError', 'HANA_TARGET_INVALID']),
+    cleanup: true,
   });
 });
 

@@ -484,3 +484,82 @@ test('@locator rejects invalid, missing, ambiguous, cross-document, and Shadow D
     ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
   ]);
 });
+
+test('@locator accepts only module, active iframe, and null ordinary prototypes', async ({ page }) => {
+  const result = await resolve(page, `(() => {
+    const frame = document.body.appendChild(document.createElement('iframe'));
+    const foreignFrame = document.body.appendChild(document.createElement('iframe'));
+    const frameDocument = frame.contentDocument;
+    const target = frameDocument.body.appendChild(frameDocument.createElement('p'));
+    target.id = 'frame-locator';
+    target.textContent = 'Parent literal iframe phrase';
+
+    const parentLiteral = {
+      within: '#frame-locator',
+      text: 'literal iframe',
+    };
+    const activeRealmLiteral = new frame.contentWindow.Object();
+    activeRealmLiteral.within = '#frame-locator';
+    activeRealmLiteral.text = 'iframe phrase';
+    const nullLiteral = Object.create(null);
+    nullLiteral.within = '#frame-locator';
+    nullLiteral.text = 'Parent literal';
+    const customLiteral = Object.create({});
+    customLiteral.within = '#frame-locator';
+    customLiteral.text = 'Parent literal';
+    const unexpectedRealmLiteral = new foreignFrame.contentWindow.Object();
+    unexpectedRealmLiteral.within = '#frame-locator';
+    unexpectedRealmLiteral.text = 'Parent literal';
+
+    const outcomes = [
+      parentLiteral,
+      activeRealmLiteral,
+      nullLiteral,
+      customLiteral,
+      unexpectedRealmLiteral,
+    ].map((locator) => {
+      try {
+        const record = resolveTarget(locator, frameDocument);
+        return {
+          kind: record.kind,
+          selected: record.range.toString(),
+          owner: record.ownerElement === target,
+          realm: record.range instanceof frame.contentWindow.Range,
+          root: record.range.startContainer.getRootNode() === frameDocument
+            && record.range.endContainer.getRootNode() === frameDocument,
+        };
+      } catch (error) {
+        return [error.name, error.code];
+      }
+    });
+    frame.remove();
+    foreignFrame.remove();
+    return outcomes;
+  })()`);
+
+  expect(result).toEqual([
+    {
+      kind: 'locator',
+      selected: 'literal iframe',
+      owner: true,
+      realm: true,
+      root: true,
+    },
+    {
+      kind: 'locator',
+      selected: 'iframe phrase',
+      owner: true,
+      realm: true,
+      root: true,
+    },
+    {
+      kind: 'locator',
+      selected: 'Parent literal',
+      owner: true,
+      realm: true,
+      root: true,
+    },
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+    ['HanamaruTargetError', 'HANA_TARGET_INVALID'],
+  ]);
+});

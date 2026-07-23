@@ -129,7 +129,9 @@ export function readLocatorConfig(target, realm) {
   }
 
   const prototype = Object.getPrototypeOf(target);
-  if (prototype !== null && prototype !== realm.Object.prototype) {
+  if (prototype !== null
+    && prototype !== Object.prototype
+    && prototype !== realm.Object.prototype) {
     return null;
   }
 
