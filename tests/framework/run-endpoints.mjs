@@ -211,8 +211,10 @@ class ParentTerminationError extends Error {
 export function createSignalSupervisor({
   processObject = process,
   forceKillDelay = 5_000,
+  spawnTreeKiller = spawn,
 } = {}) {
   let activeChild = null
+  let activeTermination = null
   let forceKillTimer = null
   let installed = false
   let signal = null
@@ -225,9 +227,16 @@ export function createSignalSupervisor({
     }
   }
 
-  function terminateChild(child, requestedSignal) {
+  function directlyTerminateChild(child, requestedSignal) {
+    try {
+      child.kill(requestedSignal)
+    } catch {
+      // An already-exited child is a successful termination race.
+    }
+  }
+
+  function terminatePosixGroup(child, requestedSignal) {
     if (
-      processObject.platform !== 'win32' &&
       Number.isInteger(child.pid) &&
       typeof processObject.kill === 'function'
     ) {
@@ -239,28 +248,66 @@ export function createSignalSupervisor({
       }
     }
 
-    child.kill(requestedSignal)
+    directlyTerminateChild(child, requestedSignal)
+  }
+
+  function terminateWindowsTree(child, requestedSignal) {
+    if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
+      directlyTerminateChild(child, requestedSignal)
+      return Promise.resolve()
+    }
+
+    let taskkill
+    try {
+      taskkill = spawnTreeKiller(
+        'taskkill',
+        ['/PID', String(child.pid), '/T', '/F'],
+        {
+          shell: false,
+          stdio: 'ignore',
+          windowsHide: true,
+        },
+      )
+    } catch {
+      directlyTerminateChild(child, requestedSignal)
+      return Promise.resolve()
+    }
+
+    return new Promise((resolvePromise) => {
+      let settled = false
+
+      function finish(succeeded) {
+        if (settled) return
+        settled = true
+        if (!succeeded) directlyTerminateChild(child, requestedSignal)
+        resolvePromise()
+      }
+
+      taskkill.once('error', () => finish(false))
+      taskkill.once('close', (code) => finish(code === 0))
+    })
   }
 
   function killActive(requestedSignal) {
     if (!activeChild) return
 
-    try {
-      terminateChild(activeChild, requestedSignal)
-    } catch {
-      // Best effort: the child may already have exited between state checks.
+    if (processObject.platform === 'win32') {
+      if (activeTermination?.child !== activeChild) {
+        activeTermination = {
+          child: activeChild,
+          promise: terminateWindowsTree(activeChild, requestedSignal),
+        }
+      }
+      return
     }
 
+    terminatePosixGroup(activeChild, requestedSignal)
     clearForceKill()
     if (Number.isFinite(forceKillDelay)) {
       const child = activeChild
       forceKillTimer = setTimeout(() => {
         if (activeChild !== child) return
-        try {
-          terminateChild(child, 'SIGKILL')
-        } catch {
-          // The command close handler remains authoritative.
-        }
+        terminatePosixGroup(child, 'SIGKILL')
       }, forceKillDelay)
       forceKillTimer.unref?.()
     }
@@ -296,9 +343,14 @@ export function createSignalSupervisor({
       activeChild = child
       if (signal) killActive(signal)
     },
-    release(child) {
+    async release(child) {
+      if (activeChild !== child) return
+      if (activeTermination?.child === child) {
+        await activeTermination.promise
+      }
       if (activeChild !== child) return
       activeChild = null
+      activeTermination = null
       clearForceKill()
     },
     throwIfTerminating() {
@@ -314,6 +366,7 @@ export function createSignalSupervisor({
       handlers.clear()
       installed = false
       activeChild = null
+      activeTermination = null
     },
   }
 }
@@ -339,26 +392,26 @@ export function runCommand(
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false
 
-    function settle(error) {
+    async function settle(error) {
       if (settled) return
       settled = true
-      supervisor?.release(child)
+      await supervisor?.release(child)
 
       if (error) rejectPromise(error)
       else resolvePromise()
     }
 
     child.once('error', (error) => {
-      settle(new Error(`${label} failed to start`, { cause: error }))
+      void settle(new Error(`${label} failed to start`, { cause: error }))
     })
     child.once('close', (code, signal) => {
       if (code === 0) {
-        settle()
+        void settle()
         return
       }
 
       const ending = signal ? `signal ${signal}` : `exit code ${code}`
-      settle(new Error(`${label} failed with ${ending}`))
+      void settle(new Error(`${label} failed with ${ending}`))
     })
 
     supervisor?.activate(child)

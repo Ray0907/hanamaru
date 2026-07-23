@@ -208,6 +208,110 @@ test('signal supervisor terminates the POSIX child process group', () => {
   supervisor.dispose()
 })
 
+test('Windows termination invokes taskkill with an exact process-tree argv', async () => {
+  const processObject = new EventEmitter()
+  processObject.platform = 'win32'
+  const taskkill = new EventEmitter()
+  const calls = []
+  const supervisor = createSignalSupervisor({
+    processObject,
+    forceKillDelay: Infinity,
+    spawnTreeKiller: (command, arguments_, options) => {
+      calls.push({ command, arguments_, options })
+      return taskkill
+    },
+  })
+  const child = new EventEmitter()
+  child.pid = 47
+  child.kill = () => {
+    throw new Error('direct fallback was not expected')
+  }
+
+  supervisor.install()
+  supervisor.activate(child)
+  processObject.emit('SIGTERM')
+  const release = supervisor.release(child)
+
+  assert.deepEqual(calls, [
+    {
+      command: 'taskkill',
+      arguments_: ['/PID', '47', '/T', '/F'],
+      options: {
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true,
+      },
+    },
+  ])
+  assert.equal(supervisor.activeChild, child)
+
+  taskkill.emit('close', 0, null)
+  await release
+  assert.equal(supervisor.activeChild, null)
+  supervisor.dispose()
+})
+
+test('Windows termination falls back after taskkill error or nonzero exit', async () => {
+  for (const failure of ['error', 'nonzero']) {
+    const processObject = new EventEmitter()
+    processObject.platform = 'win32'
+    const taskkill = new EventEmitter()
+    const directKills = []
+    const supervisor = createSignalSupervisor({
+      processObject,
+      forceKillDelay: Infinity,
+      spawnTreeKiller: () => taskkill,
+    })
+    const child = new EventEmitter()
+    child.pid = 71
+    child.kill = (signal) => {
+      directKills.push(signal)
+      return false
+    }
+
+    supervisor.install()
+    supervisor.activate(child)
+    processObject.emit('SIGINT')
+    const release = supervisor.release(child)
+    if (failure === 'error') taskkill.emit('error', new Error('not found'))
+    else taskkill.emit('close', 1, null)
+
+    await release
+    assert.deepEqual(directKills, ['SIGINT'])
+    supervisor.dispose()
+  }
+})
+
+test('Windows termination contains an already-exited or invalid-pid race', async () => {
+  const processObject = new EventEmitter()
+  processObject.platform = 'win32'
+  let taskkillCalls = 0
+  const supervisor = createSignalSupervisor({
+    processObject,
+    forceKillDelay: Infinity,
+    spawnTreeKiller: () => {
+      taskkillCalls += 1
+      return new EventEmitter()
+    },
+  })
+  const child = new EventEmitter()
+  child.pid = '47&calc'
+  child.kill = () => {
+    const error = new Error('already exited')
+    error.code = 'ESRCH'
+    throw error
+  }
+
+  supervisor.install()
+  supervisor.activate(child)
+  processObject.emit('SIGTERM')
+  await supervisor.release(child)
+
+  assert.equal(taskkillCalls, 0)
+  assert.equal(supervisor.activeChild, null)
+  supervisor.dispose()
+})
+
 test('runCommand awaits child close after a parent termination signal', async () => {
   const processObject = new EventEmitter()
   const supervisor = createSignalSupervisor({
@@ -243,6 +347,92 @@ test('runCommand awaits child close after a parent termination signal', async ()
   assert.deepEqual(events, ['kill:SIGINT', 'close'])
   assert.equal(supervisor.activeChild, null)
   supervisor.dispose()
+})
+
+test('Windows endpoint cleanup waits for taskkill and child close', async () => {
+  const processObject = new EventEmitter()
+  processObject.platform = 'win32'
+  const taskkill = new EventEmitter()
+  const supervisor = createSignalSupervisor({
+    processObject,
+    forceKillDelay: Infinity,
+    spawnTreeKiller: () => taskkill,
+  })
+  const child = new EventEmitter()
+  const events = []
+  child.pid = 83
+  child.kill = () => {
+    throw new Error('direct fallback was not expected')
+  }
+  const endpoint = selectEndpoints(['react', '18.2.0'])[0]
+
+  supervisor.install()
+  const execution = executeEndpoints(
+    [endpoint],
+    new Map([['react', { runtime: 'fixture' }]]),
+    {
+      supervisor,
+      operations: {
+        createDirectory: async () => '/tmp/isolated-endpoint',
+        execute: async () => {
+          const command = runCommand('fixture', [], {
+            label: 'test fixture',
+            spawnChild: () => child,
+            supervisor,
+          })
+          processObject.emit('SIGTERM')
+          queueMicrotask(() => {
+            events.push('child-close')
+            child.emit('close', null, 'SIGTERM')
+          })
+          await command
+        },
+        cleanup: async () => {
+          events.push('cleanup')
+        },
+      },
+    },
+  )
+
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(events, ['child-close'])
+  assert.equal(supervisor.activeChild, child)
+
+  events.push('taskkill-close')
+  taskkill.emit('close', 0, null)
+  await assert.rejects(execution, (error) => {
+    assert.equal(error.name, 'ParentTerminationError')
+    assert.equal(error.exitCode, 143)
+    return true
+  })
+  assert.deepEqual(events, ['child-close', 'taskkill-close', 'cleanup'])
+  assert.equal(supervisor.activeChild, null)
+  supervisor.dispose()
+})
+
+test('parent signal results use conventional nonzero exit codes', async () => {
+  for (const [signal, exitCode] of [
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+  ]) {
+    const processObject = new EventEmitter()
+    const supervisor = createSignalSupervisor({
+      processObject,
+      forceKillDelay: Infinity,
+    })
+    supervisor.install()
+    processObject.emit(signal)
+
+    await assert.rejects(
+      executeEndpoints([], new Map(), { supervisor }),
+      (error) => {
+        assert.equal(error.exitCode, exitCode)
+        return true
+      },
+    )
+    supervisor.dispose()
+  }
 })
 
 test('parent termination cleans the endpoint before returning a nonzero result', async () => {
