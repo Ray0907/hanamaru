@@ -1,5 +1,28 @@
 import { expect, test } from '@playwright/test';
 
+async function openFixture(page, path = '/tests/fixtures/annotation.html') {
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.addInitScript(() => {
+    window.__serializationRoundTripUnhandled = [];
+    window.addEventListener('unhandledrejection', (event) => {
+      window.__serializationRoundTripUnhandled.push(
+        String(event.reason?.message ?? event.reason),
+      );
+    });
+  });
+  await page.goto(path);
+  return pageErrors;
+}
+
+async function expectNoBrowserFailures(page, pageErrors) {
+  await page.evaluate(async () => {
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+  });
+  expect(pageErrors).toEqual([]);
+  expect(await page.evaluate(() => window.__serializationRoundTripUnhandled)).toEqual([]);
+}
+
 test('target preserves native Element and Range identity only in private metadata', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -389,4 +412,1534 @@ test('serialized Range keys reject invalid native shapes and clone side effects'
       hasCause: false,
     },
   });
+});
+
+test('Annotation selector round trip preserves updates, generated seed, plugin output, lifecycle, and cancellation', async ({ page }) => {
+  const pageErrors = await openFixture(page);
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const { registerMark } = await import('/src/plugins.js');
+    const { restore, serialize } = await import('/src/serialize.js');
+    const target = document.querySelector('#selector-target');
+    const plugin = () => ({ paths: ['M 1 2 Q 8 3 16 4'] });
+    const run = async (controller) => {
+      const events = [];
+      const listener = (event) => {
+        if (event.detail.controller === controller) {
+          events.push(event.type.replace('hana:', ''));
+        }
+      };
+      for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
+        target.addEventListener(type, listener);
+      }
+      const states = [controller.state];
+      controller.show();
+      await controller.finished;
+      states.push(controller.state);
+      const successfulEvents = [...events];
+      const paths = [...document.querySelectorAll('.hana-mark-path')]
+        .map((path) => path.getAttribute('d'));
+      controller.hide();
+      states.push(controller.state);
+      const cancelEvents = events.filter((event) => event === 'cancel');
+      for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
+        target.removeEventListener(type, listener);
+      }
+      return { states, successfulEvents, cancelEvents, paths };
+    };
+
+    let unregister = registerMark('serialize-wave', plugin);
+    const original = annotate('#selector-target', {
+      mark: 'serialize-wave',
+      note: 'Before update',
+      motion: 'never',
+      duration: 0,
+    });
+    original.update({
+      note: 'After update',
+      placement: 'left',
+      accessible: true,
+    });
+    const definition = serialize(original);
+    const bytes = JSON.stringify(definition);
+    const originalRun = await run(original);
+    original.destroy();
+    unregister();
+
+    let missingPlugin;
+    try {
+      restore(definition);
+    } catch (error) {
+      missingPlugin = {
+        name: error.name,
+        code: error.code,
+        field: error.details?.field,
+      };
+    }
+    const missingPluginResidue = document.querySelectorAll('[data-hana-id]').length;
+
+    unregister = registerMark('serialize-wave', plugin);
+    const restored = restore(definition);
+    const restoredBytes = JSON.stringify(serialize(restored));
+    const restoredRun = await run(restored);
+    restored.destroy();
+    unregister();
+
+    return {
+      bytes,
+      restoredBytes,
+      definition,
+      originalRun,
+      restoredRun,
+      missingPlugin,
+      missingPluginResidue,
+      ownedAfterDestroy: document.querySelectorAll('[data-hana-id]').length,
+      overlaysAfterDestroy: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+  });
+
+  expect(result.restoredBytes).toBe(result.bytes);
+  expect(result.definition).toMatchObject({
+    schema: 'hanamaru/v1',
+    kind: 'annotation',
+    target: { type: 'selector', selector: '#selector-target' },
+    options: {
+      mark: 'serialize-wave',
+      note: 'After update',
+      placement: 'left',
+      trigger: 'manual',
+      accessible: true,
+      duration: 0,
+      motion: 'never',
+    },
+  });
+  expect(result.definition.options.seed).toMatch(/^hana-\d+$/);
+  expect(Object.keys(result.definition)).toEqual(['schema', 'kind', 'target', 'options']);
+  expect(Object.keys(result.definition.options)).toEqual([
+    'mark', 'note', 'placement', 'trigger',
+    'accessible', 'seed', 'duration', 'motion',
+  ]);
+  expect(result.originalRun).toEqual(result.restoredRun);
+  expect(result.restoredRun).toEqual({
+    states: ['idle', 'visible', 'hidden'],
+    successfulEvents: ['start', 'complete'],
+    cancelEvents: ['cancel'],
+    paths: ['M 1 2 Q 8 3 16 4'],
+  });
+  expect(result.missingPlugin).toEqual({
+    name: 'HanamaruConfigError',
+    code: 'HANA_CONFIG_INVALID',
+    field: 'mark',
+  });
+  expect(result).toMatchObject({
+    missingPluginResidue: 0,
+    ownedAfterDestroy: 0,
+    overlaysAfterDestroy: 0,
+  });
+  await expectNoBrowserFailures(page, pageErrors);
+});
+
+test('Annotation native Element and Range keys preserve exact contexts and visual round trips', async ({ page }) => {
+  const pageErrors = await openFixture(page);
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const { restore, serialize } = await import('/src/serialize.js');
+    const element = document.querySelector('#direct-target');
+    const rangeHost = document.querySelector('#range-target');
+    const range = document.createRange();
+    range.setStart(rangeHost.firstChild, 1);
+    range.setEnd(rangeHost.firstChild, rangeHost.firstChild.data.length - 1);
+    const targets = new Map([
+      ['element-key', element],
+      ['range-key', range],
+    ]);
+    const cases = [
+      { key: 'element-key', target: element, owner: element, mark: 'box', targetKind: 'element' },
+      { key: 'range-key', target: range, owner: rangeHost, mark: 'underline', targetKind: 'range' },
+    ];
+
+    const execute = async (controller, owner) => {
+      const events = [];
+      const listener = (event) => {
+        if (event.detail.controller === controller) {
+          events.push(event.type.replace('hana:', ''));
+        }
+      };
+      for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
+        owner.addEventListener(type, listener);
+      }
+      const states = [controller.state];
+      controller.show();
+      await controller.finished;
+      states.push(controller.state);
+      const successfulEvents = [...events];
+      const paths = [...document.querySelectorAll('.hana-mark-path')]
+        .map((path) => path.getAttribute('d'));
+      controller.hide();
+      states.push(controller.state);
+      const cancels = events.filter((event) => event === 'cancel');
+      for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
+        owner.removeEventListener(type, listener);
+      }
+      return { states, successfulEvents, cancels, paths };
+    };
+
+    const output = [];
+    for (const item of cases) {
+      const original = annotate(item.target, {
+        mark: item.mark,
+        motion: 'never',
+        duration: 0,
+        seed: `stable-${item.key}`,
+      });
+      const originalKeyCalls = [];
+      const definition = serialize(original, {
+        keyForTarget(target, context) {
+          originalKeyCalls.push({
+            sameTarget: target === item.target,
+            keys: Object.keys(context),
+            role: context.role,
+            controllerKind: context.controllerKind,
+            owner: context.ownerElement.id,
+            index: context.index,
+          });
+          return item.key;
+        },
+      });
+      const bytes = JSON.stringify(definition);
+      const originalRun = await execute(original, item.owner);
+      original.destroy();
+
+      const resolverCalls = [];
+      const restored = restore(definition, {
+        root: document,
+        resolveTarget(key, context) {
+          resolverCalls.push({ key, keys: Object.keys(context), ...context });
+          return targets.get(key);
+        },
+      });
+      const restoredKeyCalls = [];
+      const restoredBytes = JSON.stringify(serialize(restored, {
+        keyForTarget(target, context) {
+          restoredKeyCalls.push({
+            native: item.targetKind === 'element'
+              ? target instanceof Element
+              : target instanceof Range,
+            keys: Object.keys(context),
+            role: context.role,
+            controllerKind: context.controllerKind,
+            owner: context.ownerElement.id,
+            index: context.index,
+          });
+          return item.key;
+        },
+      }));
+      const restoredRun = await execute(restored, item.owner);
+      restored.destroy();
+
+      output.push({
+        key: item.key,
+        targetKind: item.targetKind,
+        bytes,
+        restoredBytes,
+        originalKeyCalls,
+        restoredKeyCalls,
+        resolverCalls,
+        originalRun,
+        restoredRun,
+      });
+    }
+    range.detach();
+    return {
+      output,
+      owned: document.querySelectorAll('[data-hana-id]').length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+  });
+
+  expect(result.owned).toBe(0);
+  expect(result.overlays).toBe(0);
+  for (const item of result.output) {
+    expect(item.restoredBytes).toBe(item.bytes);
+    expect(item.restoredRun).toEqual(item.originalRun);
+    expect(item.restoredRun.states).toEqual(['idle', 'visible', 'hidden']);
+    expect(item.restoredRun.successfulEvents).toEqual(['start', 'complete']);
+    expect(item.restoredRun.cancels).toEqual(['cancel']);
+    expect(item.restoredRun.paths.length).toBeGreaterThan(0);
+    expect(item.originalKeyCalls).toEqual([{
+      sameTarget: true,
+      keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+      role: 'target',
+      controllerKind: 'annotation',
+      owner: item.targetKind === 'element' ? 'direct-target' : 'range-target',
+      index: null,
+    }]);
+    expect(item.restoredKeyCalls).toEqual([{
+      native: true,
+      keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+      role: 'target',
+      controllerKind: 'annotation',
+      owner: item.targetKind === 'element' ? 'direct-target' : 'range-target',
+      index: null,
+    }]);
+    expect(item.resolverCalls).toEqual([{
+      key: item.key,
+      keys: ['targetKind', 'role', 'controllerKind', 'index'],
+      targetKind: item.targetKind,
+      role: 'target',
+      controllerKind: 'annotation',
+      index: null,
+    }]);
+  }
+  await expectNoBrowserFailures(page, pageErrors);
+});
+
+test('Annotation exact-text locators round trip with selector and Element within sources', async ({ page }) => {
+  const pageErrors = await openFixture(page);
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const { restore, serialize } = await import('/src/serialize.js');
+    const selectorScope = document.body.appendChild(document.createElement('section'));
+    selectorScope.id = 'locator-selector-scope';
+    selectorScope.innerHTML = '<span>Selector exact phrase</span>';
+    const elementScope = document.body.appendChild(document.createElement('section'));
+    elementScope.id = 'locator-element-scope';
+    elementScope.innerHTML = '<span>Element exact phrase</span>';
+    const cases = [
+      {
+        key: null,
+        source: { within: '#locator-selector-scope', text: 'Selector exact phrase' },
+        owner: selectorScope,
+      },
+      {
+        key: 'locator-scope',
+        source: { within: elementScope, text: 'Element exact phrase' },
+        owner: elementScope,
+      },
+    ];
+    const output = [];
+
+    for (const item of cases) {
+      const keyCalls = [];
+      const resolverCalls = [];
+      const original = annotate(item.source, {
+        mark: 'highlight',
+        motion: 'never',
+        duration: 0,
+        seed: `locator-${item.key ?? 'selector'}`,
+      });
+      const keyForTarget = (target, context) => {
+        keyCalls.push({
+          sameWithin: target === elementScope,
+          role: context.role,
+          controllerKind: context.controllerKind,
+          owner: context.ownerElement.id,
+          index: context.index,
+          keys: Object.keys(context),
+        });
+        return 'locator-scope';
+      };
+      const definition = serialize(
+        original,
+        item.key === null ? undefined : { keyForTarget },
+      );
+      const bytes = JSON.stringify(definition);
+      const originalEvents = [];
+      const originalStates = [original.state];
+      const originalListener = (event) => {
+        if (event.detail.controller === original) originalEvents.push(event.type);
+      };
+      item.owner.addEventListener('hana:start', originalListener);
+      item.owner.addEventListener('hana:complete', originalListener);
+      original.show();
+      await original.finished;
+      originalStates.push(original.state);
+      const originalPaths = [...document.querySelectorAll('.hana-mark-path')]
+        .map((path) => path.getAttribute('d'));
+      original.destroy();
+      item.owner.removeEventListener('hana:start', originalListener);
+      item.owner.removeEventListener('hana:complete', originalListener);
+
+      const restored = restore(definition, item.key === null ? undefined : {
+        root: document,
+        resolveTarget(key, context) {
+          resolverCalls.push({ key, keys: Object.keys(context), ...context });
+          return elementScope;
+        },
+      });
+      const restoredBytes = JSON.stringify(serialize(
+        restored,
+        item.key === null ? undefined : { keyForTarget },
+      ));
+      const restoredEvents = [];
+      const restoredStates = [restored.state];
+      const restoredListener = (event) => {
+        if (event.detail.controller === restored) restoredEvents.push(event.type);
+      };
+      item.owner.addEventListener('hana:start', restoredListener);
+      item.owner.addEventListener('hana:complete', restoredListener);
+      restored.show();
+      await restored.finished;
+      restoredStates.push(restored.state);
+      const restoredPaths = [...document.querySelectorAll('.hana-mark-path')]
+        .map((path) => path.getAttribute('d'));
+      restored.destroy();
+      item.owner.removeEventListener('hana:start', restoredListener);
+      item.owner.removeEventListener('hana:complete', restoredListener);
+      output.push({
+        key: item.key,
+        bytes,
+        restoredBytes,
+        definition,
+        keyCalls,
+        resolverCalls,
+        originalEvents,
+        restoredEvents,
+        originalStates,
+        restoredStates,
+        originalPaths,
+        restoredPaths,
+      });
+    }
+    selectorScope.remove();
+    elementScope.remove();
+    return {
+      output,
+      owned: document.querySelectorAll('[data-hana-id]').length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+  });
+
+  expect(result.owned).toBe(0);
+  expect(result.overlays).toBe(0);
+  for (const item of result.output) {
+    expect(item.restoredBytes).toBe(item.bytes);
+    expect(item.restoredPaths).toEqual(item.originalPaths);
+    expect(item.restoredEvents).toEqual(['hana:start', 'hana:complete']);
+    expect(item.restoredEvents).toEqual(item.originalEvents);
+    expect(item.restoredStates).toEqual(['idle', 'visible']);
+    expect(item.restoredStates).toEqual(item.originalStates);
+    expect(item.definition.target.type).toBe('locator');
+    if (item.key === null) {
+      expect(item.definition.target.within).toEqual({
+        type: 'selector',
+        selector: '#locator-selector-scope',
+      });
+      expect(item.keyCalls).toEqual([]);
+      expect(item.resolverCalls).toEqual([]);
+    } else {
+      expect(item.definition.target.within).toEqual({
+        type: 'key',
+        key: 'locator-scope',
+        targetKind: 'element',
+      });
+      expect(item.keyCalls).toEqual([
+        {
+          sameWithin: true,
+          role: 'within',
+          controllerKind: 'annotation',
+          owner: 'locator-element-scope',
+          index: null,
+          keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+        },
+        {
+          sameWithin: true,
+          role: 'within',
+          controllerKind: 'annotation',
+          owner: 'locator-element-scope',
+          index: null,
+          keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+        },
+      ]);
+      expect(item.resolverCalls).toEqual([{
+        key: 'locator-scope',
+        keys: ['targetKind', 'role', 'controllerKind', 'index'],
+        targetKind: 'element',
+        role: 'within',
+        controllerKind: 'annotation',
+        index: null,
+      }]);
+    }
+  }
+  await expectNoBrowserFailures(page, pageErrors);
+});
+
+test('Annotation iframe Document root preserves realm, bytes, paths, state, and events', async ({ page }) => {
+  const pageErrors = await openFixture(page);
+  const result = await page.evaluate(async () => {
+    const frame = document.createElement('iframe');
+    frame.srcdoc = `<!doctype html><html><body style="margin:30px">
+      <p id="frame-target" style="display:inline-block">Iframe serialized target</p>
+    </body></html>`;
+    document.body.append(frame);
+    await new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow;
+    const target = doc.querySelector('#frame-target');
+    const { annotate } = await import('/src/index.js');
+    const { restore, serialize } = await import('/src/serialize.js');
+
+    const run = async (controller) => {
+      const events = [];
+      const parentEvents = [];
+      const listener = (event) => {
+        if (event.detail.controller === controller) {
+          events.push({
+            type: event.type,
+            frameRealm: event instanceof win.CustomEvent,
+            target: event.target.id,
+          });
+        }
+      };
+      const parentListener = (event) => parentEvents.push(event.type);
+      doc.body.addEventListener('hana:start', listener);
+      doc.body.addEventListener('hana:complete', listener);
+      document.body.addEventListener('hana:start', parentListener);
+      document.body.addEventListener('hana:complete', parentListener);
+      const states = [controller.state];
+      controller.show();
+      await controller.finished;
+      states.push(controller.state);
+      const paths = [...doc.querySelectorAll('.hana-mark-path')]
+        .map((path) => path.getAttribute('d'));
+      doc.body.removeEventListener('hana:start', listener);
+      doc.body.removeEventListener('hana:complete', listener);
+      document.body.removeEventListener('hana:start', parentListener);
+      document.body.removeEventListener('hana:complete', parentListener);
+      return { states, events, parentEvents, paths };
+    };
+
+    const keyCalls = [];
+    const keyForTarget = (value, context) => {
+      keyCalls.push({
+        native: value instanceof win.Element,
+        owner: context.ownerElement.id,
+        role: context.role,
+        controllerKind: context.controllerKind,
+        index: context.index,
+      });
+      return 'iframe-target';
+    };
+    const original = annotate(target, {
+      mark: 'circle',
+      motion: 'never',
+      duration: 0,
+      seed: 'iframe-stable',
+    });
+    const definition = serialize(original, { keyForTarget });
+    const bytes = JSON.stringify(definition);
+    const originalRun = await run(original);
+    original.destroy();
+    const resolverCalls = [];
+    const restored = restore(definition, {
+      root: doc,
+      resolveTarget(key, context) {
+        resolverCalls.push({ key, keys: Object.keys(context), ...context });
+        return target;
+      },
+    });
+    const restoredBytes = JSON.stringify(serialize(restored, { keyForTarget }));
+    const restoredRun = await run(restored);
+    restored.destroy();
+    const cleanup = {
+      frameOwned: doc.querySelectorAll('[data-hana-id]').length,
+      frameOverlays: doc.querySelectorAll('[data-hana-overlay]').length,
+      parentOwned: document.querySelectorAll('[data-hana-id]').length,
+      parentOverlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+    frame.remove();
+    return {
+      bytes,
+      restoredBytes,
+      originalRun,
+      restoredRun,
+      cleanup,
+      keyCalls,
+      resolverCalls,
+    };
+  });
+
+  expect(result.restoredBytes).toBe(result.bytes);
+  expect(result.restoredRun).toEqual(result.originalRun);
+  expect(result.restoredRun).toEqual({
+    states: ['idle', 'visible'],
+    events: [
+      { type: 'hana:start', frameRealm: true, target: 'frame-target' },
+      { type: 'hana:complete', frameRealm: true, target: 'frame-target' },
+    ],
+    parentEvents: [],
+    paths: result.originalRun.paths,
+  });
+  expect(result.originalRun.paths.length).toBeGreaterThan(0);
+  expect(result.keyCalls).toEqual([
+    {
+      native: true,
+      owner: 'frame-target',
+      role: 'target',
+      controllerKind: 'annotation',
+      index: null,
+    },
+    {
+      native: true,
+      owner: 'frame-target',
+      role: 'target',
+      controllerKind: 'annotation',
+      index: null,
+    },
+  ]);
+  expect(result.resolverCalls).toEqual([{
+    key: 'iframe-target',
+    keys: ['targetKind', 'role', 'controllerKind', 'index'],
+    targetKind: 'element',
+    role: 'target',
+    controllerKind: 'annotation',
+    index: null,
+  }]);
+  expect(result.cleanup).toEqual({
+    frameOwned: 0,
+    frameOverlays: 0,
+    parentOwned: 0,
+    parentOverlays: 0,
+  });
+  await expectNoBrowserFailures(page, pageErrors);
+});
+
+test('target isolated Range resolution clones exact boundaries and standalone ShadowRoot APIs reject', async ({ page }) => {
+  const pageErrors = await openFixture(page);
+  const result = await page.evaluate(async () => {
+    const { resolveSerializedTarget, restore } = await import('/src/serialize.js');
+    const host = document.querySelector('#range-target');
+    const range = document.createRange();
+    range.setStart(host.firstChild, 2);
+    range.setEnd(host.firstChild, 9);
+    const calls = [];
+    const clone = resolveSerializedTarget({
+      type: 'key',
+      key: 'isolated-range',
+      targetKind: 'range',
+    }, {
+      root: document,
+      resolveTarget(key, context) {
+        calls.push({ key, keys: Object.keys(context), ...context });
+        return range;
+      },
+    });
+
+    const shadowHost = document.body.appendChild(document.createElement('div'));
+    const shadow = shadowHost.attachShadow({ mode: 'open' });
+    const shadowTarget = shadow.appendChild(document.createElement('span'));
+    shadowTarget.id = 'shadow-target';
+    const outcomes = [];
+    for (const action of [
+      () => resolveSerializedTarget(
+        { type: 'selector', selector: '#shadow-target' },
+        { root: shadow },
+      ),
+      () => restore({
+        schema: 'hanamaru/v1',
+        kind: 'annotation',
+        target: { type: 'selector', selector: '#shadow-target' },
+        options: {
+          mark: 'underline',
+          note: null,
+          placement: 'auto',
+          trigger: 'manual',
+          accessible: false,
+          seed: 'shadow-standalone',
+          duration: 0,
+          motion: 'never',
+        },
+      }, { root: shadow }),
+    ]) {
+      try {
+        action();
+        outcomes.push({ returned: true });
+      } catch (error) {
+        outcomes.push({ returned: false, name: error.name, code: error.code });
+      }
+    }
+    const proof = {
+      distinct: clone !== range,
+      native: clone instanceof Range,
+      startContainer: clone.startContainer === range.startContainer,
+      endContainer: clone.endContainer === range.endContainer,
+      startOffset: clone.startOffset,
+      endOffset: clone.endOffset,
+      calls,
+      outcomes,
+      shadowOwned: shadow.querySelectorAll('[data-hana-id]').length,
+      documentOwned: document.querySelectorAll('[data-hana-id]').length,
+    };
+    clone.detach();
+    range.detach();
+    shadowHost.remove();
+    return proof;
+  });
+
+  expect(result).toEqual({
+    distinct: true,
+    native: true,
+    startContainer: true,
+    endContainer: true,
+    startOffset: 2,
+    endOffset: 9,
+    calls: [{
+      key: 'isolated-range',
+      keys: ['targetKind', 'role', 'controllerKind', 'index'],
+      targetKind: 'range',
+      role: 'target',
+      controllerKind: null,
+      index: null,
+    }],
+    outcomes: [
+      {
+        returned: false,
+        name: 'HanamaruTargetError',
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+      {
+        returned: false,
+        name: 'HanamaruTargetError',
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+    ],
+    shadowOwned: 0,
+    documentOwned: 0,
+  });
+  await expectNoBrowserFailures(page, pageErrors);
+});
+
+test('Story round trip preserves every member source form, generated seeds, plugin paths, and lifecycle', async ({ page }) => {
+  const pageErrors = await openFixture(page, '/tests/fixtures/story.html');
+  const result = await page.evaluate(async () => {
+    const { registerMark } = await import('/src/plugins.js');
+    const { restore, serialize } = await import('/src/serialize.js');
+    const { story } = await import('/src/story.js');
+    const arena = document.querySelector('#story-arena');
+    const direct = arena.appendChild(document.createElement('p'));
+    direct.id = 'story-direct-key';
+    direct.className = 'target';
+    direct.textContent = 'Story direct key';
+    const rangeHost = arena.appendChild(document.createElement('p'));
+    rangeHost.id = 'story-range-key';
+    rangeHost.className = 'target';
+    rangeHost.textContent = 'Story native range selection';
+    const range = document.createRange();
+    range.setStart(rangeHost.firstChild, 6);
+    range.setEnd(rangeHost.firstChild, 18);
+    const selectorScope = arena.appendChild(document.createElement('p'));
+    selectorScope.id = 'story-selector-scope';
+    selectorScope.className = 'target';
+    selectorScope.textContent = 'A selector scoped exact phrase lives here';
+    const elementScope = arena.appendChild(document.createElement('p'));
+    elementScope.id = 'story-element-scope';
+    elementScope.className = 'target';
+    elementScope.textContent = 'An element scoped exact phrase lives here';
+
+    const pluginFactory = () => ({ paths: ['M 2 3 L 22 13'] });
+    let unregister = registerMark('story-proof', pluginFactory);
+    const steps = [
+      { target: '#story-first', mark: 'underline', duration: 0 },
+      { target: direct, mark: 'box', duration: 0 },
+      { target: range, mark: 'highlight', duration: 0 },
+      {
+        target: { within: '#story-selector-scope', text: 'selector scoped exact phrase' },
+        mark: 'circle',
+        duration: 0,
+      },
+      {
+        target: { within: elementScope, text: 'element scoped exact phrase' },
+        mark: 'story-proof',
+        duration: 0,
+      },
+    ];
+    const targetByKey = new Map([
+      ['story-target-1', direct],
+      ['story-target-2', range],
+      ['story-within-4', elementScope],
+    ]);
+    const contextSnapshot = (context) => ({
+      keys: Object.keys(context),
+      role: context.role,
+      controllerKind: context.controllerKind,
+      owner: context.ownerElement?.id,
+      index: context.index,
+    });
+    const keyForTarget = (target, context) => (
+      `story-${context.role}-${context.index}`
+    );
+    const pathInventory = () => [...document.querySelectorAll('.hana-annotation')]
+      .map((group) => [...group.querySelectorAll('.hana-mark-path')]
+        .map((path) => path.getAttribute('d')));
+    const execute = async (controller) => {
+      const events = [];
+      const listener = (event) => {
+        events.push({
+          type: event.type,
+          scope: event.detail.controller === controller ? 'story' : 'member',
+          target: event.target.id,
+          index: event.detail.index ?? null,
+          state: event.detail.state ?? null,
+        });
+      };
+      for (const type of ['hana:start', 'hana:step', 'hana:complete', 'hana:cancel']) {
+        document.body.addEventListener(type, listener);
+      }
+      const states = [controller.state];
+      controller.play();
+      states.push(controller.state);
+      await controller.finished;
+      states.push(controller.state);
+      const successfulEvents = [...events];
+      const paths = pathInventory();
+      events.length = 0;
+      controller.replay();
+      controller.cancel();
+      const cancellation = {
+        state: controller.state,
+        aggregate: events.filter(
+          (event) => event.scope === 'story' && event.type === 'hana:cancel',
+        ),
+      };
+      for (const type of ['hana:start', 'hana:step', 'hana:complete', 'hana:cancel']) {
+        document.body.removeEventListener(type, listener);
+      }
+      return { states, successfulEvents, paths, cancellation };
+    };
+
+    const original = story(steps, { gap: 0, motion: 'never' });
+    const originalKeyCalls = [];
+    const definition = serialize(original, {
+      keyForTarget(target, context) {
+        originalKeyCalls.push({
+          ...contextSnapshot(context),
+          nativeElement: target instanceof Element,
+          nativeRange: target instanceof Range,
+        });
+        return keyForTarget(target, context);
+      },
+    });
+    const bytes = JSON.stringify(definition);
+    const originalRun = await execute(original);
+    original.destroy();
+    unregister();
+
+    let missingPlugin;
+    let missingResolverCalls = 0;
+    const missingEvents = [];
+    const missingListener = (event) => missingEvents.push(event.type);
+    for (const type of ['hana:start', 'hana:step', 'hana:complete']) {
+      document.body.addEventListener(type, missingListener);
+    }
+    try {
+      restore(definition, {
+        root: document,
+        resolveTarget() {
+          missingResolverCalls += 1;
+          return direct;
+        },
+      });
+    } catch (error) {
+      missingPlugin = { name: error.name, code: error.code, field: error.details?.field };
+    }
+    for (const type of ['hana:start', 'hana:step', 'hana:complete']) {
+      document.body.removeEventListener(type, missingListener);
+    }
+    const missingResidue = {
+      owned: document.querySelectorAll('[data-hana-id]').length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      events: missingEvents,
+      resolverCalls: missingResolverCalls,
+    };
+
+    unregister = registerMark('story-proof', pluginFactory);
+    const resolverCalls = [];
+    const restored = restore(definition, {
+      root: document,
+      resolveTarget(key, context) {
+        resolverCalls.push({
+          key,
+          keys: Object.keys(context),
+          targetKind: context.targetKind,
+          role: context.role,
+          controllerKind: context.controllerKind,
+          index: context.index,
+        });
+        return targetByKey.get(key);
+      },
+    });
+    const restoredKeyCalls = [];
+    const restoredBytes = JSON.stringify(serialize(restored, {
+      keyForTarget(target, context) {
+        restoredKeyCalls.push({
+          ...contextSnapshot(context),
+          nativeElement: target instanceof Element,
+          nativeRange: target instanceof Range,
+        });
+        return keyForTarget(target, context);
+      },
+    }));
+    const restoredRun = await execute(restored);
+    restored.destroy();
+    unregister();
+
+    const cleanup = {
+      owned: document.querySelectorAll('[data-hana-id]').length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+    range.detach();
+    direct.remove();
+    rangeHost.remove();
+    selectorScope.remove();
+    elementScope.remove();
+    return {
+      bytes,
+      restoredBytes,
+      definition,
+      originalKeyCalls,
+      restoredKeyCalls,
+      resolverCalls,
+      originalRun,
+      restoredRun,
+      missingPlugin,
+      missingResidue,
+      cleanup,
+    };
+  });
+
+  expect(result.restoredBytes).toBe(result.bytes);
+  expect(Object.keys(result.definition)).toEqual(['schema', 'kind', 'options', 'steps']);
+  expect(result.definition).toMatchObject({
+    schema: 'hanamaru/v1',
+    kind: 'story',
+    options: { trigger: 'manual', gap: 0, motion: 'never' },
+  });
+  expect(result.definition.steps).toHaveLength(5);
+  expect(result.definition.steps.every(
+    (step) => Object.keys(step).join(',') === 'target,options',
+  )).toBe(true);
+  expect(result.definition.steps.every(
+    ({ options }) => Object.keys(options).join(',')
+      === 'mark,note,placement,accessible,seed,duration',
+  )).toBe(true);
+  expect(result.definition.steps.map(({ target }) => target)).toEqual([
+    { type: 'selector', selector: '#story-first' },
+    { type: 'key', key: 'story-target-1', targetKind: 'element' },
+    { type: 'key', key: 'story-target-2', targetKind: 'range' },
+    {
+      type: 'locator',
+      within: { type: 'selector', selector: '#story-selector-scope' },
+      text: 'selector scoped exact phrase',
+    },
+    {
+      type: 'locator',
+      within: { type: 'key', key: 'story-within-4', targetKind: 'element' },
+      text: 'element scoped exact phrase',
+    },
+  ]);
+  expect(result.definition.steps.every(
+    ({ options }) => /^hana-\d+$/.test(options.seed),
+  )).toBe(true);
+  expect(new Set(result.definition.steps.map(({ options }) => options.seed)).size).toBe(5);
+  expect(result.definition.steps[4].options.mark).toBe('story-proof');
+  expect(result.originalRun).toEqual(result.restoredRun);
+  expect(result.restoredRun.states).toEqual(['idle', 'playing', 'complete']);
+  expect(result.restoredRun.paths).toHaveLength(5);
+  expect(result.restoredRun.paths[4]).toEqual(['M 2 3 L 22 13']);
+  expect(result.restoredRun.successfulEvents
+    .filter(({ scope }) => scope === 'story')
+    .map(({ type }) => type)).toEqual([
+    'hana:start',
+    'hana:step',
+    'hana:step',
+    'hana:step',
+    'hana:step',
+    'hana:step',
+    'hana:complete',
+  ]);
+  expect(result.restoredRun.cancellation).toEqual({
+    state: 'cancelled',
+    aggregate: [{
+      type: 'hana:cancel',
+      scope: 'story',
+      target: 'story-first',
+      index: null,
+      state: null,
+    }],
+  });
+  expect(result.originalKeyCalls).toEqual([
+    {
+      keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+      role: 'target',
+      controllerKind: 'story',
+      owner: 'story-direct-key',
+      index: 1,
+      nativeElement: true,
+      nativeRange: false,
+    },
+    {
+      keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+      role: 'target',
+      controllerKind: 'story',
+      owner: 'story-range-key',
+      index: 2,
+      nativeElement: false,
+      nativeRange: true,
+    },
+    {
+      keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+      role: 'within',
+      controllerKind: 'story',
+      owner: 'story-element-scope',
+      index: 4,
+      nativeElement: true,
+      nativeRange: false,
+    },
+  ]);
+  expect(result.restoredKeyCalls).toEqual(result.originalKeyCalls);
+  expect(result.resolverCalls).toEqual([
+    {
+      key: 'story-target-1',
+      keys: ['targetKind', 'role', 'controllerKind', 'index'],
+      targetKind: 'element',
+      role: 'target',
+      controllerKind: 'story',
+      index: 1,
+    },
+    {
+      key: 'story-target-2',
+      keys: ['targetKind', 'role', 'controllerKind', 'index'],
+      targetKind: 'range',
+      role: 'target',
+      controllerKind: 'story',
+      index: 2,
+    },
+    {
+      key: 'story-within-4',
+      keys: ['targetKind', 'role', 'controllerKind', 'index'],
+      targetKind: 'element',
+      role: 'within',
+      controllerKind: 'story',
+      index: 4,
+    },
+  ]);
+  expect(result.missingPlugin).toEqual({
+    name: 'HanamaruConfigError',
+    code: 'HANA_CONFIG_INVALID',
+    field: 'mark',
+  });
+  expect(result.missingResidue).toEqual({
+    owned: 0,
+    overlays: 0,
+    events: [],
+    resolverCalls: 0,
+  });
+  expect(result.cleanup).toEqual({ owned: 0, overlays: 0 });
+  await expectNoBrowserFailures(page, pageErrors);
+});
+
+test('Group round trip preserves every member source form, generated seeds, plugin paths, and lifecycle', async ({ page }) => {
+  const pageErrors = await openFixture(page, '/tests/fixtures/group.html');
+  const result = await page.evaluate(async () => {
+    const { group } = await import('/src/group.js');
+    const { registerMark } = await import('/src/plugins.js');
+    const { restore, serialize } = await import('/src/serialize.js');
+    const root = document.querySelector('main');
+    const direct = root.appendChild(document.createElement('p'));
+    direct.id = 'group-direct-key';
+    direct.className = 'target';
+    direct.textContent = 'Group direct key';
+    const rangeHost = root.appendChild(document.createElement('p'));
+    rangeHost.id = 'group-range-key';
+    rangeHost.className = 'target';
+    rangeHost.textContent = 'Group native range selection';
+    const range = document.createRange();
+    range.setStart(rangeHost.firstChild, 6);
+    range.setEnd(rangeHost.firstChild, 18);
+    const selectorScope = root.appendChild(document.createElement('p'));
+    selectorScope.id = 'group-selector-scope';
+    selectorScope.className = 'target';
+    selectorScope.textContent = 'Repeated selector exact phrase and selector exact phrase';
+    const elementScope = root.appendChild(document.createElement('p'));
+    elementScope.id = 'group-element-scope';
+    elementScope.className = 'target';
+    elementScope.textContent = 'An element scoped exact phrase lives here';
+
+    const pluginFactory = () => ({ paths: ['M 4 5 Q 14 7 24 15'] });
+    let unregister = registerMark('group-proof', pluginFactory);
+    const members = [
+      { target: '#group-first', mark: 'underline', duration: 0 },
+      { target: direct, mark: 'box', duration: 0 },
+      { target: range, mark: 'highlight', duration: 0 },
+      {
+        target: {
+          within: '#group-selector-scope',
+          text: 'selector exact phrase',
+          occurrence: 1,
+        },
+        mark: 'circle',
+        duration: 0,
+      },
+      {
+        target: { within: elementScope, text: 'element scoped exact phrase' },
+        mark: 'group-proof',
+        duration: 0,
+      },
+    ];
+    const targetByKey = new Map([
+      ['group-target-1', direct],
+      ['group-target-2', range],
+      ['group-within-4', elementScope],
+    ]);
+    const contextSnapshot = (context) => ({
+      keys: Object.keys(context),
+      role: context.role,
+      controllerKind: context.controllerKind,
+      owner: context.ownerElement?.id,
+      index: context.index,
+    });
+    const keyForTarget = (target, context) => (
+      `group-${context.role}-${context.index}`
+    );
+    const pathInventory = () => [...document.querySelectorAll('.hana-annotation')]
+      .map((annotation) => [...annotation.querySelectorAll('.hana-mark-path')]
+        .map((path) => path.getAttribute('d')));
+    const execute = async (controller) => {
+      const events = [];
+      const listener = (event) => {
+        events.push({
+          type: event.type,
+          scope: event.detail.controller === controller ? 'group' : 'member',
+          target: event.target.id,
+          index: event.detail.index ?? null,
+          state: event.detail.state ?? null,
+        });
+      };
+      for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
+        document.body.addEventListener(type, listener);
+      }
+      const states = [controller.state];
+      controller.show();
+      states.push(controller.state);
+      await controller.finished;
+      states.push(controller.state);
+      const successfulEvents = [...events];
+      const paths = pathInventory();
+      events.length = 0;
+      controller.hide();
+      const cancellation = {
+        state: controller.state,
+        aggregate: events.filter(
+          (event) => event.scope === 'group' && event.type === 'hana:cancel',
+        ),
+      };
+      for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
+        document.body.removeEventListener(type, listener);
+      }
+      return { states, successfulEvents, paths, cancellation };
+    };
+
+    const original = group(members, { trigger: 'manual', motion: 'never' });
+    const originalKeyCalls = [];
+    const definition = serialize(original, {
+      keyForTarget(target, context) {
+        originalKeyCalls.push({
+          ...contextSnapshot(context),
+          nativeElement: target instanceof Element,
+          nativeRange: target instanceof Range,
+        });
+        return keyForTarget(target, context);
+      },
+    });
+    const bytes = JSON.stringify(definition);
+    const originalRun = await execute(original);
+    original.destroy();
+    unregister();
+
+    let missingPlugin;
+    let missingResolverCalls = 0;
+    const missingEvents = [];
+    const missingListener = (event) => missingEvents.push(event.type);
+    for (const type of ['hana:start', 'hana:complete']) {
+      document.body.addEventListener(type, missingListener);
+    }
+    try {
+      restore(definition, {
+        root: document,
+        resolveTarget() {
+          missingResolverCalls += 1;
+          return direct;
+        },
+      });
+    } catch (error) {
+      missingPlugin = { name: error.name, code: error.code, field: error.details?.field };
+    }
+    for (const type of ['hana:start', 'hana:complete']) {
+      document.body.removeEventListener(type, missingListener);
+    }
+    const missingResidue = {
+      owned: document.querySelectorAll('[data-hana-id]').length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      events: missingEvents,
+      resolverCalls: missingResolverCalls,
+    };
+
+    unregister = registerMark('group-proof', pluginFactory);
+    const resolverCalls = [];
+    const restored = restore(definition, {
+      root: document,
+      resolveTarget(key, context) {
+        resolverCalls.push({
+          key,
+          keys: Object.keys(context),
+          targetKind: context.targetKind,
+          role: context.role,
+          controllerKind: context.controllerKind,
+          index: context.index,
+        });
+        return targetByKey.get(key);
+      },
+    });
+    const restoredKeyCalls = [];
+    const restoredBytes = JSON.stringify(serialize(restored, {
+      keyForTarget(target, context) {
+        restoredKeyCalls.push({
+          ...contextSnapshot(context),
+          nativeElement: target instanceof Element,
+          nativeRange: target instanceof Range,
+        });
+        return keyForTarget(target, context);
+      },
+    }));
+    const restoredRun = await execute(restored);
+    restored.destroy();
+    unregister();
+
+    const cleanup = {
+      owned: document.querySelectorAll('[data-hana-id]').length,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+    };
+    range.detach();
+    direct.remove();
+    rangeHost.remove();
+    selectorScope.remove();
+    elementScope.remove();
+    return {
+      bytes,
+      restoredBytes,
+      definition,
+      originalKeyCalls,
+      restoredKeyCalls,
+      resolverCalls,
+      originalRun,
+      restoredRun,
+      missingPlugin,
+      missingResidue,
+      cleanup,
+    };
+  });
+
+  expect(result.restoredBytes).toBe(result.bytes);
+  expect(Object.keys(result.definition)).toEqual(['schema', 'kind', 'options', 'members']);
+  expect(result.definition).toMatchObject({
+    schema: 'hanamaru/v1',
+    kind: 'group',
+    options: { trigger: 'manual', motion: 'never' },
+  });
+  expect(result.definition.members).toHaveLength(5);
+  expect(result.definition.members.every(
+    (member) => Object.keys(member).join(',') === 'target,options',
+  )).toBe(true);
+  expect(result.definition.members.every(
+    ({ options }) => Object.keys(options).join(',')
+      === 'mark,note,placement,accessible,seed,duration',
+  )).toBe(true);
+  expect(result.definition.members.map(({ target }) => target)).toEqual([
+    { type: 'selector', selector: '#group-first' },
+    { type: 'key', key: 'group-target-1', targetKind: 'element' },
+    { type: 'key', key: 'group-target-2', targetKind: 'range' },
+    {
+      type: 'locator',
+      within: { type: 'selector', selector: '#group-selector-scope' },
+      text: 'selector exact phrase',
+      occurrence: 1,
+    },
+    {
+      type: 'locator',
+      within: { type: 'key', key: 'group-within-4', targetKind: 'element' },
+      text: 'element scoped exact phrase',
+    },
+  ]);
+  expect(result.definition.members.every(
+    ({ options }) => /^hana-\d+$/.test(options.seed),
+  )).toBe(true);
+  expect(new Set(result.definition.members.map(({ options }) => options.seed)).size).toBe(5);
+  expect(result.definition.members[4].options.mark).toBe('group-proof');
+  expect(result.originalRun).toEqual(result.restoredRun);
+  expect(result.restoredRun.states).toEqual(['idle', 'showing', 'visible']);
+  expect(result.restoredRun.paths).toHaveLength(5);
+  expect(result.restoredRun.paths[4]).toEqual(['M 4 5 Q 14 7 24 15']);
+  expect(result.restoredRun.successfulEvents
+    .filter(({ scope }) => scope === 'group')
+    .map(({ type }) => type)).toEqual(['hana:start', 'hana:complete']);
+  expect(result.restoredRun.cancellation).toEqual({
+    state: 'hidden',
+    aggregate: [{
+      type: 'hana:cancel',
+      scope: 'group',
+      target: 'group-first',
+      index: null,
+      state: null,
+    }],
+  });
+  expect(result.originalKeyCalls).toEqual([
+    {
+      keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+      role: 'target',
+      controllerKind: 'group',
+      owner: 'group-direct-key',
+      index: 1,
+      nativeElement: true,
+      nativeRange: false,
+    },
+    {
+      keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+      role: 'target',
+      controllerKind: 'group',
+      owner: 'group-range-key',
+      index: 2,
+      nativeElement: false,
+      nativeRange: true,
+    },
+    {
+      keys: ['role', 'controllerKind', 'ownerElement', 'index'],
+      role: 'within',
+      controllerKind: 'group',
+      owner: 'group-element-scope',
+      index: 4,
+      nativeElement: true,
+      nativeRange: false,
+    },
+  ]);
+  expect(result.restoredKeyCalls).toEqual(result.originalKeyCalls);
+  expect(result.resolverCalls).toEqual([
+    {
+      key: 'group-target-1',
+      keys: ['targetKind', 'role', 'controllerKind', 'index'],
+      targetKind: 'element',
+      role: 'target',
+      controllerKind: 'group',
+      index: 1,
+    },
+    {
+      key: 'group-target-2',
+      keys: ['targetKind', 'role', 'controllerKind', 'index'],
+      targetKind: 'range',
+      role: 'target',
+      controllerKind: 'group',
+      index: 2,
+    },
+    {
+      key: 'group-within-4',
+      keys: ['targetKind', 'role', 'controllerKind', 'index'],
+      targetKind: 'element',
+      role: 'within',
+      controllerKind: 'group',
+      index: 4,
+    },
+  ]);
+  expect(result.missingPlugin).toEqual({
+    name: 'HanamaruConfigError',
+    code: 'HANA_CONFIG_INVALID',
+    field: 'mark',
+  });
+  expect(result.missingResidue).toEqual({
+    owned: 0,
+    overlays: 0,
+    events: [],
+    resolverCalls: 0,
+  });
+  expect(result.cleanup).toEqual({ owned: 0, overlays: 0 });
+  await expectNoBrowserFailures(page, pageErrors);
+});
+
+test('atomic Story and Group restore failures leave no controller, DOM, event, or resolver residue', async ({ page }) => {
+  const pageErrors = await openFixture(page, '/tests/fixtures/group.html');
+  const result = await page.evaluate(async () => {
+    const { restore } = await import('/src/serialize.js');
+    const first = document.querySelector('#group-first');
+    const second = document.querySelector('#group-second');
+    const annotationOptions = (seed, mark = 'underline', duration = 0) => ({
+      mark,
+      note: null,
+      placement: 'auto',
+      accessible: false,
+      seed,
+      duration,
+    });
+    const aggregate = (kind, members) => ({
+      schema: 'hanamaru/v1',
+      kind,
+      options: kind === 'story'
+        ? { trigger: 'manual', gap: 0, motion: 'never' }
+        : { trigger: 'manual', motion: 'never' },
+      [kind === 'story' ? 'steps' : 'members']: members,
+    });
+    const cases = [
+      {
+        name: 'Story later resolver',
+        definition: aggregate('story', [
+          {
+            target: { type: 'key', key: 'first', targetKind: 'element' },
+            options: annotationOptions('story-first'),
+          },
+          {
+            target: { type: 'key', key: 'late-failure', targetKind: 'element' },
+            options: annotationOptions('story-late'),
+          },
+        ]),
+        resolve(key) {
+          if (key === 'first') return first;
+          throw new Error('late story resolver failure');
+        },
+      },
+      {
+        name: 'Group later resolver',
+        definition: aggregate('group', [
+          {
+            target: { type: 'key', key: 'first', targetKind: 'element' },
+            options: annotationOptions('group-first'),
+          },
+          {
+            target: { type: 'key', key: 'late-failure', targetKind: 'element' },
+            options: annotationOptions('group-late'),
+          },
+        ]),
+        resolve(key) {
+          if (key === 'first') return first;
+          throw new Error('late group resolver failure');
+        },
+      },
+      {
+        name: 'Story plugin preflight',
+        definition: aggregate('story', [{
+          target: { type: 'key', key: 'first', targetKind: 'element' },
+          options: annotationOptions('story-plugin', 'not-registered'),
+        }]),
+        resolve() { return first; },
+      },
+      {
+        name: 'Group options preflight',
+        definition: aggregate('group', [{
+          target: { type: 'key', key: 'second', targetKind: 'element' },
+          options: annotationOptions('group-options', 'underline', -1),
+        }]),
+        resolve() { return second; },
+      },
+    ];
+    const output = [];
+
+    for (const item of cases) {
+      let resolverCalls = 0;
+      const events = [];
+      const listener = (event) => events.push(event.type);
+      for (const type of [
+        'hana:start', 'hana:step', 'hana:complete', 'hana:cancel', 'hana:error',
+      ]) {
+        document.body.addEventListener(type, listener);
+      }
+      let failure;
+      try {
+        restore(item.definition, {
+          root: document,
+          resolveTarget(key, context) {
+            resolverCalls += 1;
+            return item.resolve(key, context);
+          },
+        });
+      } catch (error) {
+        failure = {
+          name: error.name,
+          code: error.code,
+          cause: error.details?.cause?.message ?? null,
+        };
+      }
+      for (const type of [
+        'hana:start', 'hana:step', 'hana:complete', 'hana:cancel', 'hana:error',
+      ]) {
+        document.body.removeEventListener(type, listener);
+      }
+      output.push({
+        name: item.name,
+        failure,
+        resolverCalls,
+        events,
+        owned: document.querySelectorAll('[data-hana-id]').length,
+        overlays: document.querySelectorAll('[data-hana-overlay]').length,
+        annotations: document.querySelectorAll('.hana-annotation').length,
+        notes: document.querySelectorAll('.hana-note').length,
+      });
+    }
+    return output;
+  });
+
+  expect(result).toEqual([
+    {
+      name: 'Story later resolver',
+      failure: {
+        name: 'HanamaruTargetError',
+        code: 'HANA_TARGET_RESOLVER',
+        cause: 'late story resolver failure',
+      },
+      resolverCalls: 2,
+      events: [],
+      owned: 0,
+      overlays: 0,
+      annotations: 0,
+      notes: 0,
+    },
+    {
+      name: 'Group later resolver',
+      failure: {
+        name: 'HanamaruTargetError',
+        code: 'HANA_TARGET_RESOLVER',
+        cause: 'late group resolver failure',
+      },
+      resolverCalls: 2,
+      events: [],
+      owned: 0,
+      overlays: 0,
+      annotations: 0,
+      notes: 0,
+    },
+    {
+      name: 'Story plugin preflight',
+      failure: {
+        name: 'HanamaruConfigError',
+        code: 'HANA_CONFIG_INVALID',
+        cause: null,
+      },
+      resolverCalls: 0,
+      events: [],
+      owned: 0,
+      overlays: 0,
+      annotations: 0,
+      notes: 0,
+    },
+    {
+      name: 'Group options preflight',
+      failure: {
+        name: 'HanamaruConfigError',
+        code: 'HANA_CONFIG_SERIALIZED_DEFINITION',
+        cause: null,
+      },
+      resolverCalls: 0,
+      events: [],
+      owned: 0,
+      overlays: 0,
+      annotations: 0,
+      notes: 0,
+    },
+  ]);
+  await expectNoBrowserFailures(page, pageErrors);
 });
