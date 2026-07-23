@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Group fixture</title>
+    <link rel="stylesheet" href="/src/hanamaru.css">
+    <style>
+      body { margin: 40px; min-height: 240vh; }
+      .target { display: inline-block; margin: 32px; }
+      #replacement-slot { min-height: 80px; }
+      #viewport-stage { margin-top: 140vh; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="replacement-slot"></div>
+      <p id="group-first" class="target">First group target</p>
+      <p id="group-second" class="target">Second group target</p>
+      <section id="viewport-stage">
+        <p id="viewport-first" class="target">Original viewport target</p>
+      </section>
+    </main>
+  </body>
+</html>

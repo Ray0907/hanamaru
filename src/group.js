@@ -166,6 +166,7 @@ function documentContext(context) {
 function defaultGroupEnvironment(root) {
   const view = root.defaultView;
   const memberErrors = new WeakMap();
+  let memberErrorObserver = null;
   return {
     root,
     document: root,
@@ -176,6 +177,7 @@ function defaultGroupEnvironment(root) {
       annotationEnvironment.createEvent = (type, detail) => {
         if (type === 'hana:error') {
           memberErrors.set(detail.controller, detail.error);
+          memberErrorObserver?.(detail.controller, detail.error);
         }
       };
       return createAnnotation(target, options, annotationEnvironment);
@@ -197,6 +199,12 @@ function defaultGroupEnvironment(root) {
     },
     clearMemberError(annotation) { memberErrors.delete(annotation); },
     memberError(annotation) { return memberErrors.get(annotation); },
+    observeMemberErrors(observer) {
+      memberErrorObserver = observer;
+      return () => {
+        if (memberErrorObserver === observer) memberErrorObserver = null;
+      };
+    },
     microtask(callback) { view.queueMicrotask(callback); },
     resolveTarget(target) { return resolveTarget(target, root); },
   };
@@ -272,13 +280,21 @@ export function createGroup(members, rawOptions = {}, env) {
   let requestedVisible = false;
   let activeRefresh = null;
   let stopRefresh = null;
+  let stopMemberErrors = null;
+  let containingMemberError = false;
+  const annotationIndices = new Map(
+    annotations.map((annotation, index) => [annotation, index]),
+  );
   const automatic = {
     active: false,
     epoch: 0,
+    generation: null,
     lease: null,
+    owner: null,
     registered: false,
     shared: null,
     stopIntersection: null,
+    stopLayout: null,
     stopLoad: null,
   };
   const controller = {
@@ -340,17 +356,22 @@ export function createGroup(members, rawOptions = {}, env) {
     automatic.epoch += 1;
     const stopLoad = automatic.stopLoad;
     const stopIntersection = automatic.stopIntersection;
+    const stopLayout = automatic.stopLayout;
     const shared = automatic.shared;
     const lease = automatic.lease;
     const registered = automatic.registered;
     automatic.stopLoad = null;
     automatic.stopIntersection = null;
+    automatic.stopLayout = null;
     automatic.shared = null;
     automatic.lease = null;
+    automatic.generation = null;
+    automatic.owner = null;
     automatic.registered = false;
     const failures = [];
     cleanupOperation(stopLoad, failures);
     cleanupOperation(stopIntersection, failures);
+    cleanupOperation(stopLayout, failures);
     if (registered && shared !== null) {
       cleanupOperation(
         () => shared.releaseController(env.triggerId),
@@ -407,15 +428,12 @@ export function createGroup(members, rawOptions = {}, env) {
     env.microtask(start);
   }
 
-  function installViewportTrigger(epoch) {
-    automatic.lease = env.acquireDocumentResources(env.document);
-    automatic.shared = automatic.lease.shared;
-    automatic.shared.registerController(env.triggerId);
-    automatic.registered = true;
+  function installViewportIntersection(epoch) {
+    if (!automaticCanRun(epoch) || automatic.shared === null) return;
     let unavailable = false;
     const cleanup = automatic.shared.observeIntersection({
       id: env.triggerId,
-      target: prepared[0].record.ownerElement,
+      target: automatic.owner,
       threshold: 0.25,
       onEnter() { acceptAutomaticStart(epoch); },
       onExit() {},
@@ -438,6 +456,78 @@ export function createGroup(members, rawOptions = {}, env) {
     automatic.active = true;
     automatic.epoch += 1;
     installLoadTrigger(automatic.epoch);
+  }
+
+  function viewportLayoutBinding(epoch, generation) {
+    return {
+      id: env.triggerId,
+      generation,
+      record: prepared[0].record,
+      read() {
+        if (!automaticCanRun(epoch) || automatic.generation !== generation) {
+          return automatic.owner;
+        }
+        prepared[0].record.refresh();
+        validateRecordRoot(prepared[0].record, prepared[0].target, env);
+        return prepared[0].record.ownerElement;
+      },
+      write(owner) {
+        if (!automaticCanRun(epoch)
+          || automatic.generation !== generation
+          || owner === automatic.owner) return;
+        rearmViewportOwner(owner);
+      },
+      onError(error) {
+        if (!automaticCanRun(epoch) || automatic.generation !== generation) return;
+        if (error instanceof HanamaruTargetError) return;
+        failTrigger(error);
+      },
+    };
+  }
+
+  function rearmViewportOwner(owner) {
+    if (!automatic.active || state === 'destroyed' || automatic.shared === null) return;
+    automatic.epoch += 1;
+    const epoch = automatic.epoch;
+    const stopIntersection = automatic.stopIntersection;
+    automatic.stopIntersection = null;
+    const failures = [];
+    cleanupOperation(stopIntersection, failures);
+    if (failures.length > 0) {
+      failTrigger(failures[0]);
+      return;
+    }
+    if (!automaticCanRun(epoch) || automatic.shared === null) return;
+    const priorLayout = automatic.stopLayout;
+    try {
+      automatic.generation = automatic.shared.bumpGeneration(env.triggerId);
+      automatic.owner = owner;
+      automatic.stopLayout = automatic.shared.rebindLayout(
+        env.triggerId,
+        viewportLayoutBinding(epoch, automatic.generation),
+      );
+    } catch (error) {
+      failTrigger(error);
+      return;
+    }
+    cleanupOperation(priorLayout, failures);
+    if (failures.length > 0) {
+      failTrigger(failures[0]);
+      return;
+    }
+    if (automaticCanRun(epoch)) installViewportIntersection(epoch);
+  }
+
+  function installViewportTrigger(epoch) {
+    automatic.lease = env.acquireDocumentResources(env.document);
+    automatic.shared = automatic.lease.shared;
+    automatic.generation = automatic.shared.registerController(env.triggerId);
+    automatic.registered = true;
+    automatic.owner = prepared[0].record.ownerElement;
+    automatic.stopLayout = automatic.shared.observeLayout(
+      viewportLayoutBinding(epoch, automatic.generation),
+    );
+    installViewportIntersection(epoch);
   }
 
   function installAutomaticTrigger() {
@@ -514,6 +604,33 @@ export function createGroup(members, rawOptions = {}, env) {
     state = 'suspended';
     settleRejected(activeRun, error);
     hideAll(activeRun.started);
+    dispatch('hana:error', { controller, error, index });
+  }
+
+  function handleMemberError(annotation, cause) {
+    const index = annotationIndices.get(annotation);
+    if (index === undefined
+      || containingMemberError
+      || state === 'destroyed'
+      || annotations[index].state !== 'suspended') return;
+    if (activeRefresh !== null && refreshIsCurrent(activeRefresh)) {
+      recordRefreshFailure(activeRefresh, index, cause);
+      return;
+    }
+    if (state !== 'showing' && state !== 'visible') return;
+
+    cancelRefreshObservation();
+    const error = groupMemberError(index, cause);
+    operationEpoch += 1;
+    requestedVisible = true;
+    state = 'suspended';
+    settleRejected(run, error);
+    containingMemberError = true;
+    try {
+      hideAll();
+    } finally {
+      containingMemberError = false;
+    }
     dispatch('hana:error', { controller, error, index });
   }
 
@@ -869,6 +986,15 @@ export function createGroup(members, rawOptions = {}, env) {
     let failure = cancelRefreshObservation();
     const triggerFailure = stopAutomaticTrigger();
     failure ??= triggerFailure;
+    const memberErrorCleanup = stopMemberErrors;
+    stopMemberErrors = null;
+    if (memberErrorCleanup !== null) {
+      try {
+        memberErrorCleanup();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
     for (let index = annotations.length - 1; index >= 0; index -= 1) {
       try {
         annotations[index].destroy();
@@ -887,9 +1013,14 @@ export function createGroup(members, rawOptions = {}, env) {
   }
 
   try {
+    if (typeof env.observeMemberErrors === 'function') {
+      stopMemberErrors = env.observeMemberErrors(handleMemberError);
+    }
     installAutomaticTrigger();
   } catch (error) {
     stopAutomaticTrigger();
+    try { stopMemberErrors?.(); } catch { /* Preserve setup failure. */ }
+    stopMemberErrors = null;
     for (let index = annotations.length - 1; index >= 0; index -= 1) {
       try { annotations[index].destroy(); } catch { /* Preserve trigger setup failure. */ }
     }

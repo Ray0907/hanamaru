@@ -101,10 +101,14 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
   let triggerInstallFailure = null;
   let triggerCleanupFailure = null;
   const intersections = [];
+  const layouts = [];
   const registeredTriggers = new Set();
   const memberRefreshErrors = new Map();
   const pendingRefreshWrites = [];
   const pendingRefreshChecks = [];
+  const records = new Map();
+  let memberErrorHandler = null;
+  let triggerGeneration = 0;
   let asyncRefresh = false;
 
   function createAnnotation(target, options) {
@@ -147,6 +151,15 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
         state = 'suspended';
         run.reject(error);
       },
+      runtimeFail(error) {
+        if (run !== null && !run.settled) {
+          run.settled = true;
+          run.reject(error);
+        }
+        state = 'suspended';
+        memberRefreshErrors.set(annotation, error);
+        memberErrorHandler?.(annotation, error);
+      },
       hide() {
         calls.push(['annotation:hide', target]);
         operation += 1;
@@ -168,16 +181,13 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
         if (asyncRefresh) {
           operation += 1;
           const refreshOperation = operation;
-          const activeRun = run;
           pendingRefreshWrites.push({
             target,
             write() {
               if (refreshOperation !== operation) return;
               const error = asyncRefreshFailures.get(target);
               if (error !== undefined) {
-                memberRefreshErrors.set(annotation, error);
-                if (activeRun !== null && !activeRun.settled) annotation.fail(error);
-                else state = 'suspended';
+                annotation.runtimeFail(error);
                 return;
               }
               annotation.finish();
@@ -217,6 +227,7 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
       return [...listeners.values()].reduce((total, entries) => total + entries.size, 0);
     },
     intersections,
+    layouts,
     failTriggerCleanup(error) { triggerCleanupFailure = error; },
     failTriggerInstall(error) { triggerInstallFailure = error; },
     fireDocument(type) {
@@ -233,6 +244,18 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
     failRefreshAsync(target, error) { asyncRefreshFailures.set(target, error); },
     failResolve(target, error) { resolveFailures.set(target, error); },
     failShow(target, error) { showFailures.set(target, error); },
+    emitMemberError(target, error) {
+      annotations.find((annotation) => annotation.target === target).runtimeFail(error);
+    },
+    replaceOwner(target, label) {
+      const record = records.get(target);
+      assert.ok(record, `record for ${target}`);
+      record.ownerElement = {
+        target: label,
+        getRootNode() { return roots.get(target) ?? root; },
+      };
+      return record.ownerElement;
+    },
     clearRefreshFailure(target) { refreshFailures.delete(target); },
     clearRefreshFailureAsync(target) { asyncRefreshFailures.delete(target); },
     clearShowFailure(target) { showFailures.delete(target); },
@@ -266,7 +289,34 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
             registerController(id) {
               calls.push(['trigger:register', id]);
               registeredTriggers.add(id);
-              return 1;
+              triggerGeneration += 1;
+              return triggerGeneration;
+            },
+            bumpGeneration(id) {
+              calls.push(['trigger:bumpGeneration', id]);
+              triggerGeneration += 1;
+              return triggerGeneration;
+            },
+            observeLayout(options) {
+              calls.push(['trigger:observeLayout', options.record.ownerElement.target]);
+              const registration = { ...options, active: true };
+              layouts.push(registration);
+              return () => {
+                if (!registration.active) return;
+                registration.active = false;
+                calls.push(['trigger:disconnectLayout', options.record.ownerElement.target]);
+              };
+            },
+            rebindLayout(id, options) {
+              calls.push(['trigger:rebindLayout', id, options.record.ownerElement.target]);
+              for (const registration of layouts) registration.active = false;
+              const registration = { ...options, active: true };
+              layouts.push(registration);
+              return () => {
+                if (!registration.active) return;
+                registration.active = false;
+                calls.push(['trigger:disconnectLayout', options.record.ownerElement.target]);
+              };
             },
             observeIntersection(options) {
               calls.push(['trigger:observe', options.target.target]);
@@ -314,12 +364,18 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
       },
       clearMemberError(annotation) { memberRefreshErrors.delete(annotation); },
       memberError(annotation) { return memberRefreshErrors.get(annotation); },
+      observeMemberErrors(handler) {
+        memberErrorHandler = handler;
+        return () => {
+          if (memberErrorHandler === handler) memberErrorHandler = null;
+        };
+      },
       microtask(callback) { queueMicrotask(callback); },
       resolveTarget(target) {
         calls.push(['resolveTarget', target]);
         if (resolveFailures.has(target)) throw resolveFailures.get(target);
         const targetRoot = roots.get(target) ?? root;
-        return {
+        const record = {
           ownerElement: {
             target,
             getRootNode() { return targetRoot; },
@@ -330,6 +386,8 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
             return this;
           },
         };
+        records.set(target, record);
+        return record;
       },
     },
   };
@@ -1273,6 +1331,30 @@ test('post-settlement async refresh failure suspends after the later frame witho
   assert.equal(errorEvent.detail.error.details.error, cause);
 });
 
+test('a live member error after completion suspends and hides the whole group immediately', async () => {
+  const environment = fakeEnvironment();
+  const controller = createGroup(definitions(), {}, environment.env);
+  controller.show();
+  for (const annotation of environment.annotations) annotation.finish();
+  const settledRun = controller.finished;
+  await settledRun;
+  const cause = new HanamaruTargetError('HANA_TARGET_MISSING', 'live target loss');
+
+  environment.emitMemberError('second', cause);
+  await flushMicrotasks();
+
+  assert.equal(controller.state, 'suspended');
+  assert.equal(controller.finished, settledRun);
+  assert.deepEqual(environment.annotations.map(({ state }) => state), [
+    'hidden', 'hidden', 'hidden',
+  ]);
+  const errors = environment.events.filter(({ type }) => type === 'hana:error');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].detail.index, 1);
+  assert.equal(errors[0].detail.error.code, 'HANA_STATE_GROUP_MEMBER');
+  assert.equal(errors[0].detail.error.details.error, cause);
+});
+
 test('pending async refresh failure rejects the existing run after every member refresh was attempted', async () => {
   const environment = fakeEnvironment();
   environment.useAsyncRefresh();
@@ -1578,6 +1660,34 @@ test('viewport trigger uses the first owner, exact root resources, and remains v
   assert.deepEqual(environment.annotations.map(({ state }) => state), [
     'visible', 'visible', 'visible',
   ]);
+});
+
+test('viewport trigger rebinds to a replacement first owner and cleans stale observers', async () => {
+  const environment = fakeEnvironment();
+  const controller = createGroup(definitions(), { trigger: 'viewport' }, environment.env);
+  const oldIntersection = environment.intersections[0];
+  const oldLayout = environment.layouts[0];
+  const replacement = environment.replaceOwner('first', 'replacement-first');
+
+  const owner = oldLayout.read();
+  assert.equal(owner, replacement);
+  oldLayout.write(owner);
+
+  assert.equal(oldIntersection.disconnects, 1);
+  assert.equal(environment.intersections.length, 2);
+  const nextIntersection = environment.intersections[1];
+  assert.equal(nextIntersection.target, replacement);
+  assert.equal(oldLayout.active, false);
+  assert.equal(environment.layouts.length, 2);
+  assert.equal(environment.layouts[1].active, true);
+
+  oldIntersection.onEnter({ isIntersecting: true, intersectionRatio: 1 });
+  assert.equal(controller.state, 'idle');
+  nextIntersection.onEnter({ isIntersecting: true, intersectionRatio: 1 });
+  assert.equal(controller.state, 'showing');
+  assert.equal(nextIntersection.disconnects, 1);
+  assert.equal(environment.layouts[1].active, false);
+  assert.equal(environment.triggerLeases, 0);
 });
 
 test('viewport trigger destroy-before-entry disconnects and releases idempotently', async () => {
