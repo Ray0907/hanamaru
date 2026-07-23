@@ -67,6 +67,7 @@ function createHarness() {
   let exposeFailure = null;
   let onDestroy = null;
   let onShow = null;
+  let onUpdate = null;
   let showEvent = null;
   let showFinishedFailure = null;
 
@@ -78,16 +79,23 @@ function createHarness() {
       const controller = {
         target,
         run,
+        updateDepth: 0,
         updateReturned: false,
         update(optionsPatch) {
           controller.updateReturned = false;
-          calls.push(['update', target.name, optionsPatch]);
-          if (updateEvent !== null) {
-            target.fail(controller, updateEvent.error, updateEvent.generation);
+          controller.updateDepth += 1;
+          try {
+            calls.push(['update', target.name, optionsPatch]);
+            onUpdate?.(controller, optionsPatch);
+            if (updateEvent !== null) {
+              target.fail(controller, updateEvent.error, updateEvent.generation);
+            }
+            if (updateFailure !== null) throw updateFailure;
+            controller.updateReturned = true;
+            return controller;
+          } finally {
+            controller.updateDepth -= 1;
           }
-          if (updateFailure !== null) throw updateFailure;
-          controller.updateReturned = true;
-          return controller;
         },
         show() {
           calls.push(`show:${target.name}`);
@@ -134,6 +142,7 @@ function createHarness() {
     setExposeFailure(error) { exposeFailure = error; },
     setOnDestroy(callback) { onDestroy = callback; },
     setOnShow(callback) { onShow = callback; },
+    setOnUpdate(callback) { onUpdate = callback; },
     setShowEvent(error, generation = undefined) {
       showEvent = error === null ? null : { error, generation };
     },
@@ -1116,6 +1125,285 @@ test('reentrant winner during buffered update failure owns the final state', () 
     assert.deepEqual(harness.queued, [], listenerOrder);
     assert.equal(target.listenerCount, 0, listenerOrder);
     assert.equal(winner.listenerCount, 1, listenerOrder);
+  }
+});
+
+test('same-record null or no-op reentry preserves buffered update failure until the outer update returns', () => {
+  for (const listenerOrder of ['before-adapter', 'after-adapter']) {
+    for (const reentry of ['null-target', 'same-canonical']) {
+      const harness = createHarness();
+      const target = new FakeTarget(`${listenerOrder}-${reentry}`, harness.calls);
+      const failure = new Error(`buffered ${listenerOrder} ${reentry}`);
+      const observed = [];
+      const listener = () => {
+        target.removeEventListener('hana:error', listener);
+        harness.owner.update(
+          reentry === 'null-target' ? null : target,
+          box,
+          {
+            onError(error, controller) {
+              observed.push({
+                controller,
+                error,
+                updateDepth: controller.updateDepth,
+                updateReturned: controller.updateReturned,
+              });
+            },
+          },
+        );
+      };
+      if (listenerOrder === 'before-adapter') {
+        target.addEventListener('hana:error', listener);
+      }
+      harness.owner.mount(target, box);
+      if (listenerOrder === 'after-adapter') {
+        target.addEventListener('hana:error', listener);
+      }
+      harness.setUpdateEvent(failure, 41);
+      harness.calls.length = 0;
+
+      harness.owner.update(target, circle, {
+        onError() { throw new Error('superseded outer callback must not run'); },
+      });
+
+      assert.deepEqual(observed, [{
+        controller: harness.controllers[0],
+        error: failure,
+        updateDepth: 0,
+        updateReturned: true,
+      }], `${listenerOrder} / ${reentry}`);
+      assert.equal(
+        harness.calls.filter((call) => call === `destroy:${target.name}`).length,
+        1,
+        `${listenerOrder} / ${reentry}`,
+      );
+      assert.equal(
+        harness.exposed.filter((value) => value === null).length,
+        1,
+        `${listenerOrder} / ${reentry}`,
+      );
+      assert.equal(target.listenerCount, 0, `${listenerOrder} / ${reentry}`);
+    }
+  }
+});
+
+test('update throw after same-record null or no-op reentry still terminalizes the active record', () => {
+  for (const listenerOrder of ['before-adapter', 'after-adapter']) {
+    for (const reentry of ['null-target', 'same-canonical']) {
+      const harness = createHarness();
+      const target = new FakeTarget(`${listenerOrder}-${reentry}`, harness.calls);
+      const eventFailure = new Error(`event ${listenerOrder} ${reentry}`);
+      const updateFailure = new Error(`throw ${listenerOrder} ${reentry}`);
+      const observed = [];
+      const listener = () => {
+        target.removeEventListener('hana:error', listener);
+        harness.owner.update(
+          reentry === 'null-target' ? null : target,
+          box,
+          { onError(error) { observed.push(error); } },
+        );
+      };
+      if (listenerOrder === 'before-adapter') {
+        target.addEventListener('hana:error', listener);
+      }
+      harness.owner.mount(target, box);
+      if (listenerOrder === 'after-adapter') {
+        target.addEventListener('hana:error', listener);
+      }
+      harness.setUpdateEvent(eventFailure, 42);
+      harness.setUpdateFailure(updateFailure);
+      harness.calls.length = 0;
+
+      assert.equal(
+        captureThrown(() => harness.owner.update(target, circle)),
+        updateFailure,
+        `${listenerOrder} / ${reentry}`,
+      );
+
+      assert.deepEqual(observed, [], `${listenerOrder} / ${reentry}`);
+      assert.deepEqual(harness.queued, [], `${listenerOrder} / ${reentry}`);
+      assert.equal(
+        harness.calls.filter((call) => call === `destroy:${target.name}`).length,
+        1,
+        `${listenerOrder} / ${reentry}`,
+      );
+      assert.equal(
+        harness.exposed.filter((value) => value === null).length,
+        1,
+        `${listenerOrder} / ${reentry}`,
+      );
+      assert.equal(target.listenerCount, 0, `${listenerOrder} / ${reentry}`);
+    }
+  }
+});
+
+test('outer update throw cannot tear down a reentrant replacement winner', () => {
+  for (const listenerOrder of ['before-adapter', 'after-adapter']) {
+    const harness = createHarness();
+    const target = new FakeTarget(`stale-${listenerOrder}`, harness.calls);
+    const winner = new FakeTarget(`winner-${listenerOrder}`, harness.calls);
+    const updateFailure = new Error(`outer throw ${listenerOrder}`);
+    const listener = () => {
+      target.removeEventListener('hana:error', listener);
+      harness.owner.update(winner, circle);
+    };
+    if (listenerOrder === 'before-adapter') {
+      target.addEventListener('hana:error', listener);
+    }
+    harness.owner.mount(target, box);
+    if (listenerOrder === 'after-adapter') {
+      target.addEventListener('hana:error', listener);
+    }
+    harness.setUpdateEvent(new Error(`stale event ${listenerOrder}`), 43);
+    harness.setUpdateFailure(updateFailure);
+    harness.calls.length = 0;
+
+    assert.equal(
+      captureThrown(() => harness.owner.update(target, { mark: 'underline' })),
+      updateFailure,
+      listenerOrder,
+    );
+
+    assert.equal(harness.exposed.at(-1).target, winner, listenerOrder);
+    assert.equal(
+      harness.calls.filter((call) => call === `destroy:${target.name}`).length,
+      1,
+      listenerOrder,
+    );
+    assert.equal(
+      harness.calls.filter((call) => call === `destroy:${winner.name}`).length,
+      0,
+      listenerOrder,
+    );
+    assert.equal(winner.listenerCount, 1, listenerOrder);
+  }
+});
+
+test('reentrant disable or destroy terminalizes an updating record exactly once', () => {
+  for (const listenerOrder of ['before-adapter', 'after-adapter']) {
+    for (const action of ['disable', 'destroy']) {
+      for (const outcome of ['success', 'throw']) {
+        const harness = createHarness();
+        const target = new FakeTarget(
+          `${listenerOrder}-${action}-${outcome}`,
+          harness.calls,
+        );
+        const updateFailure = new Error(`outer ${outcome}`);
+        const listener = () => {
+          target.removeEventListener('hana:error', listener);
+          if (action === 'destroy') harness.owner.destroy();
+          else harness.owner.update(target, box, { enabled: false });
+        };
+        if (listenerOrder === 'before-adapter') {
+          target.addEventListener('hana:error', listener);
+        }
+        harness.owner.mount(target, box);
+        if (listenerOrder === 'after-adapter') {
+          target.addEventListener('hana:error', listener);
+        }
+        harness.setUpdateEvent(new Error(`terminal ${action}`), 44);
+        if (outcome === 'throw') harness.setUpdateFailure(updateFailure);
+        harness.calls.length = 0;
+
+        if (outcome === 'throw') {
+          assert.equal(
+            captureThrown(() => harness.owner.update(target, circle)),
+            updateFailure,
+            `${listenerOrder} / ${action}`,
+          );
+        } else {
+          assert.equal(harness.owner.update(target, circle), harness.owner);
+        }
+
+        assert.equal(
+          harness.calls.filter((call) => call === `destroy:${target.name}`).length,
+          1,
+          `${listenerOrder} / ${action} / ${outcome}`,
+        );
+        assert.equal(
+          harness.exposed.filter((value) => value === null).length,
+          1,
+          `${listenerOrder} / ${action} / ${outcome}`,
+        );
+        assert.equal(target.listenerCount, 0);
+      }
+    }
+  }
+});
+
+test('nested same-record updates retain the latest real update owner without stranding phase', () => {
+  const harness = createHarness();
+  const target = new FakeTarget('nested-owner', harness.calls);
+  let depth = 0;
+  harness.owner.mount(target, box);
+  harness.calls.length = 0;
+  harness.setOnUpdate(() => {
+    depth += 1;
+    if (depth === 1) {
+      harness.owner.update(null, box);
+      harness.owner.update(target, { mark: 'underline' });
+    } else if (depth === 2) {
+      harness.owner.update(null, circle);
+      harness.owner.update(target, box);
+    }
+  });
+
+  harness.owner.update(target, circle);
+  harness.setOnUpdate(null);
+  harness.owner.update(target, { mark: 'underline' });
+
+  assert.equal(depth, 2);
+  assert.equal(
+    harness.calls.filter((call) => Array.isArray(call) && call[0] === 'update').length,
+    2,
+  );
+  assert.equal(harness.controllers[0].updateReturned, true);
+  assert.equal(target.listenerCount, 1);
+  assert.equal(harness.exposed.at(-1), harness.controllers[0]);
+});
+
+test('nested real update buffers failure until every same-record update frame returns', () => {
+  for (const listenerOrder of ['before-adapter', 'after-adapter']) {
+    const harness = createHarness();
+    const target = new FakeTarget(`nested-${listenerOrder}`, harness.calls);
+    const failure = new Error(`nested failure ${listenerOrder}`);
+    const observed = [];
+    const listener = () => {
+      target.removeEventListener('hana:error', listener);
+      harness.owner.update(target, { mark: 'underline' }, {
+        onError(error, controller) {
+          observed.push({
+            error,
+            updateDepth: controller.updateDepth,
+          });
+        },
+      });
+    };
+    if (listenerOrder === 'before-adapter') {
+      target.addEventListener('hana:error', listener);
+    }
+    harness.owner.mount(target, box);
+    if (listenerOrder === 'after-adapter') {
+      target.addEventListener('hana:error', listener);
+    }
+    harness.setUpdateEvent(failure, 45);
+
+    harness.owner.update(target, circle);
+
+    assert.deepEqual(observed, [{
+      error: failure,
+      updateDepth: 0,
+    }], listenerOrder);
+    assert.equal(
+      harness.calls.filter((call) => Array.isArray(call) && call[0] === 'update').length,
+      2,
+      listenerOrder,
+    );
+    assert.equal(
+      harness.calls.filter((call) => call === `destroy:${target.name}`).length,
+      1,
+      listenerOrder,
+    );
   }
 });
 

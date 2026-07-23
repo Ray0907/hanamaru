@@ -289,6 +289,8 @@ export function createAdapterOwner({
       pendingFailure: null,
       phase: 'candidate',
       target,
+      updateDepth: 0,
+      updateOwner: null,
     };
     record.listener = (event) => eventFailure(record, event);
     if (!operationIsCurrent(operation)) {
@@ -376,35 +378,33 @@ export function createAdapterOwner({
       const active = current;
       active.onError = config.onError;
       if (sameCanonical(active.canonical, prepared.canonical)) {
-        if (active.phase === 'updating') {
-          active.phase = 'current';
-          active.pendingFailure = null;
-        }
         return owner;
       }
+      if (active.updateDepth === 0) active.pendingFailure = null;
       active.phase = 'updating';
-      active.pendingFailure = null;
-      active.phaseOperation = operation;
+      active.updateDepth += 1;
+      active.updateOwner = operation;
       try {
         active.controller.update(completeManual(prepared, active.defaultSeed));
       } catch (error) {
-        const authoritative = operationIsCurrent(operation)
-          && current === active
-          && active.active
-          && active.phaseOperation === operation;
+        active.updateDepth -= 1;
+        const authoritative = current === active && active.active;
         if (authoritative) {
           current = null;
           active.phase = 'failed';
           active.pendingFailure = null;
+          active.updateOwner = null;
           cleanup(active, true, error);
         }
         throw error;
       }
-      if (!operationIsCurrent(operation)
-        || current !== active
-        || !active.active
-        || active.phaseOperation !== operation) return owner;
-      active.canonical = prepared.canonical;
+      active.updateDepth -= 1;
+      if (current !== active || !active.active) return owner;
+      if (active.updateOwner === operation) {
+        active.canonical = prepared.canonical;
+      }
+      if (active.updateDepth !== 0) return owner;
+      active.updateOwner = null;
       const pendingFailure = active.pendingFailure;
       active.pendingFailure = null;
       active.phase = 'current';
