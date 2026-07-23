@@ -86,18 +86,19 @@ function connectedElement(value, root) {
   const message = 'Resolved key must be a connected Element in the target Document';
   return reflectionBoundary(() => {
     const ElementConstructor = root.defaultView.Element;
+    const readers = nodeReaders(root);
     if (!(value instanceof ElementConstructor)
-      || value.ownerDocument !== root
-      || !value.isConnected
-      || value.getRootNode() !== root) {
+      || readers.ownerDocument(value) !== root
+      || !readers.isConnected(value)
+      || readers.getRootNode(value) !== root) {
       targetError(message, { target: value });
     }
     return value;
   }, (cause) => targetError(message, { target: value, cause }));
 }
 
-function prototypeDescriptor(Constructor, key) {
-  let prototype = typeof Constructor === 'function' ? Constructor.prototype : null;
+function prototypeDescriptor(start, key) {
+  let prototype = start;
   while (prototype !== null) {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
     if (descriptor !== undefined) return descriptor;
@@ -106,18 +107,31 @@ function prototypeDescriptor(Constructor, key) {
   return undefined;
 }
 
-function propertyReader(Constructor, key) {
-  const getter = prototypeDescriptor(Constructor, key)?.get;
-  return typeof getter === 'function'
-    ? (value) => Reflect.apply(getter, value, [])
-    : (value) => value?.[key];
+function propertyReader(prototype, key) {
+  const getter = prototypeDescriptor(prototype, key)?.get;
+  if (typeof getter !== 'function') {
+    throw new TypeError(`Missing DOM property getter: ${key}`);
+  }
+  return (value) => Reflect.apply(getter, value, []);
 }
 
-function methodReader(Constructor, key) {
-  const method = prototypeDescriptor(Constructor, key)?.value;
-  return typeof method === 'function'
-    ? (value) => Reflect.apply(method, value, [])
-    : (value) => value?.[key]?.();
+function methodReader(prototype, key) {
+  const method = prototypeDescriptor(prototype, key)?.value;
+  if (typeof method !== 'function') {
+    throw new TypeError(`Missing DOM method: ${key}`);
+  }
+  return (value) => Reflect.apply(method, value, []);
+}
+
+function nodeReaders(root) {
+  const prototype = Object.getPrototypeOf(root);
+  return {
+    ownerDocument: propertyReader(prototype, 'ownerDocument'),
+    isConnected: propertyReader(prototype, 'isConnected'),
+    getRootNode: methodReader(prototype, 'getRootNode'),
+    parentElement: propertyReader(prototype, 'parentElement'),
+    documentElement: propertyReader(prototype, 'documentElement'),
+  };
 }
 
 function connectedBoundary(node, root, readers) {
@@ -149,27 +163,22 @@ function connectedRange(value, root) {
     const realm = root.defaultView;
     const RangeConstructor = realm.Range;
     const ElementConstructor = realm.Element;
+    const rangePrototype = RangeConstructor.prototype;
     const rangeReaders = {
-      startContainer: propertyReader(RangeConstructor, 'startContainer'),
-      endContainer: propertyReader(RangeConstructor, 'endContainer'),
-      startOffset: propertyReader(RangeConstructor, 'startOffset'),
-      endOffset: propertyReader(RangeConstructor, 'endOffset'),
+      startContainer: propertyReader(rangePrototype, 'startContainer'),
+      endContainer: propertyReader(rangePrototype, 'endContainer'),
+      startOffset: propertyReader(rangePrototype, 'startOffset'),
+      endOffset: propertyReader(rangePrototype, 'endOffset'),
       commonAncestorContainer:
-        propertyReader(RangeConstructor, 'commonAncestorContainer'),
+        propertyReader(rangePrototype, 'commonAncestorContainer'),
     };
-    const nodeReaders = {
-      ownerDocument: propertyReader(realm.Node, 'ownerDocument'),
-      isConnected: propertyReader(realm.Node, 'isConnected'),
-      getRootNode: methodReader(realm.Node, 'getRootNode'),
-      parentElement: propertyReader(realm.Node, 'parentElement'),
-      documentElement: propertyReader(realm.Document, 'documentElement'),
-    };
+    const readers = nodeReaders(root);
     if (!(value instanceof RangeConstructor)) {
       targetError(message, { target: value });
     }
     const original = rangeSnapshot(value, rangeReaders);
     if (![original.startContainer, original.endContainer]
-      .every((node) => connectedBoundary(node, root, nodeReaders))) {
+      .every((node) => connectedBoundary(node, root, readers))) {
       targetError(message, { target: value });
     }
     const clone = resolveTarget(value, root).range;
@@ -186,13 +195,13 @@ function connectedRange(value, root) {
       cloneSnapshot.commonAncestorContainer,
       root,
       ElementConstructor,
-      nodeReaders,
+      readers,
     );
-    if (!cloneBoundaries.every((node) => connectedBoundary(node, root, nodeReaders))
+    if (!cloneBoundaries.every((node) => connectedBoundary(node, root, readers))
       || !(owner instanceof ElementConstructor)
-      || nodeReaders.ownerDocument(owner) !== root
-      || !nodeReaders.isConnected(owner)
-      || nodeReaders.getRootNode(owner) !== root
+      || readers.ownerDocument(owner) !== root
+      || !readers.isConnected(owner)
+      || readers.getRootNode(owner) !== root
       || cloneSnapshot.startContainer !== original.startContainer
       || cloneSnapshot.endContainer !== original.endContainer
       || cloneSnapshot.startOffset !== original.startOffset

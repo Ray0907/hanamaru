@@ -253,6 +253,64 @@ test('serialized Range keys reject invalid native shapes and clone side effects'
       sameEndOffset: frameResult.value?.endOffset === frameRange.endOffset,
     };
 
+    const nodeDescriptor = Object.getOwnPropertyDescriptor(window, 'Node');
+    Object.defineProperty(window, 'Node', {
+      ...nodeDescriptor,
+      value: undefined,
+    });
+    let missingNodeRangeResult;
+    let missingNodeElementResult;
+    try {
+      const detachedMaskHost = document.createElement('span');
+      const detachedMaskText = document.createTextNode('masked detached text');
+      detachedMaskHost.append(detachedMaskText);
+      Object.defineProperties(detachedMaskText, {
+        ownerDocument: { configurable: true, value: document },
+        isConnected: { configurable: true, value: true },
+        getRootNode: {
+          configurable: true,
+          value() { return document; },
+        },
+        parentElement: { configurable: true, value: host },
+      });
+      const detachedMaskedRange = document.createRange();
+      detachedMaskedRange.selectNodeContents(detachedMaskText);
+      missingNodeRangeResult = resolve(detachedMaskedRange);
+      detachedMaskedRange.detach();
+
+      const detachedElement = document.createElement('div');
+      Object.defineProperties(detachedElement, {
+        ownerDocument: { configurable: true, value: document },
+        isConnected: { configurable: true, value: true },
+        getRootNode: {
+          configurable: true,
+          value() { return document; },
+        },
+      });
+      try {
+        const value = resolveSerializedTarget({
+          type: 'key',
+          key: 'masked-element',
+          targetKind: 'element',
+        }, {
+          root: document,
+          resolveTarget() { return detachedElement; },
+        });
+        missingNodeElementResult = {
+          returned: true,
+          isElement: value instanceof Element,
+        };
+      } catch (error) {
+        missingNodeElementResult = {
+          returned: false,
+          code: error.code,
+          hasCause: error.details?.cause !== undefined,
+        };
+      }
+    } finally {
+      Object.defineProperty(window, 'Node', nodeDescriptor);
+    }
+
     valid.detach();
     commentRange.detach();
     overridden.detach();
@@ -271,6 +329,8 @@ test('serialized Range keys reject invalid native shapes and clone side effects'
       retargetResult,
       maskedResult,
       iframeProof,
+      missingNodeRangeResult,
+      missingNodeElementResult,
     };
   });
 
@@ -317,6 +377,16 @@ test('serialized Range keys reject invalid native shapes and clone side effects'
       sameEndContainer: true,
       sameStartOffset: true,
       sameEndOffset: true,
+    },
+    missingNodeRangeResult: {
+      returned: false,
+      code: 'HANA_TARGET_INVALID',
+      hasCause: false,
+    },
+    missingNodeElementResult: {
+      returned: false,
+      code: 'HANA_TARGET_INVALID',
+      hasCause: false,
     },
   });
 });

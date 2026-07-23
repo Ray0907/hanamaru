@@ -330,9 +330,43 @@ function serializedAnnotation(target, patch = {}) {
 }
 
 function minimalNativeRealm(name = 'document') {
-  class RealmDocument {}
-  class RealmElement {
+  class RealmNode {
+    get ownerDocument() {
+      return Object.getOwnPropertyDescriptor(this, 'ownerDocument')?.value
+        ?? this._ownerDocument;
+    }
+
+    set ownerDocument(value) { this._ownerDocument = value; }
+
+    get isConnected() {
+      return Object.getOwnPropertyDescriptor(this, 'isConnected')?.value
+        ?? this._isConnected;
+    }
+
+    set isConnected(value) { this._isConnected = value; }
+
+    get parentElement() {
+      return Object.getOwnPropertyDescriptor(this, 'parentElement')?.value
+        ?? this._parentElement;
+    }
+
+    set parentElement(value) { this._parentElement = value; }
+
+    getRootNode() {
+      const own = Object.getOwnPropertyDescriptor(this, 'getRootNode')?.value;
+      return typeof own === 'function'
+        ? Reflect.apply(own, this, [])
+        : this.ownerDocument;
+    }
+  }
+  class RealmDocument extends RealmNode {
+    get documentElement() { return this._documentElement; }
+
+    set documentElement(value) { this._documentElement = value; }
+  }
+  class RealmElement extends RealmNode {
     constructor(ownerDocument) {
+      super();
       this.ownerDocument = ownerDocument;
       this.isConnected = true;
       this.parentElement = null;
@@ -349,6 +383,26 @@ function minimalNativeRealm(name = 'document') {
       this.startOffset = 1;
       this.endOffset = 3;
     }
+
+    get startContainer() { return this._startContainer; }
+
+    set startContainer(value) { this._startContainer = value; }
+
+    get endContainer() { return this._endContainer; }
+
+    set endContainer(value) { this._endContainer = value; }
+
+    get commonAncestorContainer() { return this._commonAncestorContainer; }
+
+    set commonAncestorContainer(value) { this._commonAncestorContainer = value; }
+
+    get startOffset() { return this._startOffset; }
+
+    set startOffset(value) { this._startOffset = value; }
+
+    get endOffset() { return this._endOffset; }
+
+    set endOffset(value) { this._endOffset = value; }
 
     cloneRange() {
       const clone = new RealmRange(
