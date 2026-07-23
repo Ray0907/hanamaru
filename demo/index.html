@@ -427,13 +427,18 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
               </p>
 
               <label for="playground-placement">Placement</label>
-              <select id="playground-placement" name="placement" required>
+              <select id="playground-placement" name="placement" required
+                aria-describedby="playground-placement-help">
                 <option value="auto">auto</option>
                 <option value="top">top</option>
                 <option value="right">right</option>
                 <option value="bottom">bottom</option>
                 <option value="left">left</option>
               </select>
+              <p id="playground-placement-help" class="demo-field-help">
+                Placement is a preference. Hanamaru safely falls back when that side would clip or
+                collide.
+              </p>
             </fieldset>
 
             <fieldset class="demo-playground__execution-fields">

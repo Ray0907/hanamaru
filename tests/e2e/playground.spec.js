@@ -41,6 +41,10 @@ test('playground is a constrained semantic workbench with one generated definiti
   await expect(form.getByLabel('Mark')).toHaveValue('underline');
   await expect(form.getByLabel('Optional note')).toHaveAttribute('maxlength', '280');
   await expect(form.getByLabel('Placement')).toHaveValue('auto');
+  await expect(form.getByLabel('Placement')).toHaveAccessibleDescription(
+    'Placement is a preference. Hanamaru safely falls back when that side would clip or collide.',
+  );
+  await expect(form.locator('#playground-placement-help')).toBeVisible();
   await expect(form.getByRole('radio', { name: 'Manual' })).toBeChecked();
   await expect(form.getByRole('radio', { name: 'Imperative JavaScript' })).toBeChecked();
 
@@ -494,4 +498,127 @@ test('390px auto note keeps a proof lane clear of adjacent specimen copy', async
   ]);
   expect(overlaps(noteBox, previousBox, 2)).toBe(false);
   expect(overlaps(noteBox, nextBox, 2)).toBe(false);
+});
+
+test('390px preferred side stays truthful while safe placement keeps the note contained', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const playground = await openPlayground(page);
+  const placement = playground.getByLabel('Placement');
+  await playground.getByLabel('Existing phrase').selectOption('#playground-target-proof');
+  await playground.getByLabel('Mark').selectOption('circle');
+  await playground.getByLabel('Optional note').fill('A preferred side can yield to safe placement.');
+  await placement.selectOption('right');
+  await expect(placement).toHaveAccessibleDescription(/safely falls back/);
+  await expect(playground.locator('[data-playground-code]')).toContainText("placement: 'right'");
+  await runDefinition(playground);
+  await playground.locator('#playground-target-proof').scrollIntoViewIfNeeded();
+
+  const note = page.locator('.hana-note:not(.hana-is-hidden)', {
+    hasText: 'A preferred side can yield to safe placement.',
+  });
+  await expect(note).toBeVisible();
+  const box = await note.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+});
+
+test('declarative playground controller survives persisted lifecycle and tears down once on final pagehide', async ({ page }) => {
+  await page.addInitScript(() => {
+    const records = [];
+    const add = EventTarget.prototype.addEventListener;
+    const remove = EventTarget.prototype.removeEventListener;
+    EventTarget.prototype.addEventListener = function patchedAdd(type, listener, options) {
+      if (this instanceof Element
+        && this.id === 'playground-target-reflow'
+        && type.startsWith('hana:')) {
+        records.push({ type, listener, removed: false });
+      }
+      return add.call(this, type, listener, options);
+    };
+    EventTarget.prototype.removeEventListener = function patchedRemove(type, listener, options) {
+      const record = records.find((item) => (
+        !item.removed && item.type === type && item.listener === listener
+      ));
+      if (record) record.removed = true;
+      return remove.call(this, type, listener, options);
+    };
+    window.__playgroundListenerDiagnostics = () => ({
+      active: records.filter(({ removed }) => !removed).map(({ type }) => type).sort(),
+      added: records.map(({ type }) => type).sort(),
+      removed: records.filter(({ removed }) => removed).map(({ type }) => type).sort(),
+    });
+  });
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const playground = await openPlayground(page);
+  const target = playground.locator('#playground-target-reflow');
+  await playground.getByRole('radio', { name: 'Declarative HTML' }).check();
+  await playground.getByLabel('Optional note').fill('Lifecycle-owned output.');
+  await runDefinition(playground);
+
+  const firstOutput = page.locator('.hana-note', {
+    hasText: 'Lifecycle-owned output.',
+  });
+  const firstId = await firstOutput.getAttribute('data-hana-id');
+  expect(firstId).not.toBeNull();
+  const authoredBeforePersist = await target.evaluate((node) => Object.fromEntries([
+    'data-hana', 'data-hana-note', 'data-hana-accessible', 'data-hana-placement',
+    'data-hana-trigger', 'data-hana-duration', 'data-hana-motion',
+    'data-playground-output-owner',
+  ].map((attribute) => [attribute, node.getAttribute(attribute)])));
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  });
+  expect(await target.evaluate((node, attributes) => Object.fromEntries(
+    attributes.map((attribute) => [attribute, node.getAttribute(attribute)]),
+  ), Object.keys(authoredBeforePersist)))
+    .toEqual(authoredBeforePersist);
+  await expect(page.locator(`.hana-annotation[data-hana-id="${firstId}"]`)).toHaveCount(1);
+  await expect(firstOutput).toHaveAttribute('data-hana-id', firstId);
+  await expect(playground.locator('[data-playground-state]')).toHaveText('visible');
+  expect(await page.evaluate(() => window.__playgroundListenerDiagnostics())).toEqual({
+    active: ['hana:cancel', 'hana:complete', 'hana:error', 'hana:start'],
+    added: ['hana:cancel', 'hana:complete', 'hana:error', 'hana:start'],
+    removed: [],
+  });
+
+  await runDefinition(playground);
+  const secondId = await page.locator('.hana-note', {
+    hasText: 'Lifecycle-owned output.',
+  }).getAttribute('data-hana-id');
+  expect(secondId).not.toBeNull();
+  expect(secondId).not.toBe(firstId);
+  await expect(page.locator(`.hana-annotation[data-hana-id="${firstId}"]`)).toHaveCount(0);
+  await expect(page.locator(`.hana-annotation[data-hana-id="${secondId}"]`)).toHaveCount(1);
+  expect(await page.evaluate(() => window.__playgroundListenerDiagnostics())).toEqual({
+    active: ['hana:cancel', 'hana:complete', 'hana:error', 'hana:start'],
+    added: [
+      'hana:cancel', 'hana:cancel', 'hana:complete', 'hana:complete',
+      'hana:error', 'hana:error', 'hana:start', 'hana:start',
+    ],
+    removed: ['hana:cancel', 'hana:complete', 'hana:error', 'hana:start'],
+  });
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));
+  });
+  await expect(page.locator('[data-hana-overlay]')).toHaveCount(0);
+  for (const attribute of [
+    'data-hana', 'data-hana-note', 'data-hana-accessible',
+    'data-hana-placement', 'data-hana-trigger', 'data-hana-duration', 'data-hana-motion',
+    'data-playground-output-owner',
+  ]) {
+    await expect(target).not.toHaveAttribute(attribute);
+  }
+  const finalDiagnostics = await page.evaluate(() => window.__playgroundListenerDiagnostics());
+  expect(finalDiagnostics.active).toEqual([]);
+  expect(finalDiagnostics.removed).toEqual(finalDiagnostics.added);
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));
+  });
+  expect(await page.evaluate(() => window.__playgroundListenerDiagnostics()))
+    .toEqual(finalDiagnostics);
+  expect(pageErrors).toEqual([]);
 });
