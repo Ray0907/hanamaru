@@ -535,7 +535,9 @@ function annotationHarness({ deferEnqueue = false } = {}) {
           return { noteRect: null, peerNoteRects: [], viewport: { width: 800, height: 600 } };
         },
         updateOwner() {},
-        draw(layout) { calls.push(['draw', options.mark, layout.markPaths]); },
+        draw(layout) {
+          calls.push(['draw', options.mark, layout.markPaths, layout.targetRects]);
+        },
         animate() { return { finished: Promise.resolve() }; },
         finish() {},
         hide() {},
@@ -648,6 +650,94 @@ test('update lifecycle and layout reads in one frame share one validated snapsho
   assert.equal(factoryCalls, 2);
   assert.equal(controller.state, 'visible');
   assert.deepEqual(harness.calls.at(-1)[2], ['M 2 0 L 2 1']);
+  controller.destroy();
+  unregister();
+});
+
+test('update rebuilds custom paths once when geometry changes before the deferred frame', () => {
+  let factoryCalls = 0;
+  const unregister = registerMark('update-reflow-snapshot', ({ rects }) => {
+    factoryCalls += 1;
+    return { paths: [`M ${rects[0].left} 0 L ${rects[0].right} 1`] };
+  });
+  const harness = annotationHarness({ deferEnqueue: true });
+  const controller = createAnnotation(
+    harness.owner,
+    { mark: 'update-reflow-snapshot', seed: 'before' },
+    harness.env,
+  );
+  controller.show();
+  harness.flush();
+  assert.equal(factoryCalls, 1);
+
+  controller.update({ seed: 'after' });
+  assert.equal(factoryCalls, 2);
+  const updateDrawStart = harness.calls.length;
+  const mutableRect = harness.record.rects[0];
+  mutableRect.x = 100;
+  mutableRect.left = 100;
+  mutableRect.right = 130;
+  harness.flush({ includeLayout: true });
+
+  assert.equal(factoryCalls, 3);
+  const updateDraws = harness.calls
+    .slice(updateDrawStart)
+    .filter(([name]) => name === 'draw');
+  assert.ok(updateDraws.length > 0);
+  for (const draw of updateDraws) {
+    assert.equal(Object.isFrozen(draw[3]), true);
+    assert.equal(Object.isFrozen(draw[3][0]), true);
+    assert.equal(draw[3][0].left, 100);
+    assert.deepEqual(draw[2], ['M 100 0 L 130 1']);
+  }
+
+  controller.refresh();
+  harness.flush();
+  assert.equal(factoryCalls, 4);
+  assert.equal(harness.calls.at(-1)[3][0].left, 100);
+  assert.deepEqual(harness.calls.at(-1)[2], ['M 100 0 L 130 1']);
+  controller.destroy();
+  unregister();
+});
+
+test('update geometry snapshots detect multiple rect order and length changes', () => {
+  let factoryCalls = 0;
+  const unregister = registerMark('update-range-snapshot', ({ rects }) => {
+    factoryCalls += 1;
+    return {
+      paths: rects.map((item) => `M ${item.left} 0 L ${item.right} 1`),
+    };
+  });
+  const harness = annotationHarness({ deferEnqueue: true });
+  harness.record.rects = [rect(10, 20, 30, 8), rect(60, 20, 20, 8)];
+  const controller = createAnnotation(
+    harness.owner,
+    { mark: 'update-range-snapshot', seed: 'before' },
+    harness.env,
+  );
+  controller.show();
+  harness.flush();
+  assert.equal(factoryCalls, 1);
+
+  controller.update({ seed: 'order' });
+  assert.equal(factoryCalls, 2);
+  harness.record.rects.reverse();
+  harness.flush({ includeLayout: true });
+  assert.equal(factoryCalls, 3);
+  assert.deepEqual(
+    harness.calls.at(-1)[2],
+    ['M 60 0 L 80 1', 'M 10 0 L 40 1'],
+  );
+
+  controller.update({ seed: 'length' });
+  assert.equal(factoryCalls, 4);
+  harness.record.rects.push(rect(100, 20, 10, 8));
+  harness.flush({ includeLayout: true });
+  assert.equal(factoryCalls, 5);
+  assert.deepEqual(
+    harness.calls.at(-1)[2],
+    ['M 60 0 L 80 1', 'M 10 0 L 40 1', 'M 100 0 L 110 1'],
+  );
   controller.destroy();
   unregister();
 });

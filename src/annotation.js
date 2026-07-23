@@ -24,6 +24,9 @@ const PLACEMENTS = new Set(['auto', 'top', 'right', 'bottom', 'left']);
 const TRIGGERS = new Set(['manual', 'load', 'viewport']);
 const MOTIONS = new Set(['system', 'never']);
 const KEYS = new Set(['mark', 'note', 'placement', 'trigger', 'accessible', 'seed', 'duration', 'motion']);
+const RECT_GEOMETRY_FIELDS = Object.freeze([
+  'x', 'y', 'width', 'height', 'top', 'right', 'bottom', 'left',
+]);
 const activeRenderers = new WeakMap();
 const pausedControllers = new WeakSet();
 const pendingRendererMounts = new WeakMap();
@@ -125,8 +128,16 @@ export function abortError(reason = 'Annotation run cancelled') {
   return new DOMException(reason, 'AbortError');
 }
 
-function layoutFor(record, renderer, options, markPlugin, env, markPathsSnapshot = null) {
-  const targetRects = env.targetRects(record);
+function layoutFor(
+  record,
+  renderer,
+  options,
+  markPlugin,
+  env,
+  markPathsSnapshot = null,
+  targetRectsSnapshot = null,
+) {
+  const targetRects = targetRectsSnapshot ?? env.targetRects(record);
   const targetRect = unionRects(targetRects);
   const measured = renderer.measure();
   const metrics = env.readThemeMetrics(renderer.group);
@@ -272,6 +283,20 @@ function copyClientRect(input) {
     bottom: input.bottom,
     left: input.left,
   };
+}
+
+function snapshotRectGeometry(rects) {
+  return Object.freeze(rects.map((item) => Object.freeze(copyClientRect(item))));
+}
+
+function rectGeometryMatches(left, right) {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    for (const field of RECT_GEOMETRY_FIELDS) {
+      if (!Object.is(left[index][field], right[index][field])) return false;
+    }
+  }
+  return true;
 }
 
 function hiddenTargetError(record) {
@@ -560,6 +585,33 @@ export function createAnnotation(target, rawOptions, env) {
     if (pendingMarkPathsSnapshot === snapshot) pendingMarkPathsSnapshot = null;
   }
 
+  function resolveMarkPathsSnapshot(snapshot, targetRects) {
+    if (snapshot === null) {
+      return { paths: null, snapshot: null, targetRects };
+    }
+    const geometry = snapshotRectGeometry(targetRects);
+    if (rectGeometryMatches(snapshot.geometry, geometry)) {
+      return { paths: snapshot.paths, snapshot, targetRects: geometry };
+    }
+    let paths;
+    try {
+      paths = Object.freeze([
+        ...buildMarkPaths(options.mark, geometry, options.seed, 5, markPlugin),
+      ]);
+    } catch (error) {
+      consumeMarkPathsSnapshot(snapshot);
+      throw error;
+    }
+    const replacement = Object.freeze({
+      generation: snapshot.generation,
+      operation: snapshot.operation,
+      geometry,
+      paths,
+    });
+    if (pendingMarkPathsSnapshot === snapshot) pendingMarkPathsSnapshot = replacement;
+    return { paths, snapshot: replacement, targetRects: geometry };
+  }
+
   function layoutBinding() {
     return {
       id,
@@ -571,15 +623,29 @@ export function createAnnotation(target, rawOptions, env) {
         resolveCurrentTarget();
         const owner = record.ownerElement;
         const snapshot = currentMarkPathsSnapshot();
-        const layout = requestedVisible
-          ? layoutFor(record, renderer, options, markPlugin, env, snapshot?.paths)
-          : (env.targetRects(record), null);
+        let resolvedSnapshot = { paths: null, snapshot: null, targetRects: null };
+        let layout;
+        if (requestedVisible) {
+          resolvedSnapshot = resolveMarkPathsSnapshot(snapshot, env.targetRects(record));
+          layout = layoutFor(
+            record,
+            renderer,
+            options,
+            markPlugin,
+            env,
+            resolvedSnapshot.paths,
+            resolvedSnapshot.targetRects,
+          );
+        } else {
+          env.targetRects(record);
+          layout = null;
+        }
         renderabilityEpisode = false;
         return {
           layout,
           owner,
           ownerChanged: previousOwner !== owner,
-          snapshot,
+          snapshot: resolvedSnapshot.snapshot,
         };
       },
       write: (result) => {
@@ -661,14 +727,28 @@ export function createAnnotation(target, rawOptions, env) {
       resolveCurrentTarget();
       const owner = record.ownerElement;
       const snapshot = currentMarkPathsSnapshot(operation);
-      const layout = validate
-        ? (env.targetRects(record), null)
-        : layoutFor(record, renderer, options, markPlugin, env, snapshot?.paths);
+      let resolvedSnapshot = { paths: null, snapshot: null, targetRects: null };
+      let layout;
+      if (validate) {
+        env.targetRects(record);
+        layout = null;
+      } else {
+        resolvedSnapshot = resolveMarkPathsSnapshot(snapshot, env.targetRects(record));
+        layout = layoutFor(
+          record,
+          renderer,
+          options,
+          markPlugin,
+          env,
+          resolvedSnapshot.paths,
+          resolvedSnapshot.targetRects,
+        );
+      }
       renderabilityEpisode = false;
       return {
         layout,
         owner,
-        snapshot,
+        snapshot: resolvedSnapshot.snapshot,
       };
     };
     const write = (result, synchronous = false) => {
@@ -923,10 +1003,13 @@ export function createAnnotation(target, rawOptions, env) {
     const nextRecord = env.resolveTarget(nextTarget);
     let nextMarkPathsSnapshot = null;
     if (nextMarkPlugin !== null) {
-      const nextRects = env.targetRects(nextRecord);
-      nextMarkPathsSnapshot = Object.freeze([
-        ...buildMarkPaths(nextOptions.mark, nextRects, nextOptions.seed, 5, nextMarkPlugin),
-      ]);
+      const geometry = snapshotRectGeometry(env.targetRects(nextRecord));
+      nextMarkPathsSnapshot = Object.freeze({
+        geometry,
+        paths: Object.freeze([
+          ...buildMarkPaths(nextOptions.mark, geometry, nextOptions.seed, 5, nextMarkPlugin),
+        ]),
+      });
     }
     const operation = acceptOperation();
     let nextRenderer;
@@ -982,7 +1065,8 @@ export function createAnnotation(target, rawOptions, env) {
       pendingMarkPathsSnapshot = Object.freeze({
         generation,
         operation,
-        paths: nextMarkPathsSnapshot,
+        geometry: nextMarkPathsSnapshot.geometry,
+        paths: nextMarkPathsSnapshot.paths,
       });
     }
     if (priorState === 'showing') {
