@@ -65,6 +65,7 @@ function createHarness() {
   let destroyFailure = null;
   let exposeFailure = null;
   let onDestroy = null;
+  let onShow = null;
   let showEvent = null;
   let showFinishedFailure = null;
 
@@ -83,6 +84,7 @@ function createHarness() {
         },
         show() {
           calls.push(`show:${target.name}`);
+          onShow?.(controller);
           if (showEvent !== null) {
             target.fail(controller, showEvent.error, showEvent.generation);
           }
@@ -124,6 +126,7 @@ function createHarness() {
     setDestroyFailure(error) { destroyFailure = error; },
     setExposeFailure(error) { exposeFailure = error; },
     setOnDestroy(callback) { onDestroy = callback; },
+    setOnShow(callback) { onShow = callback; },
     setShowEvent(error, generation = undefined) {
       showEvent = error === null ? null : { error, generation };
     },
@@ -842,4 +845,178 @@ test('candidate onError reentrancy wins over the stale outer mount', () => {
   assert.equal(failed.listenerCount, 0);
   assert.equal(winner.listenerCount, 1);
   assert.ok(!harness.calls.includes('expose:failed'));
+});
+
+test('pre-existing target listener reentrant destroy or disable makes candidate failure stale', () => {
+  for (const action of ['destroy', 'disable']) {
+    const harness = createHarness();
+    const target = new FakeTarget(action, harness.calls);
+    const failure = new Error(`${action} event`);
+    const observed = [];
+    const listener = () => {
+      target.removeEventListener('hana:error', listener);
+      if (action === 'destroy') harness.owner.destroy();
+      else harness.owner.update(target, box, { enabled: false });
+    };
+    target.addEventListener('hana:error', listener);
+    harness.calls.length = 0;
+    harness.setShowEvent(failure, 21);
+
+    harness.owner.mount(target, box, {
+      onError(error) { observed.push(error); },
+    });
+
+    assert.deepEqual(observed, [], action);
+    assert.deepEqual(harness.exposed, [], action);
+    assert.deepEqual(harness.queued, [], action);
+    assert.equal(target.listenerCount, 0, action);
+    assert.equal(
+      harness.calls.filter((call) => call === `destroy:${action}`).length,
+      1,
+      action,
+    );
+  }
+});
+
+test('pre-existing target listener winner remains authoritative over stale candidate failure', () => {
+  const harness = createHarness();
+  const failed = new FakeTarget('failed', harness.calls);
+  const winner = new FakeTarget('winner', harness.calls);
+  const staleFailure = new Error('stale candidate');
+  const listener = () => {
+    failed.removeEventListener('hana:error', listener);
+    harness.setShowEvent(null);
+    harness.owner.mount(winner, circle);
+  };
+  failed.addEventListener('hana:error', listener);
+  harness.calls.length = 0;
+  harness.setShowEvent(staleFailure, 22);
+
+  harness.owner.mount(failed, box, {
+    onError() { throw new Error('stale onError must not run'); },
+  });
+
+  assert.equal(harness.exposed.at(-1).target, winner);
+  assert.equal(harness.exposed.filter((value) => value === null).length, 0);
+  assert.deepEqual(harness.queued, []);
+  assert.equal(failed.listenerCount, 0);
+  assert.equal(winner.listenerCount, 1);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:failed').length, 1);
+});
+
+test('listener added during show can install winner after adapter buffers the event', () => {
+  const harness = createHarness();
+  const failed = new FakeTarget('failed', harness.calls);
+  const winner = new FakeTarget('winner', harness.calls);
+  const staleFailure = new Error('adapter heard first');
+  harness.setShowEvent(staleFailure, 23);
+  harness.setOnShow(() => {
+    harness.setOnShow(null);
+    const listener = () => {
+      failed.removeEventListener('hana:error', listener);
+      harness.setShowEvent(null);
+      harness.owner.mount(winner, circle);
+    };
+    failed.addEventListener('hana:error', listener);
+  });
+
+  harness.owner.mount(failed, box, {
+    onError() { throw new Error('stale onError must not run'); },
+  });
+
+  assert.equal(harness.exposed.at(-1).target, winner);
+  assert.equal(harness.exposed.filter((value) => value === null).length, 0);
+  assert.deepEqual(harness.queued, []);
+  assert.equal(failed.listenerCount, 0);
+  assert.equal(winner.listenerCount, 1);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:failed').length, 1);
+});
+
+test('reentrant replacement winner is not cleared by stale candidate failure', () => {
+  const harness = createHarness();
+  const current = new FakeTarget('current', harness.calls);
+  const failed = new FakeTarget('failed', harness.calls);
+  const winner = new FakeTarget('winner', harness.calls);
+  harness.owner.mount(current, box);
+  const listener = () => {
+    failed.removeEventListener('hana:error', listener);
+    harness.setShowEvent(null);
+    harness.owner.update(winner, { mark: 'underline' });
+  };
+  failed.addEventListener('hana:error', listener);
+  harness.setShowEvent(new Error('stale replacement'), 24);
+  harness.calls.length = 0;
+
+  harness.owner.update(failed, circle, {
+    onError() { throw new Error('stale replacement onError must not run'); },
+  });
+
+  assert.equal(harness.exposed.at(-1).target, winner);
+  assert.equal(harness.exposed.filter((value) => value === null).length, 1);
+  assert.deepEqual(harness.queued, []);
+  assert.equal(current.listenerCount, 0);
+  assert.equal(failed.listenerCount, 0);
+  assert.equal(winner.listenerCount, 1);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:current').length, 1);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:failed').length, 1);
+});
+
+test('throwing reentrant winner callback does not revive stale candidate reporting', () => {
+  const harness = createHarness();
+  const failed = new FakeTarget('failed', harness.calls);
+  const winner = new FakeTarget('winner', harness.calls);
+  const winnerFailure = new Error('winner expose failed');
+  let caught = null;
+  const listener = () => {
+    failed.removeEventListener('hana:error', listener);
+    harness.setShowEvent(null);
+    harness.setExposeFailure(winnerFailure);
+    try {
+      harness.owner.mount(winner, circle);
+    } catch (error) {
+      caught = error;
+    }
+    harness.setExposeFailure(null);
+  };
+  failed.addEventListener('hana:error', listener);
+  harness.calls.length = 0;
+  harness.setShowEvent(new Error('stale failed'), 25);
+
+  harness.owner.mount(failed, box, {
+    onError() { throw new Error('stale onError must not queue'); },
+  });
+
+  assert.equal(caught, winnerFailure);
+  assert.equal(harness.exposed.filter((value) => value === null).length, 1);
+  assert.deepEqual(harness.queued, []);
+  assert.equal(failed.listenerCount, 0);
+  assert.equal(winner.listenerCount, 0);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:failed').length, 1);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:winner').length, 1);
+});
+
+test('stale candidate event and finished rejection never report after reentrant destroy', async () => {
+  const harness = createHarness();
+  const target = new FakeTarget('failed', harness.calls);
+  const failure = new Error('event and promise');
+  const observed = [];
+  const listener = () => {
+    target.removeEventListener('hana:error', listener);
+    harness.owner.destroy();
+  };
+  target.addEventListener('hana:error', listener);
+  harness.calls.length = 0;
+  harness.setShowEvent(failure, 26);
+  harness.setShowFinishedFailure(failure);
+
+  harness.owner.mount(target, box, {
+    onError(error) { observed.push(error); },
+  });
+  await flushMicrotasks();
+
+  assert.deepEqual(observed, []);
+  assert.deepEqual(harness.exposed, []);
+  assert.deepEqual(harness.queued, []);
+  assert.equal(target.listenerCount, 0);
+  assert.equal(harness.calls.filter((call) => call === 'destroy:failed').length, 1);
 });

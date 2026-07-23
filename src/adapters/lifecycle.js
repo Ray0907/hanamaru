@@ -329,12 +329,12 @@ export function createAdapterOwner({
 
     const previous = current;
     const candidate = createRecord(target, prepared, config);
-    if (candidate.pendingFailure !== null) {
-      rejectCandidate(candidate, previous);
-      return owner;
-    }
     if (destroyed || operation !== operationEpoch) {
       cleanup(candidate, false);
+      return owner;
+    }
+    if (candidate.pendingFailure !== null) {
+      rejectCandidate(candidate, previous);
       return owner;
     }
     if (previous !== null) {
