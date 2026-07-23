@@ -14,6 +14,16 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
     <title>Hanamaru — Living annotations for the DOM</title>
     <link rel="stylesheet" href="/dist/hanamaru.css">
     <link rel="stylesheet" href="/demo/demo.css">
+    <script type="importmap">
+      {
+        "imports": {
+          "hanamaru-annotations": "/src/index.js",
+          "hanamaru-annotations/selection": "/src/selection.js",
+          "hanamaru-annotations/serialize": "/src/serialize.js",
+          "hanamaru-annotations/plugins": "/src/plugins.js"
+        }
+      }
+    </script>
   </head>
   <body class="demo-page">
     <a class="demo-skip-link" href="#main-content">Skip to proof</a>
@@ -316,6 +326,219 @@ FORM: Full-width editorial sheet; never browser chrome, floating cards, glass, o
           </div>
         </section>
       </section>
+
+      <section class="demo-inspector-canvas" aria-labelledby="inspector-canvas-title"
+        data-inspector-canvas>
+        <header>
+          <p>Direct canvas · public APIs</p>
+          <h2 id="inspector-canvas-title">Correct the page where it lives</h2>
+          <p>
+            Open the Inspector, select a phrase in the proof below, and turn that native
+            selection into a portable annotation.
+          </p>
+          <button class="demo-stamp demo-stamp--secondary" type="button"
+            aria-controls="annotation-inspector" aria-expanded="false" data-inspector-open>
+            Open Annotation Inspector
+          </button>
+        </header>
+
+        <article id="inspector-document" aria-labelledby="inspector-document-title" tabindex="0">
+          <h3 id="inspector-document-title">A proof you can edit without rewriting</h3>
+          <p>
+            <span data-inspector-selection-word>Portable</span> annotations should keep their
+            meaning when words reflow, tools close, and the page keeps moving.
+          </p>
+          <p>
+            Select any connected phrase in this article. Hanamaru keeps the source DOM intact
+            while the Inspector owns the temporary correction above it.
+          </p>
+          <p>
+            A deliberately awkward <span data-inspector-unroundtrip>boundary   spaces</span>
+            sample keeps persistence claims honest when a Range cannot round-trip exactly.
+          </p>
+        </article>
+      </section>
+
+      <template data-inspector-template>
+        <section id="annotation-inspector" aria-label="Annotation Inspector"
+          data-inspector-root data-inspector-state="closed">
+        <header>
+          <div>
+            <p>Direct canvas</p>
+            <h2>Annotation Inspector</h2>
+          </div>
+          <p>Runtime <span data-inspector-runtime-version></span></p>
+          <button type="button" data-inspector-exit>Exit Inspector</button>
+        </header>
+
+        <p role="status" aria-live="polite" aria-atomic="true" data-inspector-status>
+          Inspector closed.
+        </p>
+
+        <div role="toolbar" aria-label="Annotation marks" data-inspector-toolbar hidden>
+          <button type="button" data-inspector-mark="underline">Underline</button>
+          <button type="button" data-inspector-mark="highlight">Highlight</button>
+          <button type="button" data-inspector-mark="circle">Circle</button>
+          <button type="button" data-inspector-mark="box">Box</button>
+          <button type="button" data-inspector-mark="strike">Strike</button>
+          <button type="button" data-inspector-mark="bracket">Bracket</button>
+          <button type="button" data-inspector-mark="hanamaru">
+            Hanamaru flower (example plugin)
+          </button>
+          <button type="button" aria-controls="inspector-note-editor"
+            aria-expanded="false" data-inspector-add-note>
+            Add note
+          </button>
+          <button type="button" data-inspector-apply>Apply annotation</button>
+          <button type="button" data-inspector-cancel>Cancel preview</button>
+          <button type="button" data-inspector-edit hidden>Edit annotation</button>
+        </div>
+
+        <section id="inspector-note-editor" aria-labelledby="inspector-note-title"
+          data-inspector-note-editor hidden>
+          <h3 id="inspector-note-title">Annotation note</h3>
+          <label for="inspector-note">Annotation note</label>
+          <textarea id="inspector-note" rows="5" maxlength="560"
+            data-max-code-points="280"
+            aria-describedby="inspector-note-help inspector-note-error"
+            data-inspector-note></textarea>
+          <p id="inspector-note-help">
+            Optional. Maximum 280 Unicode code points; meaningful notes are announced when
+            accessibility is enabled.
+          </p>
+          <p id="inspector-note-error" role="alert" hidden>
+            Keep the note to 280 Unicode code points or fewer.
+          </p>
+          <button type="button" data-inspector-note-done>Done editing note</button>
+        </section>
+
+        <aside aria-labelledby="inspector-output-title" data-inspector-output hidden>
+          <h3 id="inspector-output-title">Current output</h3>
+          <div role="tablist" aria-label="Inspector output format">
+            <button id="inspector-tab-html" type="button" role="tab"
+              aria-selected="false" aria-controls="inspector-panel-html" tabindex="-1">
+              HTML
+            </button>
+            <button id="inspector-tab-javascript" type="button" role="tab"
+              aria-selected="true" aria-controls="inspector-panel-javascript">
+              JavaScript
+            </button>
+            <button id="inspector-tab-json" type="button" role="tab"
+              aria-selected="false" aria-controls="inspector-panel-json" tabindex="-1">
+              JSON
+            </button>
+          </div>
+          <section id="inspector-panel-html" role="tabpanel"
+            aria-labelledby="inspector-tab-html" hidden>
+            <label for="inspector-output-html">HTML output</label>
+            <textarea id="inspector-output-html" rows="10" readonly
+              data-inspector-output-value="html"></textarea>
+          </section>
+          <section id="inspector-panel-javascript" role="tabpanel"
+            aria-labelledby="inspector-tab-javascript">
+            <label for="inspector-output-javascript">JavaScript output</label>
+            <textarea id="inspector-output-javascript" rows="10" readonly
+              data-inspector-output-value="javascript"></textarea>
+          </section>
+          <section id="inspector-panel-json" role="tabpanel"
+            aria-labelledby="inspector-tab-json" hidden>
+            <label for="inspector-output-json">JSON output</label>
+            <textarea id="inspector-output-json" rows="10" readonly
+              data-inspector-output-value="json"></textarea>
+          </section>
+
+          <button type="button" data-inspector-copy>Copy current output</button>
+          <label data-inspector-copy-fallback-wrap hidden>
+            Clipboard fallback
+            <textarea rows="8" readonly data-inspector-copy-fallback></textarea>
+          </label>
+
+          <details data-inspector-options>
+            <summary>Options</summary>
+            <p>Trigger: manual</p>
+
+            <label for="inspector-placement">Placement</label>
+            <select id="inspector-placement" data-inspector-option="placement">
+              <option value="auto">Auto</option>
+              <option value="top">Top</option>
+              <option value="right">Right</option>
+              <option value="bottom">Bottom</option>
+              <option value="left">Left</option>
+            </select>
+
+            <label>
+              <input type="checkbox" checked data-inspector-option="accessible">
+              Meaningful note accessibility
+            </label>
+
+            <label for="inspector-duration">Duration</label>
+            <input id="inspector-duration" type="number" inputmode="numeric" min="0" step="1"
+              value="420" aria-describedby="inspector-duration-help inspector-duration-error"
+              data-inspector-option="duration">
+            <p id="inspector-duration-help">Non-negative integer milliseconds.</p>
+            <p id="inspector-duration-error" role="alert" hidden>
+              Enter a non-negative whole number.
+            </p>
+
+            <label for="inspector-motion">Motion</label>
+            <select id="inspector-motion" data-inspector-option="motion">
+              <option value="system">Follow system preference</option>
+              <option value="never">Never animate</option>
+            </select>
+
+            <label for="inspector-seed">Seed</label>
+            <input id="inspector-seed" type="text" value="inspector-proof"
+              data-inspector-option="seed">
+          </details>
+        </aside>
+
+        <dialog aria-labelledby="inspector-command-title" data-inspector-palette>
+          <h3 id="inspector-command-title">Inspector commands</h3>
+          <label for="inspector-command-filter">Filter commands</label>
+          <input id="inspector-command-filter" type="search" autocomplete="off"
+            data-inspector-command-filter>
+          <div aria-label="Available Inspector commands" data-inspector-command-list>
+            <button type="button" data-inspector-command="mark:underline">
+              Underline
+            </button>
+            <button type="button" data-inspector-command="mark:highlight">
+              Highlight
+            </button>
+            <button type="button" data-inspector-command="mark:circle">
+              Circle
+            </button>
+            <button type="button" data-inspector-command="mark:box">
+              Box
+            </button>
+            <button type="button" data-inspector-command="mark:strike">
+              Strike
+            </button>
+            <button type="button" data-inspector-command="mark:bracket">
+              Bracket
+            </button>
+            <button type="button" data-inspector-command="mark:hanamaru">
+              Hanamaru flower (example plugin)
+            </button>
+            <button type="button" data-inspector-command="note">
+              Add/Edit Note
+            </button>
+            <button type="button" data-inspector-command="apply">
+              Apply
+            </button>
+            <button type="button" data-inspector-command="cancel">
+              Cancel Preview
+            </button>
+            <button type="button" data-inspector-command="copy">
+              Copy Current Output
+            </button>
+            <button type="button" data-inspector-command="close">
+              Close Inspector
+            </button>
+          </div>
+          <button type="button" data-inspector-palette-close>Close commands</button>
+        </dialog>
+        </section>
+      </template>
 
       <section id="quick-start" class="demo-doc-section" aria-labelledby="quick-start-title">
         <div class="demo-doc-heading">

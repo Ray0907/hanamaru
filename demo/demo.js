@@ -1,5 +1,7 @@
 import { VERSION, HanamaruTargetError, annotate, scan, story } from '/dist/hanamaru.esm.js';
 
+const { createAnnotationInspector } = await import('/demo/inspector.js');
+
 const localStarter = `<link rel="stylesheet" href="./dist/hanamaru.css">
 <script type="module">
   import { scan } from './dist/hanamaru.esm.js'
@@ -34,8 +36,8 @@ const storyStep = document.querySelector('[data-demo-story-step]');
 const storyRun = document.querySelector('[data-demo-story-run]');
 const completion = document.querySelector('[data-demo-completion]');
 const sequenceStages = [...document.querySelectorAll('[data-demo-sequence-stage]')];
-const tabs = [...document.querySelectorAll('[role="tab"]')];
-const panels = [...document.querySelectorAll('[role="tabpanel"]')];
+const tabs = [...document.querySelectorAll('[data-demo-tab]')];
+const panels = [...document.querySelectorAll('[data-demo-panel]')];
 const storyButtons = Object.fromEntries(
   [...document.querySelectorAll('[data-demo-story-action]')]
     .map((button) => [button.dataset.demoStoryAction, button]),
@@ -1048,8 +1050,11 @@ playgroundForm.addEventListener('input', () => {
 playgroundRunButton.addEventListener('click', runPlayground);
 playgroundCopyButton.addEventListener('click', copyPlaygroundDefinition);
 
+const destroyInspector = createAnnotationInspector(document);
+
 window.addEventListener('pagehide', (event) => {
   if (event.persisted) return;
+  destroyInspector();
   for (const cleanup of visibilityCleanups) cleanup();
   proofStory?.destroy();
   rangeProof.destroy();
