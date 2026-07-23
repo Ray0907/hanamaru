@@ -45,6 +45,10 @@ function stateError(cause) {
   );
 }
 
+function supersededMetadataError() {
+  return stateError(new Error('Annotation operation changed during metadata storage'));
+}
+
 function invalid(field, value) {
   throw new HanamaruConfigError(
     'HANA_CONFIG_INVALID',
@@ -1111,6 +1115,15 @@ export function createAnnotation(target, rawOptions, env) {
       forceRemoveRenderer(oldRenderer, knownOwners);
       return controller;
     }
+    if (!isCurrentOperation(operation)) {
+      const error = supersededMetadataError();
+      destroy();
+      discardUncommittedRendererMount(nextRenderer);
+      try { oldRenderer.destroy(); } catch { /* The stale metadata failure remains authoritative. */ }
+      forceRemoveRenderer(oldRenderer, knownOwners);
+      deleteControllerMetadata(controller);
+      throw error;
+    }
     commitRenderer(renderer);
     knownOwners.add(nextRecord.ownerElement);
     let cleanupFailure = null;
@@ -1182,11 +1195,20 @@ export function createAnnotation(target, rawOptions, env) {
       discardUncommittedRendererMount(renderer);
       return controller;
     }
+    const metadataOperation = operationEpoch;
+    const metadataRenderer = renderer;
     recordAnnotationMetadata(controller, currentTarget, options);
     if (destroyed) {
       deleteControllerMetadata(controller);
       discardUncommittedRendererMount(renderer);
       return controller;
+    }
+    if (!isCurrentOperation(metadataOperation)) {
+      const error = supersededMetadataError();
+      destroy();
+      discardUncommittedRendererMount(metadataRenderer);
+      deleteControllerMetadata(controller);
+      throw error;
     }
     commitRenderer(renderer);
   } catch (error) {

@@ -53,7 +53,7 @@ function annotationEnvironment({ id = 'generated-seed' } = {}) {
     },
     rebindLayout() {
       if (rebindFailure !== null) throw rebindFailure;
-      return () => {};
+      return () => { calls.push('layout:cleanup'); };
     },
     registerController() { return 0; },
     releaseController() { calls.push('releaseController'); },
@@ -254,7 +254,27 @@ class RetainingThrowingSetWeakMap extends WeakMap {
     if (this.setCalls === this.failAt) {
       this.retainedKey = key;
       this.retainedValue = value;
+      super.set(key, value);
       throw this.cause;
+    }
+    return super.set(key, value);
+  }
+}
+
+class UpdatingSetWeakMap extends WeakMap {
+  constructor(updateAt, patch) {
+    super();
+    this.patch = patch;
+    this.retainedKey = null;
+    this.setCalls = 0;
+    this.updateAt = updateAt;
+  }
+
+  set(key, value) {
+    this.setCalls += 1;
+    if (this.setCalls === this.updateAt) {
+      this.retainedKey = key;
+      key.update(this.patch);
     }
     return super.set(key, value);
   }
@@ -514,9 +534,53 @@ test('annotation construction terminalizes a controller retained by a throwing m
     );
 
     assert.equal(retainingMetadata.retainedKey.state, 'destroyed');
+    assert.equal(readControllerMetadata(retainingMetadata.retainedKey), undefined);
     assert.equal(environment.ownedCount, 0);
     const callsAfterFailure = [...environment.calls];
     retainingMetadata.retainedKey.destroy();
+    assert.deepEqual(environment.calls, callsAfterFailure);
+  } finally {
+    runtimeState.metadata = originalMetadata;
+  }
+});
+
+test('annotation construction contains an update accepted during metadata storage', () => {
+  const originalMetadata = runtimeState.metadata;
+  const updatingMetadata = new UpdatingSetWeakMap(1, {
+    target: { name: 'nested target' },
+    note: 'nested update',
+  });
+  const environment = annotationEnvironment();
+  environment.setPendingResidue(true);
+  runtimeState.metadata = updatingMetadata;
+  try {
+    assert.throws(
+      () => createAnnotation(
+        { name: 'outer target' },
+        { mark: 'underline', trigger: 'viewport' },
+        environment.env,
+      ),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_RUNTIME',
+    );
+
+    assert.equal(updatingMetadata.setCalls, 2);
+    assert.equal(updatingMetadata.retainedKey.state, 'destroyed');
+    assert.equal(readControllerMetadata(updatingMetadata.retainedKey), undefined);
+    assert.equal(environment.ownedCount, 0);
+    assert.deepEqual(
+      environment.calls
+        .filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy')
+        .map(([, rendererId]) => rendererId)
+        .sort(),
+      [1, 2],
+    );
+    assert.equal(environment.calls.filter((call) => call === 'trigger:cleanup').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'layout:cleanup').length, 2);
+    assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+    const callsAfterFailure = [...environment.calls];
+    updatingMetadata.retainedKey.destroy();
     assert.deepEqual(environment.calls, callsAfterFailure);
   } finally {
     runtimeState.metadata = originalMetadata;
@@ -557,6 +621,57 @@ test('annotation update destroys both renderers when metadata storage throws', (
     );
     assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
     assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+  } finally {
+    if (controller?.state !== 'destroyed') controller?.destroy();
+    runtimeState.metadata = originalMetadata;
+  }
+});
+
+test('annotation update contains a nested update accepted during metadata storage', () => {
+  const originalMetadata = runtimeState.metadata;
+  const updatingMetadata = new UpdatingSetWeakMap(2, {
+    target: { name: 'nested target' },
+    note: 'nested update',
+  });
+  const environment = annotationEnvironment();
+  let controller;
+  runtimeState.metadata = updatingMetadata;
+  try {
+    controller = createAnnotation(
+      { name: 'initial target' },
+      { mark: 'underline', trigger: 'viewport' },
+      environment.env,
+    );
+    environment.setPendingResidue(true);
+
+    assert.throws(
+      () => controller.update({
+        target: { name: 'outer target' },
+        note: 'outer update',
+      }),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_RUNTIME',
+    );
+
+    assert.equal(updatingMetadata.setCalls, 3);
+    assert.equal(controller.state, 'destroyed');
+    assert.equal(updatingMetadata.retainedKey, controller);
+    assert.equal(readControllerMetadata(controller), undefined);
+    assert.equal(environment.ownedCount, 0);
+    assert.deepEqual(
+      environment.calls
+        .filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy')
+        .map(([, rendererId]) => rendererId)
+        .sort(),
+      [1, 2, 3],
+    );
+    assert.equal(environment.calls.filter((call) => call === 'trigger:cleanup').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'layout:cleanup').length, 3);
+    assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+    const callsAfterFailure = [...environment.calls];
+    controller.destroy();
+    assert.deepEqual(environment.calls, callsAfterFailure);
   } finally {
     if (controller?.state !== 'destroyed') controller?.destroy();
     runtimeState.metadata = originalMetadata;
