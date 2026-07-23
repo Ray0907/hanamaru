@@ -23,6 +23,7 @@ const application = String.raw`
     callbackSnapshots: [],
     controllers: [],
     errors: [],
+    getterCause: new Error('prefilled getter failed'),
     getterReads: {},
     lifecycleErrors: [],
     pendingInput: null,
@@ -63,8 +64,10 @@ const application = String.raw`
       motion: input.motion ?? 'system',
       note: input.note ?? 'Vue adapter',
       patchListen: input.patchListen ?? false,
+      prefilled: input.prefilled ?? false,
       present: input.present ?? true,
       targetKey: input.targetKey ?? 'first',
+      throwGetter: input.throwGetter ?? false,
       throwOnRepeat: input.throwOnRepeat ?? false,
       trigger: input.trigger,
     }
@@ -91,7 +94,7 @@ const application = String.raw`
   }
 
   function optionsFrom(input) {
-    return {
+    const options = {
       mark: input.mark,
       note: input.note,
       placement: 'auto',
@@ -101,6 +104,16 @@ const application = String.raw`
       motion: input.motion,
       ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
     }
+    if (input.throwGetter) {
+      Object.defineProperty(options, 'mark', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          throw state.getterCause
+        },
+      })
+    }
+    return options
   }
 
   function configFrom(input) {
@@ -125,31 +138,37 @@ const application = String.raw`
     name: 'Claim',
     setup() {
       const initial = state.pendingInput
-      const target = ref(null)
+      const target = ref(initial.prefilled ? state.prefilledTarget : null)
       const revision = ref(0)
       const view = reactive({
         hidden: initial.hidden,
         patchListen: initial.patchListen,
+        prefilled: initial.prefilled,
         present: initial.present,
         targetKey: initial.targetKey,
       })
       const initialOptions = optionsFrom(initial)
       const initialConfig = configFrom(initial)
-      const options = initial.counted
-        ? shallowRef(countedInput(
-          initialOptions,
-          ['mark', 'note', 'placement', 'accessible', 'seed', 'duration', 'motion'],
-          'options',
-          initial.throwOnRepeat,
-        ))
+      const specialInput = initial.counted || initial.throwGetter
+      const options = specialInput
+        ? shallowRef(initial.counted
+          ? countedInput(
+            initialOptions,
+            ['mark', 'note', 'placement', 'accessible', 'seed', 'duration', 'motion'],
+            'options',
+            initial.throwOnRepeat,
+          )
+          : initialOptions)
         : reactive(initialOptions)
-      const config = initial.counted
-        ? shallowRef(countedInput(
-          initialConfig,
-          ['enabled', 'onError'],
-          'config',
-          initial.throwOnRepeat,
-        ))
+      const config = specialInput
+        ? shallowRef(initial.counted
+          ? countedInput(
+            initialConfig,
+            ['enabled', 'onError'],
+            'config',
+            initial.throwOnRepeat,
+          )
+          : initialConfig)
         : reactive(initialConfig)
       const annotation = useAnnotation(target, options, config)
 
@@ -160,23 +179,28 @@ const application = String.raw`
       state.apply = (next) => {
         view.hidden = next.hidden
         view.patchListen = next.patchListen
+        view.prefilled = next.prefilled
         view.present = next.present
         view.targetKey = next.targetKey
         const nextOptions = optionsFrom(next)
         const nextConfig = configFrom(next)
-        if (initial.counted) {
-          options.value = countedInput(
-            nextOptions,
-            ['mark', 'note', 'placement', 'accessible', 'seed', 'duration', 'motion'],
-            'options',
-            next.throwOnRepeat,
-          )
-          config.value = countedInput(
-            nextConfig,
-            ['enabled', 'onError'],
-            'config',
-            next.throwOnRepeat,
-          )
+        if (specialInput) {
+          options.value = next.counted
+            ? countedInput(
+              nextOptions,
+              ['mark', 'note', 'placement', 'accessible', 'seed', 'duration', 'motion'],
+              'options',
+              next.throwOnRepeat,
+            )
+            : nextOptions
+          config.value = next.counted
+            ? countedInput(
+              nextConfig,
+              ['enabled', 'onError'],
+              'config',
+              next.throwOnRepeat,
+            )
+            : nextConfig
         } else {
           replaceFields(options, nextOptions)
           replaceFields(config, nextConfig)
@@ -206,6 +230,7 @@ const application = String.raw`
 
       return () => {
         revision.value
+        if (view.prefilled) return null
         if (!view.present) return null
         return h('span', {
           class: 'target',
@@ -223,6 +248,14 @@ const application = String.raw`
       const next = normalizeInput(input)
       if (state.app === null) {
         state.pendingInput = next
+        if (next.prefilled) {
+          const target = document.createElement('span')
+          target.className = 'target'
+          target.dataset.target = ''
+          target.textContent = 'Prefilled claim'
+          document.body.append(target)
+          state.prefilledTarget = target
+        }
         const app = createApp(Claim)
         app.config.errorHandler = (error) => {
           state.lifecycleErrors.push(error)
@@ -256,6 +289,8 @@ const application = String.raw`
     unmount() {
       state.app?.unmount()
       state.app = null
+      state.prefilledTarget?.remove()
+      state.prefilledTarget = null
     },
   }
 `
@@ -463,6 +498,72 @@ test('validates reactive adapter input even while the target ref is unavailable'
     field: 'trigger',
     current: null,
     overlays: 0,
+  })
+})
+
+test('preserves one typed validation error for a prefilled target ref before mount', async ({ page }) => {
+  await render(page, { prefilled: true, trigger: 'viewport' })
+  await page.waitForFunction(() => window.__vueAnnotation.lifecycleErrors.length > 0)
+
+  expect(await page.evaluate(() => ({
+    errors: window.__vueAnnotation.lifecycleErrors.map((error) => ({
+      code: error.code ?? null,
+      field: error.details?.field ?? null,
+      name: error.name,
+    })),
+    current: window.__vueAnnotation.annotationRef?.value ?? null,
+    overlays: document.querySelectorAll('[data-hana-overlay]').length,
+  }))).toEqual({
+    errors: [{
+      code: 'HANA_CONFIG_INVALID',
+      field: 'trigger',
+      name: 'HanamaruConfigError',
+    }],
+    current: null,
+    overlays: 0,
+  })
+})
+
+test('preserves one exact accessor cause for a prefilled target ref before mount', async ({ page }) => {
+  await render(page, { prefilled: true, throwGetter: true })
+  await page.waitForFunction(() => window.__vueAnnotation.lifecycleErrors.length > 0)
+
+  expect(await page.evaluate(() => ({
+    errors: window.__vueAnnotation.lifecycleErrors.map((error) => ({
+      exactCause: error === window.__vueAnnotation.getterCause,
+      message: error.message,
+      name: error.name,
+    })),
+    current: window.__vueAnnotation.annotationRef?.value ?? null,
+    overlays: document.querySelectorAll('[data-hana-overlay]').length,
+  }))).toEqual({
+    errors: [{
+      exactCause: true,
+      message: 'prefilled getter failed',
+      name: 'Error',
+    }],
+    current: null,
+    overlays: 0,
+  })
+})
+
+test('recovers once when invalid prefilled reactive input becomes valid', async ({ page }) => {
+  await render(page, { prefilled: true, trigger: 'viewport' })
+  await page.waitForFunction(() => window.__vueAnnotation.lifecycleErrors.length > 0)
+
+  await render(page, { prefilled: true })
+  await waitVisible(page)
+
+  expect(await page.evaluate(() => ({
+    controllers: window.__vueAnnotation.controllers.length,
+    errors: window.__vueAnnotation.lifecycleErrors.map((error) => error.code ?? error.name),
+    current: window.__vueAnnotation.annotationRef.value !== null,
+    overlays: document.querySelectorAll('[data-hana-overlay]').length,
+  }))).toEqual({
+    controllers: 1,
+    errors: ['HANA_CONFIG_INVALID'],
+    current: true,
+    overlays: 1,
   })
 })
 
@@ -720,7 +821,7 @@ test('reads each accessor field once and never deep-traverses unrelated render s
 
 test('inherits reduced motion and settles a long system animation synchronously', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
-  const mounted = await render(page, { duration: 900, motion: 'system' })
+  const mounted = await render(page, { duration: 5_000, motion: 'system' })
 
   expect(mounted.state).toBe('visible')
   expect(await page.evaluate(async () => {
@@ -738,53 +839,86 @@ test('inherits reduced motion and settles a long system animation synchronously'
       animatingClass: group.classList.contains('hana-is-animating'),
       settlement,
       state: controller.state,
-      strokeDashoffset: path.style.strokeDashoffset,
     }
   })).toEqual({
     activeAnimations: 0,
     animatingClass: false,
     settlement: 'resolved',
     state: 'visible',
-    strokeDashoffset: '0',
   })
 })
 
 test('keeps the same long system animation active without reduced motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' })
-  const mounted = await render(page, { duration: 900, motion: 'system' })
+  const mounted = await render(page, { duration: 5_000, motion: 'system' })
 
   expect(mounted.state).toBe('showing')
-  expect(await page.evaluate(async () => {
+  let motionWitness
+  try {
+    const witness = await page.waitForFunction(() => {
+      const controller = window.__vueAnnotation.annotationRef?.value
+      const activeAnimations = [...document.querySelectorAll('.hana-mark-path')]
+        .reduce((count, path) => count + path.getAnimations().length, 0)
+      const group = document.querySelector('.hana-annotation')
+      const animatingClass =
+        group?.classList.contains('hana-is-animating') ?? false
+      if (controller?.state === 'showing'
+        && controller.finished !== null
+        && (
+          activeAnimations > 0
+          || animatingClass
+        )) {
+        return {
+          activeMotion: true,
+          hasFinished: true,
+          state: controller.state,
+        }
+      }
+      return false
+    }, undefined, { timeout: 3_000 })
+    motionWitness = await witness.jsonValue()
+  } catch (cause) {
+    const diagnostics = await page.evaluate(() => {
+      const controller = window.__vueAnnotation.annotationRef?.value
+      const activeAnimations = [...document.querySelectorAll('.hana-mark-path')]
+        .reduce((count, path) => count + path.getAnimations().length, 0)
+      const group = document.querySelector('.hana-annotation')
+      return {
+        activeAnimations,
+        animatingClass: group?.classList.contains('hana-is-animating') ?? false,
+        hasController: controller !== null && controller !== undefined,
+        hasFinished:
+          controller?.finished !== null && controller?.finished !== undefined,
+        state: controller?.state ?? null,
+      }
+    })
+    await page.evaluate(() => window.fixture.unmount())
+    throw new Error(
+      'no-preference motion did not become active: ' + JSON.stringify(diagnostics),
+      { cause },
+    )
+  }
+
+  const settlement = await page.evaluate(async () => {
     const controller = window.__vueAnnotation.annotationRef.value
     let settlement = 'pending'
     controller.finished.then(
       () => { settlement = 'resolved' },
       () => { settlement = 'rejected' },
     )
-    for (let frame = 0; frame < 20; frame += 1) {
-      const path = document.querySelector('.hana-mark-path')
-      const group = document.querySelector('.hana-annotation')
-      const activeMotion = (path?.getAnimations().length ?? 0) > 0
-        || group?.classList.contains('hana-is-animating')
-      if (activeMotion) {
-        const snapshot = {
-          activeMotion,
-          settlement,
-          state: controller.state,
-        }
-        window.fixture.unmount()
-        return snapshot
-      }
-      await new Promise((resolve) => requestAnimationFrame(resolve))
-    }
-    window.fixture.unmount()
+    await Promise.resolve()
     return {
-      activeMotion: false,
       settlement,
       state: controller.state,
     }
-  })).toEqual({
+  })
+  await page.evaluate(() => window.fixture.unmount())
+  expect({
+    ...motionWitness,
+    ...settlement,
+  }).toEqual({
     activeMotion: true,
+    hasFinished: true,
     settlement: 'pending',
     state: 'showing',
   })

@@ -115,6 +115,7 @@ export function useAnnotation(targetRef, optionsOrRef, configOrRef = {}) {
 
   onMounted(() => {
     slot.mounted = true;
+    if (latest === null) return;
     if (latest.prepared === null) readiness.value += 1;
     else applyRequest(latest);
   });
