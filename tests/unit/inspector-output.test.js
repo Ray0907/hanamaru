@@ -154,6 +154,7 @@ test('locator proof probes public resolver occurrences in order before update an
   assert.match(output.javascript.code, /\brestore\(/);
   assert.doesNotMatch(output.javascript.code, /annotateSelection\(/);
   assert.equal(output.json.available, true);
+  assert.ok(output.javascript.code.includes(`const definition = ${output.json.code};`));
   assert.deepEqual(JSON.parse(output.json.code), definition);
 });
 
@@ -298,7 +299,7 @@ test('serialize failure after an exact match preserves the exact prior output', 
   assert.equal(output, previousOutput);
 });
 
-test('throwing toJSON during the stable snapshot preserves the exact prior output', () => {
+test('throwing own toJSON is rejected while preserving the exact prior output', () => {
   const node = { id: 'stringify-boundary' };
   const boundary = {
     startContainer: node,
@@ -346,17 +347,7 @@ test('output construction failure after serialization preserves the exact prior 
     controller: { update() {} },
     previousOutput,
     resolveSerializedTarget: () => ({ ...boundary }),
-    serialize: () => ({
-      schema: 'hanamaru/v1',
-      kind: 'annotation',
-      target: {
-        type: 'locator',
-        within: { type: 'selector', selector: '#inspector-document' },
-        text: 'exact',
-        occurrence: 0,
-      },
-      options: {},
-    }),
+    serialize: () => canonicalDefinition(),
   });
 
   assert.equal(output, previousOutput);
@@ -458,7 +449,7 @@ test('forged schema, kind, or locator shapes preserve the exact prior output', (
   }
 });
 
-test('one mutating target getter is snapshotted once and drives both stable outputs', () => {
+test('an accessor definition fails closed without invoking its getter', () => {
   const node = { id: 'getter-boundary' };
   const boundary = {
     startContainer: node,
@@ -494,14 +485,12 @@ test('one mutating target getter is snapshotted once and drives both stable outp
     },
   });
 
-  assert.notEqual(output, previousOutput);
+  assert.equal(output, previousOutput);
   assert.equal(serializeCalls, 1);
-  assert.equal(targetReads, 1);
-  assert.ok(output.javascript.code.includes(`const definition = ${output.json.code};`));
-  assert.deepEqual(JSON.parse(output.json.code).target, stable.target);
+  assert.equal(targetReads, 0);
 });
 
-test('one mutating toJSON result is the sole stable persistence snapshot', () => {
+test('an own toJSON definition fails closed without invoking it', () => {
   const node = { id: 'to-json-boundary' };
   const boundary = {
     startContainer: node,
@@ -529,10 +518,8 @@ test('one mutating toJSON result is the sole stable persistence snapshot', () =>
     serialize: () => definition,
   });
 
-  assert.notEqual(output, previousOutput);
-  assert.equal(toJSONCalls, 1);
-  assert.ok(output.javascript.code.includes(`const definition = ${output.json.code};`));
-  assert.deepEqual(JSON.parse(output.json.code), canonicalDefinition());
+  assert.equal(output, previousOutput);
+  assert.equal(toJSONCalls, 0);
 });
 
 test('pre-proof output rejects values JSON would omit or coerce', () => {
@@ -542,6 +529,28 @@ test('pre-proof output rejects values JSON would omit or coerce', () => {
   symbolKey[Symbol('hidden')] = 'omitted';
   const sparse = [];
   sparse.length = 1;
+  const inherited = [];
+  inherited.length = 1;
+  const inheritedPrototype = Object.create(Array.prototype);
+  inheritedPrototype[0] = 'inherited';
+  Object.setPrototypeOf(inherited, inheritedPrototype);
+  let getterCalls = 0;
+  const accessor = {};
+  Object.defineProperty(accessor, 'mark', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return 'underline';
+    },
+  });
+  const date = new Date('2026-07-24T00:00:00.000Z');
+  const customToJSON = {
+    toJSON() {
+      return { mark: 'underline' };
+    },
+  };
+  const customPrototype = Object.create({ inherited: true });
+  customPrototype.mark = 'underline';
   const disguisedFunction = () => {};
   disguisedFunction.toJSON = () => 'coerced function';
   const cases = [
@@ -556,6 +565,11 @@ test('pre-proof output rejects values JSON would omit or coerce', () => {
     ['symbol key', symbolKey],
     ['cycle', cycle],
     ['sparse array', { values: sparse }],
+    ['inherited array slot', { values: inherited }],
+    ['Date', { seed: date }],
+    ['custom toJSON', customToJSON],
+    ['custom prototype', customPrototype],
+    ['accessor', accessor],
   ];
 
   for (const [name, options] of cases) {
@@ -565,6 +579,44 @@ test('pre-proof output rejects values JSON would omit or coerce', () => {
       name,
     );
   }
+  assert.equal(getterCalls, 0);
+});
+
+test('shared plain containers are reflected once before the writer uses only the snapshot', () => {
+  const calls = {
+    prototype: 0,
+    ownKeys: 0,
+    descriptor: 0,
+  };
+  const shared = new Proxy(
+    { value: 'opaque' },
+    {
+      getPrototypeOf(target) {
+        calls.prototype += 1;
+        return Reflect.getPrototypeOf(target);
+      },
+      ownKeys(target) {
+        calls.ownKeys += 1;
+        return Reflect.ownKeys(target);
+      },
+      getOwnPropertyDescriptor(target, name) {
+        calls.descriptor += 1;
+        return Reflect.getOwnPropertyDescriptor(target, name);
+      },
+    },
+  );
+
+  const output = createRangeOutput({
+    first: shared,
+    second: shared,
+  });
+
+  assert.equal(output.javascript.available, true);
+  assert.deepEqual(calls, {
+    prototype: 1,
+    ownKeys: 1,
+    descriptor: 1,
+  });
 });
 
 test('invalid serialized JSON data fails closed after exact locator proof', () => {
@@ -616,6 +668,84 @@ test('invalid serialized JSON data fails closed after exact locator proof', () =
     serialize: () => cyclicDefinition,
   });
   assert.equal(output, previousOutput, 'cycle');
+});
+
+test('finite negative zero survives both pre-proof and persistent output exactly', () => {
+  const initial = createRangeOutput({
+    mark: 'underline',
+    seed: -0,
+    duration: -0,
+  });
+  assert.match(initial.javascript.code, /"seed": -0/);
+  assert.match(initial.javascript.code, /"duration": -0/);
+
+  const node = { id: 'negative-zero-boundary' };
+  const boundary = {
+    startContainer: node,
+    startOffset: 0,
+    endContainer: node,
+    endOffset: 5,
+  };
+  const definition = canonicalDefinition();
+  definition.options.seed = -0;
+  definition.options.duration = -0;
+  const output = proveRangeLocator({
+    range: { cloneRange: () => ({ ...boundary }) },
+    selectedText: 'exact',
+    controller: { update() {} },
+    previousOutput: initial,
+    resolveSerializedTarget: () => ({ ...boundary }),
+    serialize: () => definition,
+  });
+
+  assert.notEqual(output, initial);
+  assert.match(output.json.code, /"seed": -0/);
+  assert.match(output.json.code, /"duration": -0/);
+  const parsed = JSON.parse(output.json.code);
+  assert.equal(Object.is(parsed.options.seed, -0), true);
+  assert.equal(Object.is(parsed.options.duration, -0), true);
+});
+
+test('forged top-level and annotation option snapshots fail the narrow v1 gate', () => {
+  const variants = [
+    ['top-level extra', (definition) => { definition.extra = true; }],
+    ['missing options', (definition) => { delete definition.options; }],
+    ['options extra', (definition) => { definition.options.extra = true; }],
+    ['missing mark', (definition) => { delete definition.options.mark; }],
+    ['empty mark', (definition) => { definition.options.mark = ''; }],
+    ['numeric note', (definition) => { definition.options.note = 1; }],
+    ['long note', (definition) => { definition.options.note = '🌸'.repeat(281); }],
+    ['placement', (definition) => { definition.options.placement = 'center'; }],
+    ['non-manual trigger', (definition) => { definition.options.trigger = 'load'; }],
+    ['accessible', (definition) => { definition.options.accessible = 'true'; }],
+    ['seed', (definition) => { definition.options.seed = null; }],
+    ['negative duration', (definition) => { definition.options.duration = -1; }],
+    ['fractional duration', (definition) => { definition.options.duration = 1.5; }],
+    ['motion', (definition) => { definition.options.motion = 'always'; }],
+  ];
+  const node = { id: 'option-gate-boundary' };
+  const boundary = {
+    startContainer: node,
+    startOffset: 0,
+    endContainer: node,
+    endOffset: 5,
+  };
+
+  for (const [name, mutate] of variants) {
+    const previousOutput = createRangeOutput({ seed: name });
+    const definition = canonicalDefinition();
+    mutate(definition);
+    const output = proveRangeLocator({
+      range: { cloneRange: () => ({ ...boundary }) },
+      selectedText: 'exact',
+      controller: { update() {} },
+      previousOutput,
+      resolveSerializedTarget: () => ({ ...boundary }),
+      serialize: () => definition,
+    });
+
+    assert.equal(output, previousOutput, name);
+  }
 });
 
 test('JavaScript and JSON serializers neutralize hostile text while preserving values', () => {

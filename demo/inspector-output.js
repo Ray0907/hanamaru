@@ -15,68 +15,123 @@ function invalidJson() {
   throw new TypeError('Inspector output must contain exact JSON-compatible data');
 }
 
-function isArrayIndex(name, length) {
-  if (!/^(?:0|[1-9]\d*)$/u.test(name)) return false;
-  const index = Number(name);
-  return Number.isSafeInteger(index) && index < length;
-}
-
-function assertUncoercedJsonValue(value) {
-  if (typeof value === 'number' && !Number.isFinite(value)) invalidJson();
-  if (value === undefined
-    || typeof value === 'bigint'
-    || typeof value === 'function'
-    || typeof value === 'symbol') {
+function snapshotJsonArray(value, context) {
+  if (Object.getPrototypeOf(value) !== Array.prototype) invalidJson();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const names = Reflect.ownKeys(descriptors);
+  const lengthDescriptor = descriptors.length;
+  const length = lengthDescriptor?.value;
+  if (lengthDescriptor === undefined
+    || !Object.hasOwn(lengthDescriptor, 'value')
+    || !Number.isSafeInteger(length)
+    || length < 0
+    || names.length !== length + 1
+    || names.some((name) => typeof name !== 'string')) {
     invalidJson();
   }
+
+  const snapshot = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (descriptor === undefined
+      || descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')) {
+      invalidJson();
+    }
+    snapshot.push(snapshotExactJson(descriptor.value, context));
+  }
+  if (names.some((name) => name !== 'length'
+    && !/^(?:0|[1-9]\d*)$/u.test(name))) {
+    invalidJson();
+  }
+  return snapshot;
 }
 
-function assertExactJsonContainer(value) {
-  if (Array.isArray(value)) {
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    for (const name of Reflect.ownKeys(descriptors)) {
-      if (typeof name !== 'string'
-        || (name !== 'length' && !isArrayIndex(name, value.length))) {
-        invalidJson();
-      }
-      if (name !== 'length' && Object.hasOwn(descriptors[name], 'value')) {
-        assertUncoercedJsonValue(descriptors[name].value);
-      }
-    }
-    return;
-  }
-
+function snapshotJsonObject(value, context) {
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) invalidJson();
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  for (const name of Reflect.ownKeys(descriptors)) {
-    if (typeof name !== 'string' || descriptors[name].enumerable !== true) {
+  const names = Reflect.ownKeys(descriptors);
+  if (names.some((name) => typeof name !== 'string' || name === 'toJSON')) {
+    invalidJson();
+  }
+
+  const snapshot = Object.create(null);
+  for (const name of names) {
+    const descriptor = descriptors[name];
+    if (descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) {
       invalidJson();
     }
-    if (Object.hasOwn(descriptors[name], 'value')) {
-      assertUncoercedJsonValue(descriptors[name].value);
-    }
+    snapshot[name] = snapshotExactJson(descriptor.value, context);
+  }
+  return snapshot;
+}
+
+function snapshotExactJson(value, context = {
+  active: new Set(),
+  completed: new WeakMap(),
+}) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) invalidJson();
+    return value;
+  }
+  if (typeof value !== 'object' || context.active.has(value)) invalidJson();
+  const completed = context.completed.get(value);
+  if (completed !== undefined) return completed;
+
+  context.active.add(value);
+  try {
+    const snapshot = Array.isArray(value)
+      ? snapshotJsonArray(value, context)
+      : snapshotJsonObject(value, context);
+    context.completed.set(value, snapshot);
+    return snapshot;
+  } finally {
+    context.active.delete(value);
   }
 }
 
-function exactJsonReplacer(_key, value) {
-  assertUncoercedJsonValue(value);
-  if (typeof value === 'object' && value !== null) assertExactJsonContainer(value);
-  return value;
+function safeStringToken(value) {
+  return JSON.stringify(value)
+    .replace(/[<>&\u2028\u2029]/gu, (character) => ESCAPED_CODE_POINTS[character]);
 }
 
-function safeSerialized(value, spacing = 2) {
-  let serialized;
+function writeJson(value, depth = 0) {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return safeStringToken(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number') return Object.is(value, -0) ? '-0' : String(value);
+
+  const indent = '  '.repeat(depth);
+  const childIndent = '  '.repeat(depth + 1);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]';
+    const items = value.map((item) => `${childIndent}${writeJson(item, depth + 1)}`);
+    return `[\n${items.join(',\n')}\n${indent}]`;
+  }
+
+  const names = Object.keys(value);
+  if (names.length === 0) return '{}';
+  const entries = names.map((name) => (
+    `${childIndent}${safeStringToken(name)}: ${writeJson(value[name], depth + 1)}`
+  ));
+  return `{\n${entries.join(',\n')}\n${indent}}`;
+}
+
+function stableJson(value) {
   try {
-    assertUncoercedJsonValue(value);
-    serialized = JSON.stringify(value, exactJsonReplacer, spacing);
+    const snapshot = snapshotExactJson(value);
+    return { snapshot, serialized: writeJson(snapshot) };
   } catch (cause) {
     throw new TypeError('Inspector output must be JSON-serializable', { cause });
   }
-  if (typeof serialized !== 'string') {
-    throw new TypeError('Inspector output must be JSON-serializable');
-  }
-  return serialized.replace(/[<>&\u2028\u2029]/gu, (character) => ESCAPED_CODE_POINTS[character]);
+}
+
+function safeSerialized(value) {
+  return stableJson(value).serialized;
 }
 
 function unavailable(reason) {
@@ -134,12 +189,54 @@ function hasExactKeys(value, keys) {
   return actual.length === keys.length && keys.every((key) => actual.includes(key));
 }
 
+const V1_PLACEMENTS = Object.freeze(new Set(['auto', 'top', 'right', 'bottom', 'left']));
+const V1_MOTIONS = Object.freeze(new Set(['system', 'never']));
+
+function matchesInspectorOptions(options) {
+  if (!hasExactKeys(options, [
+    'mark',
+    'note',
+    'placement',
+    'trigger',
+    'accessible',
+    'seed',
+    'duration',
+    'motion',
+  ])) {
+    return false;
+  }
+
+  const noteIsValid = options.note === null
+    || (typeof options.note === 'string' && [...options.note].length <= 280);
+  const seedIsValid = typeof options.seed === 'string'
+    || (typeof options.seed === 'number' && Number.isFinite(options.seed));
+  return typeof options.mark === 'string'
+    && options.mark.length > 0
+    && noteIsValid
+    && V1_PLACEMENTS.has(options.placement)
+    && options.trigger === 'manual'
+    && typeof options.accessible === 'boolean'
+    && seedIsValid
+    && Number.isInteger(options.duration)
+    && options.duration >= 0
+    && V1_MOTIONS.has(options.motion);
+}
+
+/**
+ * Narrow gate for the exact v1 annotation definition emitted by Inspector.
+ *
+ * Public `serialize()` remains the general schema authority. This check only
+ * binds Inspector persistence to its proven locator and manual-trigger option
+ * surface before the demo claims that JSON can be restored.
+ */
 function matchesProvenDefinition(definition, text, occurrence) {
   if (!isRecord(definition)
+    || !hasExactKeys(definition, ['schema', 'kind', 'target', 'options'])
     || definition.schema !== 'hanamaru/v1'
     || definition.kind !== 'annotation'
     || !hasExactKeys(definition.target, ['type', 'within', 'text', 'occurrence'])
-    || !hasExactKeys(definition.target.within, ['type', 'selector'])) {
+    || !hasExactKeys(definition.target.within, ['type', 'selector'])
+    || !matchesInspectorOptions(definition.options)) {
     return false;
   }
 
@@ -202,12 +299,11 @@ export function proveRangeLocator({
         },
       });
       const definition = serialize(controller);
-      const serializedDefinition = safeSerialized(definition);
-      const stableDefinition = JSON.parse(serializedDefinition);
-      if (!matchesProvenDefinition(stableDefinition, selectedText, occurrence)) {
+      const stableDefinition = stableJson(definition);
+      if (!matchesProvenDefinition(stableDefinition.snapshot, selectedText, occurrence)) {
         return previousOutput;
       }
-      return persistentOutput(previousOutput, serializedDefinition);
+      return persistentOutput(previousOutput, stableDefinition.serialized);
     } catch {
       return previousOutput;
     }
