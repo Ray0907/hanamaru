@@ -491,7 +491,16 @@ class SharedDocumentResources {
       this.#frameQueue = new FrameQueue({
         requestFrame,
         cancelFrame,
-        generationFor: (key) => this.#controllers.get(key.id)?.token,
+        generationFor: (key) => {
+          if (key.layout === true) {
+            const binding = this.#layouts.get(key.id);
+            return binding?.queueKey === key
+              && this.#controllers.get(key.id)?.generation === binding.generation
+              ? binding.token
+              : undefined;
+          }
+          return this.#controllers.get(key.id)?.token;
+        },
         beforeFlush: () => {
           this.#notePlacementReservations = new Map();
         },
@@ -581,6 +590,8 @@ class SharedDocumentResources {
     const controller = this.#requireController(id);
     controller.generation += 1;
     controller.token = {};
+    const binding = this.#layouts.get(id);
+    if (binding !== undefined) this.#frameQueue.cancel(binding.queueKey);
     this.#cancelControllerJobs(controller);
     return controller.generation;
   }
@@ -758,12 +769,12 @@ class SharedDocumentResources {
     }
 
     this.#controllers.delete(id);
-    const cleanups = this.#stageLayoutRemoval(id);
+    const staged = this.#stageLayoutRemoval(id);
     for (const registration of [...this.#intersections.get(id) ?? []]) {
-      cleanups.push(...this.#stageIntersectionRemoval(registration));
+      staged.cleanups.push(...this.#stageIntersectionRemoval(registration));
     }
-    cleanups.push(() => this.#cancelControllerJobs(controller));
-    this.#runTerminalCleanup(cleanups);
+    staged.retirements.push(() => this.#cancelControllerJobs(controller));
+    this.#runTerminalCleanup([...staged.retirements, ...staged.cleanups]);
   }
 
   #removeIntersection(registration) {
@@ -832,7 +843,8 @@ class SharedDocumentResources {
     }
 
     const prior = this.#layouts.get(id);
-    const token = renewToken ? {} : controller.token;
+    const controllerToken = renewToken ? {} : controller.token;
+    const layoutToken = {};
     const mutationRoot = options.mutationRoot ?? this.#doc;
     const mutationHost = options.mutationHost ?? null;
     const readLayoutDependencies = typeof options.layoutDependencies === 'function'
@@ -870,13 +882,14 @@ class SharedDocumentResources {
         note,
         onError,
         prepare,
+        queueKey: { channel: 'internal:layout', id, layout: true },
         apply,
         read,
         readLayoutDependencies,
         record,
         resizeTargets: this.#discoverResizeTargets(record, note, layoutDependencies),
         scrollTargets: this.#discoverScrollTargets(record, layoutDependencies),
-        token,
+        token: layoutToken,
         write,
       };
       rollbackTargets = this.#replaceDependencyTargets(
@@ -891,6 +904,10 @@ class SharedDocumentResources {
       assertCurrent();
       dependencyChange.commit();
       assertCurrent();
+      if (prior !== undefined) {
+        this.#frameQueue.cancel(prior.queueKey);
+        assertCurrent();
+      }
     } catch (cause) {
       rollbackOperations([
         ...(dependencyChange === null ? [] : [dependencyChange.rollback]),
@@ -900,7 +917,7 @@ class SharedDocumentResources {
     if (renewToken) {
       this.#cancelControllerJobs(controller);
       assertCurrent();
-      controller.token = token;
+      controller.token = controllerToken;
     }
     this.#layouts.set(id, binding);
 
@@ -910,7 +927,7 @@ class SharedDocumentResources {
         return;
       }
       unsubscribed = true;
-      if (this.#layouts.get(id)?.token === binding.token) {
+      if (this.#layouts.get(id) === binding) {
         this.#removeLayout(id);
       }
     };
@@ -1048,11 +1065,12 @@ class SharedDocumentResources {
   #refreshLayoutDependencies(binding) {
     if (binding.readLayoutDependencies === null) return;
     const controller = this.#controllers.get(binding.id);
+    const operationToken = controller?.token;
     const isCurrent = () => this.#layoutOperationIsCurrent(
       binding.id,
       controller,
       binding.generation,
-      binding.token,
+      operationToken,
       binding,
     );
     const assertCurrent = () => {
@@ -1313,21 +1331,14 @@ class SharedDocumentResources {
   }
 
   #removeLayout(id) {
-    const controller = this.#controllers.get(id);
-    const cleanups = this.#stageLayoutRemoval(id);
-    const layoutKey = controller?.queueKeys.get('internal:layout');
-    if (layoutKey !== undefined) {
-      cleanups.push(() => {
-        if (!this.#layouts.has(id)) this.#frameQueue.cancel(layoutKey);
-      });
-    }
-    this.#runTerminalCleanup(cleanups);
+    const staged = this.#stageLayoutRemoval(id);
+    this.#runTerminalCleanup([...staged.retirements, ...staged.cleanups]);
   }
 
   #stageLayoutRemoval(id) {
     const binding = this.#layouts.get(id);
     if (binding === undefined) {
-      return [];
+      return { cleanups: [], retirements: [] };
     }
     this.#layouts.delete(id);
     const cleanups = [];
@@ -1357,7 +1368,10 @@ class SharedDocumentResources {
         this.#resizeObserver?.unobserve(target);
       });
     }
-    return cleanups;
+    return {
+      cleanups,
+      retirements: [() => this.#frameQueue.cancel(binding.queueKey)],
+    };
   }
 
   #signal(id) {
@@ -1368,12 +1382,11 @@ class SharedDocumentResources {
     const controller = this.#controllers.get(id);
     if (binding === undefined
       || controller === undefined
-      || controller.generation !== binding.generation
-      || controller.token !== binding.token) {
+      || controller.generation !== binding.generation) {
       return;
     }
     this.#frameQueue.enqueue({
-      key: this.#queueKey(controller, id, 'internal:layout'),
+      key: binding.queueKey,
       generation: binding.token,
       prepare: binding.prepare,
       apply: binding.apply,
@@ -1514,10 +1527,13 @@ class SharedDocumentResources {
     }
 
     this.#alive = false;
+    const retirements = [];
     const cleanups = [];
     const controllers = [...this.#controllers.values()];
     for (const id of [...this.#layouts.keys()]) {
-      cleanups.push(...this.#stageLayoutRemoval(id));
+      const staged = this.#stageLayoutRemoval(id);
+      retirements.push(...staged.retirements);
+      cleanups.push(...staged.cleanups);
     }
     for (const registrations of [...this.#intersections.values()]) {
       for (const registration of [...registrations]) {
@@ -1530,7 +1546,7 @@ class SharedDocumentResources {
     this.#resizeTargets.clear();
     this.#scrollTargets.clear();
     for (const controller of controllers) {
-      cleanups.push(() => this.#cancelControllerJobs(controller));
+      retirements.push(() => this.#cancelControllerJobs(controller));
     }
     cleanups.push(() => this.#resizeObserver?.disconnect());
     cleanups.push(() => this.#mutationObserver?.disconnect());
@@ -1558,7 +1574,7 @@ class SharedDocumentResources {
     cleanups.push(() => SharedDocumentResources.detachDefaultPortal(this));
     let failure = null;
     try {
-      this.#runTerminalCleanup(cleanups);
+      this.#runTerminalCleanup([...retirements, ...cleanups]);
     } catch (error) {
       failure = error;
     }

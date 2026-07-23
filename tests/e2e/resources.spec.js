@@ -1821,3 +1821,140 @@ test('mounts the shared root on documentElement when body is not ready without a
 
   expect(result).toEqual({ htmlId: '', mountedOnHtml: true, originalHtmlId: '', overlayId: '' });
 });
+
+test('native mutation and RAF never run a retired layout after its remove callback installs a replacement', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentScheduler } = await import('/src/scheduler.js');
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const frameDocument = frame.contentDocument;
+    const frameWindow = frame.contentWindow;
+    const nativeRequestFrame = frameWindow.requestAnimationFrame.bind(frameWindow);
+    const nativeCancelFrame = frameWindow.cancelAnimationFrame.bind(frameWindow);
+    const canceled = [];
+    frameWindow.requestAnimationFrame = (callback) => {
+      return nativeRequestFrame(callback);
+    };
+    frameWindow.cancelAnimationFrame = (id) => {
+      canceled.push(id);
+      nativeCancelFrame(id);
+    };
+    frameWindow.ResizeObserver = class QuietResizeObserver {
+      observe() {}
+
+      unobserve() {}
+
+      disconnect() {}
+    };
+
+    const scroller = frameDocument.createElement('div');
+    const target = frameDocument.createElement('button');
+    scroller.style.cssText = 'width:240px;height:120px;overflow:auto';
+    target.textContent = 'Queued replacement';
+    scroller.append(target);
+    frameDocument.body.append(scroller);
+    const phases = { old: [], replacement: [] };
+    const id = 'native-queued-replacement';
+    const record = {
+      element: target,
+      kind: 'element',
+      ownerElement: target,
+    };
+    const dependencies = {
+      ancestors: [scroller],
+      hosts: [],
+      preceding: [],
+      roots: [],
+    };
+    const binding = (label) => ({
+      apply(value) {
+        phases[label].push(`apply:${value}`);
+      },
+      generation: 0,
+      id,
+      layoutDependencies: dependencies,
+      onError(error) {
+        phases[label].push(`error:${error.message}`);
+      },
+      prepare() {
+        phases[label].push('prepare');
+        return 'prepared';
+      },
+      read() {
+        phases[label].push('read');
+        return 'read';
+      },
+      record,
+      write(value) {
+        phases[label].push(`write:${value}`);
+      },
+    });
+    const lease = acquireDocumentScheduler(frameDocument);
+    const shared = lease.shared;
+    shared.registerController(id);
+    const unsubscribeOld = shared.observeLayout(binding('old'));
+    await new Promise((resolve) => nativeRequestFrame(() => nativeRequestFrame(resolve)));
+    phases.old.length = 0;
+    canceled.length = 0;
+    let unsubscribeReplacement;
+    let callbackCount = 0;
+    let canceledBeforeCallback = 0;
+    const nativeRemove = scroller.removeEventListener.bind(scroller);
+    scroller.removeEventListener = (type, listener, options) => {
+      const value = nativeRemove(type, listener, options);
+      if (type === 'scroll' && callbackCount === 0) {
+        callbackCount += 1;
+        canceledBeforeCallback = canceled.length;
+        unsubscribeReplacement = shared.observeLayout(binding('replacement'));
+      }
+      return value;
+    };
+
+    target.classList.add('old-mutation');
+    await Promise.resolve();
+    await Promise.resolve();
+    unsubscribeOld();
+    await new Promise((resolve) => nativeRequestFrame(() => nativeRequestFrame(resolve)));
+    const afterOldFrame = {
+      callbackCount,
+      canceled: canceled.length,
+      canceledBeforeCallback,
+      old: [...phases.old],
+      replacement: [...phases.replacement],
+    };
+
+    target.classList.add('replacement-mutation');
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => nativeRequestFrame(() => nativeRequestFrame(resolve)));
+    const afterReplacementFrame = {
+      old: [...phases.old],
+      replacement: [...phases.replacement],
+    };
+
+    unsubscribeReplacement();
+    shared.releaseController(id);
+    lease.release();
+    frame.remove();
+    return { afterOldFrame, afterReplacementFrame };
+  });
+
+  expect(result.afterOldFrame).toEqual({
+    callbackCount: 1,
+    canceled: 1,
+    canceledBeforeCallback: 1,
+    old: [],
+    replacement: [],
+  });
+  expect(result.afterReplacementFrame).toEqual({
+    old: [],
+    replacement: [
+      'prepare',
+      'apply:prepared',
+      'read',
+      'write:read',
+    ],
+  });
+});

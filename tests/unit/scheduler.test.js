@@ -690,7 +690,11 @@ function createDependencyRegistrationHarness(mode) {
   const terminalEvents = [];
   const unobserveCallbacks = new Map();
   const unobserveFailures = new Map();
+  const canceledFrames = [];
+  const frames = [];
   let fail = false;
+  let mutationCallback = null;
+  let nextFrameId = 1;
   let resizeObserver;
   let document;
 
@@ -783,6 +787,10 @@ function createDependencyRegistrationHarness(mode) {
   }
 
   class FakeMutationObserver {
+    constructor(callback) {
+      mutationCallback = callback;
+    }
+
     observe() {}
 
     disconnect() {}
@@ -797,10 +805,15 @@ function createDependencyRegistrationHarness(mode) {
       const overflow = candidate.overflow ? 'auto' : 'visible';
       return { overflowX: overflow, overflowY: overflow };
     },
-    requestAnimationFrame() {
-      return 1;
+    requestAnimationFrame(callback) {
+      const frame = { callback, id: nextFrameId };
+      nextFrameId += 1;
+      frames.push(frame);
+      return frame.id;
     },
-    cancelAnimationFrame() {},
+    cancelAnimationFrame(id) {
+      canceledFrames.push(id);
+    },
     addEventListener(type, listener) {
       if (type === 'scroll') viewListeners.add(listener);
     },
@@ -838,8 +851,13 @@ function createDependencyRegistrationHarness(mode) {
   };
 
   return {
+    canceledFrames,
     cause,
     document,
+    emitMutations(records = [{ target }]) {
+      mutationCallback(records);
+    },
+    frames,
     nextResizeA,
     nextResizeB,
     nextScrollA,
@@ -857,6 +875,9 @@ function createDependencyRegistrationHarness(mode) {
       return resizeObserver;
     },
     resizeEvents,
+    runFrame(index) {
+      frames[index].callback();
+    },
     scrollAddCallbacks,
     scrollRemoveCallbacks,
     setFailure(value) {
@@ -1070,6 +1091,7 @@ for (const reentryPoint of ['first-scroll', 'middle-resize']) {
       ? harness.removeFailures
       : harness.unobserveFailures;
     let releases = 0;
+    let staleReads = 0;
 
     shared.registerController(id);
     shared.observeLayout({
@@ -1077,10 +1099,13 @@ for (const reentryPoint of ['first-scroll', 'middle-resize']) {
       id,
       layoutDependencies: harness.oldDependencies,
       onError() {},
-      read() {},
+      read() {
+        staleReads += 1;
+      },
       record: harness.record,
       write() {},
     });
+    harness.emitMutations();
     callbacks.set(callbackTarget, () => {
       releases += 1;
       lease.release();
@@ -1106,6 +1131,8 @@ for (const reentryPoint of ['first-scroll', 'middle-resize']) {
     assert.equal(harness.oldScrollB.listeners.size, 0);
     assert.equal(harness.resizeObserver().observed.size, 0);
     assert.throws(() => shared.generationFor(id), /not registered|released/u);
+    harness.runFrame(0);
+    assert.equal(staleReads, 0);
   });
 }
 
@@ -1209,6 +1236,176 @@ test('releaseController terminalizes its ID before a native callback registers i
   assert.equal(harness.oldScroll.listeners.size, 0);
   assert.equal(harness.oldScrollB.listeners.size, 0);
   assert.equal(harness.resizeObserver().observed.size, 0);
+});
+
+test('layout teardown retires each queued binding before native callbacks install same-ID replacements', () => {
+  const harness = createDependencyRegistrationHarness('none');
+  const lease = acquireDocumentScheduler(harness.document);
+  const shared = lease.shared;
+  const id = 'terminal-queued-replacements';
+  const phases = {
+    first: [],
+    second: [],
+    third: [],
+  };
+  const binding = (label) => ({
+    apply(value) {
+      phases[label].push(`apply:${value}`);
+    },
+    generation: 0,
+    id,
+    layoutDependencies: harness.oldDependencies,
+    onError(error) {
+      phases[label].push(`error:${error.message}`);
+    },
+    prepare() {
+      phases[label].push('prepare');
+      return 'prepared';
+    },
+    read() {
+      phases[label].push('read');
+      return 'read';
+    },
+    record: harness.record,
+    write(value) {
+      phases[label].push(`write:${value}`);
+    },
+  });
+  let secondUnsubscribe;
+  let thirdUnsubscribe;
+
+  shared.registerController(id);
+  const firstUnsubscribe = shared.observeLayout(binding('first'));
+  harness.emitMutations();
+  assert.equal(harness.frames.length, 1);
+  harness.scrollRemoveCallbacks.set(harness.oldScroll, () => {
+    harness.scrollRemoveCallbacks.delete(harness.oldScroll);
+    secondUnsubscribe = shared.observeLayout(binding('second'));
+  });
+  firstUnsubscribe();
+
+  harness.emitMutations();
+  assert.equal(harness.frames.length, 2);
+  harness.scrollRemoveCallbacks.set(harness.oldScroll, () => {
+    harness.scrollRemoveCallbacks.delete(harness.oldScroll);
+    thirdUnsubscribe = shared.observeLayout(binding('third'));
+  });
+  secondUnsubscribe();
+
+  assert.deepEqual(harness.canceledFrames, [1, 2]);
+  harness.runFrame(0);
+  harness.runFrame(1);
+  assert.deepEqual(phases.first, []);
+  assert.deepEqual(phases.second, []);
+  assert.deepEqual(phases.third, []);
+
+  harness.emitMutations();
+  assert.equal(harness.frames.length, 3);
+  harness.runFrame(2);
+  assert.deepEqual(phases.third, [
+    'prepare',
+    'apply:prepared',
+    'read',
+    'write:read',
+  ]);
+
+  thirdUnsubscribe();
+  shared.releaseController(id);
+  lease.release();
+});
+
+test('layout queue retirement preserves public, peer, and intersection work', () => {
+  const harness = createDependencyRegistrationHarness('none');
+  const lease = acquireDocumentScheduler(harness.document);
+  const shared = lease.shared;
+  const victimId = 'terminal-queue-victim';
+  const peerId = 'terminal-queue-peer';
+  const events = [];
+  let intersection;
+  class FakeIntersectionObserver {
+    constructor(callback) {
+      this.callback = callback;
+      intersection = this;
+    }
+
+    observe() {}
+
+    unobserve() {
+      events.push('intersection:unobserve');
+    }
+
+    disconnect() {
+      events.push('intersection:disconnect');
+    }
+  }
+  harness.document.defaultView.IntersectionObserver = FakeIntersectionObserver;
+  const binding = (id, label, layoutDependencies = harness.oldDependencies) => ({
+    generation: 0,
+    id,
+    layoutDependencies,
+    onError() {},
+    read() {
+      events.push(`read:${label}`);
+      return label;
+    },
+    record: harness.record,
+    write(value) {
+      events.push(`write:${value}`);
+    },
+  });
+
+  shared.registerController(victimId);
+  const victimUnsubscribe = shared.observeLayout(binding(victimId, 'old-victim'));
+  shared.registerController(peerId);
+  shared.observeLayout(binding(peerId, 'peer', harness.nextDependencies));
+  const unsubscribeIntersection = shared.observeIntersection({
+    id: victimId,
+    onEnter() {
+      events.push('intersection:enter');
+    },
+    onExit() {},
+    onUnavailable() {},
+    target: harness.record.element,
+    threshold: 0,
+  });
+  shared.enqueue({
+    generation: 0,
+    id: victimId,
+    read() {
+      events.push('read:public');
+      return 'public';
+    },
+    write(value) {
+      events.push(`write:${value}`);
+    },
+  });
+  harness.emitMutations();
+  harness.scrollRemoveCallbacks.set(harness.oldScroll, () => {
+    harness.scrollRemoveCallbacks.delete(harness.oldScroll);
+    shared.observeLayout(binding(victimId, 'replacement'));
+  });
+
+  victimUnsubscribe();
+  assert.deepEqual(harness.canceledFrames, []);
+  harness.runFrame(0);
+  intersection.callback([{
+    intersectionRatio: 1,
+    isIntersecting: true,
+    target: harness.record.element,
+  }]);
+
+  assert.deepEqual(events, [
+    'read:public',
+    'read:peer',
+    'write:public',
+    'write:peer',
+    'intersection:enter',
+  ]);
+
+  unsubscribeIntersection();
+  shared.releaseController(victimId);
+  shared.releaseController(peerId);
+  lease.release();
 });
 
 for (const registrationMode of ['scroll', 'resize']) {
