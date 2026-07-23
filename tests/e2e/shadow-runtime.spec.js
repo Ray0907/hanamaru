@@ -943,9 +943,24 @@ test('standalone scan intrinsically rejects masked open closed and iframe Shadow
     const documentScan = scan(document);
     const forged = document.body.appendChild(document.createElement('div'));
     const forgedPrototype = Object.create(Object.getPrototypeOf(forged));
+    let forgedGetterCalls = 0;
+    let forgedToStringCalls = 0;
+    const forgedGetter = function hostGetter() {
+      forgedGetterCalls += 1;
+      return state.openHost;
+    };
+    const forgedFunctionPrototype = Object.create(Object.getPrototypeOf(forgedGetter));
+    Object.defineProperty(forgedFunctionPrototype, 'toString', {
+      configurable: true,
+      value() {
+        forgedToStringCalls += 1;
+        return 'function get host() { [native code] }';
+      },
+    });
+    Object.setPrototypeOf(forgedGetter, forgedFunctionPrototype);
     Object.defineProperty(forgedPrototype, 'host', {
       configurable: true,
-      get() { return state.openHost; },
+      get: forgedGetter,
     });
     Object.setPrototypeOf(forged, forgedPrototype);
     const forgedScan = scan(forged);
@@ -989,6 +1004,8 @@ test('standalone scan intrinsically rejects masked open closed and iframe Shadow
       forgedScan: {
         annotations: forgedScan.annotations.length,
         errors: forgedScan.errors.length,
+        getterCalls: forgedGetterCalls,
+        toStringCalls: forgedToStringCalls,
       },
       failures,
       resourcesAfterStandalone,
@@ -1000,7 +1017,12 @@ test('standalone scan intrinsically rejects masked open closed and iframe Shadow
 
   expect(result).toEqual({
     documentScan: { annotations: 0, errors: 0 },
-    forgedScan: { annotations: 0, errors: 0 },
+    forgedScan: {
+      annotations: 0,
+      errors: 0,
+      getterCalls: 0,
+      toStringCalls: 0,
+    },
     failures: [
       {
         name: 'HanamaruTargetError',

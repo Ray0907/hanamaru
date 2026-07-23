@@ -4,6 +4,62 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/tests/fixtures/scan.html');
 });
 
+test('standalone scan rejects a native ShadowRoot in every browser engine', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const api = await import('/dist/hanamaru.esm.js');
+    const host = document.body.appendChild(document.createElement('div'));
+    const closedHost = document.body.appendChild(document.createElement('div'));
+    const frame = document.body.appendChild(document.createElement('iframe'));
+    const frameHost = frame.contentDocument.body.appendChild(
+      frame.contentDocument.createElement('div'),
+    );
+    const roots = [
+      host.attachShadow({ mode: 'open' }),
+      closedHost.attachShadow({ mode: 'closed' }),
+      frameHost.attachShadow({ mode: 'open' }),
+    ];
+    const failures = [];
+    for (const root of roots) {
+      try {
+        api.scan(root);
+      } catch (error) {
+        failures.push({
+          typed: error instanceof api.HanamaruTargetError,
+          code: error.code,
+        });
+      }
+    }
+    const output = {
+      failures,
+      overlays: document.querySelectorAll('[data-hana-overlay]').length,
+      owned: document.querySelectorAll('[data-hana-id]').length,
+    };
+    frame.remove();
+    closedHost.remove();
+    host.remove();
+    return output;
+  });
+
+  expect(result).toEqual({
+    failures: [
+      {
+        typed: true,
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+      {
+        typed: true,
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+      {
+        typed: true,
+        code: 'HANA_TARGET_SHADOW_UNSCOPED',
+      },
+    ],
+    overlays: 0,
+    owned: 0,
+  });
+});
+
 test('ESM and IIFE require explicit scan and isolate invalid siblings', async ({ page }) => {
   const esm = await page.evaluate(async () => {
     const api = await import('/dist/hanamaru.esm.js');

@@ -39,30 +39,35 @@ function methodReader(prototype, key) {
   return (value, ...args) => Reflect.apply(method, value, args);
 }
 
+function captureGetter(constructor, key) {
+  if (typeof constructor !== 'function') return null;
+  const getter = Object.getOwnPropertyDescriptor(constructor.prototype, key)?.get;
+  return typeof getter === 'function' ? getter : null;
+}
+
+const intrinsicOwnerDocument = captureGetter(globalThis.Node, 'ownerDocument');
+const intrinsicDefaultView = captureGetter(globalThis.Document, 'defaultView');
+const intrinsicShadowHost = captureGetter(globalThis.ShadowRoot, 'host');
+
 function initialOwnerDocument(value) {
-  return propertyReader(Object.getPrototypeOf(value), 'ownerDocument')(value);
+  if (intrinsicOwnerDocument === null) {
+    throw new TypeError('Native Node ownerDocument getter is unavailable');
+  }
+  return Reflect.apply(intrinsicOwnerDocument, value, []);
 }
 
 function initialDefaultView(document) {
-  return propertyReader(Object.getPrototypeOf(document), 'defaultView')(document);
+  if (intrinsicDefaultView === null) {
+    throw new TypeError('Native Document defaultView getter is unavailable');
+  }
+  return Reflect.apply(intrinsicDefaultView, document, []);
 }
 
 function initialShadowHost(root) {
-  let prototype = Object.getPrototypeOf(root);
-  while (prototype !== null) {
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'host');
-    if (typeof descriptor?.get === 'function') {
-      const source = methodReader(
-        Object.getPrototypeOf(descriptor.get),
-        'toString',
-      )(descriptor.get);
-      if (source === 'function get host() { [native code] }') {
-        return Reflect.apply(descriptor.get, root, []);
-      }
-    }
-    prototype = Object.getPrototypeOf(prototype);
+  if (intrinsicShadowHost === null) {
+    throw new TypeError('Native ShadowRoot host getter is unavailable');
   }
-  throw new TypeError('Root is not a native ShadowRoot');
+  return Reflect.apply(intrinsicShadowHost, root, []);
 }
 
 export function isNativeShadowRoot(root) {
