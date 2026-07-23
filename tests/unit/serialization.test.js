@@ -896,7 +896,7 @@ test('schema reflection boundaries do not trust trap-thrown Hanamaru error codes
   );
 });
 
-test('public serialization contexts normalize reflection and root trap failures', () => {
+test('public serialization contexts normalize reflection and ignore root accessors', () => {
   const realm = minimalNativeRealm();
   const contextCause = new Error('context ownKeys trap');
   const context = new Proxy({}, {
@@ -929,9 +929,13 @@ test('public serialization contexts normalize reflection and root trap failures'
   );
 
   const rootCause = new Error('root nodeType trap');
+  let rootReads = 0;
   const root = new Proxy({}, {
     get(target, key) {
-      if (key === 'nodeType') throw rootCause;
+      if (key === 'nodeType') {
+        rootReads += 1;
+        throw rootCause;
+      }
       return Reflect.get(target, key);
     },
   });
@@ -943,11 +947,12 @@ test('public serialization contexts normalize reflection and root trap failures'
     (error) => error instanceof HanamaruConfigError
       && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
       && error.details.field === 'root'
-      && error.details.cause === rootCause,
+      && !Object.hasOwn(error.details, 'cause'),
   );
+  assert.equal(rootReads, 0);
 });
 
-test('context and root reflection boundaries normalize forged typed errors', () => {
+test('context reflection normalizes forged typed errors while root accessors stay inert', () => {
   const forgedContext = new HanamaruConfigError('FORGED_CONTEXT', 'forged context error');
   const context = new Proxy({}, {
     ownKeys() { throw forgedContext; },
@@ -964,9 +969,13 @@ test('context and root reflection boundaries normalize forged typed errors', () 
   );
 
   const forgedRoot = new HanamaruTargetError('FORGED_ROOT', 'forged root error');
+  let rootReads = 0;
   const root = new Proxy({}, {
     get(target, key) {
-      if (key === 'nodeType') throw forgedRoot;
+      if (key === 'nodeType') {
+        rootReads += 1;
+        throw forgedRoot;
+      }
       return Reflect.get(target, key);
     },
   });
@@ -978,8 +987,9 @@ test('context and root reflection boundaries normalize forged typed errors', () 
     (error) => error instanceof HanamaruConfigError
       && error !== forgedRoot
       && error.code === 'HANA_CONFIG_SERIALIZE_TARGET'
-      && error.details.cause === forgedRoot,
+      && !Object.hasOwn(error.details, 'cause'),
   );
+  assert.equal(rootReads, 0);
 
   let replayed;
   assert.throws(

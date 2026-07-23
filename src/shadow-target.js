@@ -58,20 +58,27 @@ function serverHarnessDataProperty(value, key) {
     return undefined;
   }
   try {
-    let current = value;
-    while (current !== null) {
-      const descriptor = Object.getOwnPropertyDescriptor(current, key);
-      if (descriptor !== undefined) {
-        return Object.hasOwn(descriptor, 'value')
-          ? descriptor.value
-          : undefined;
-      }
-      current = Object.getPrototypeOf(current);
-    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && Object.hasOwn(descriptor, 'value')
+      ? descriptor.value
+      : undefined;
   } catch {
     return undefined;
   }
-  return undefined;
+}
+
+function serverHarnessMethod(value, key) {
+  if (typeof globalThis.window !== 'undefined'
+    || value === null
+    || (typeof value !== 'object' && typeof value !== 'function')) {
+    return undefined;
+  }
+  try {
+    const method = prototypeDescriptor(value, key)?.value;
+    return typeof method === 'function' ? method : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 let ownerDocumentGetter = null;
@@ -141,7 +148,7 @@ export function intrinsicDocumentView(document) {
 export function intrinsicRootForNode(value) {
   captureMissingDomIntrinsics();
   if (getRootNodeMethod === null) {
-    const fallback = serverHarnessDataProperty(value, 'getRootNode');
+    const fallback = serverHarnessMethod(value, 'getRootNode');
     if (typeof fallback !== 'function') return null;
     try {
       return Reflect.apply(fallback, value, []);
@@ -181,10 +188,10 @@ export function intrinsicRootKind(root) {
     && defaultViewGetter === null
     && nodeTypeGetter === null
     && typeof globalThis.window === 'undefined') {
-    const nodeType = root?.nodeType;
+    const nodeType = serverHarnessDataProperty(root, 'nodeType');
     if (nodeType === 9) return 'document';
     if (nodeType === 11) {
-      return root?.host === undefined
+      return serverHarnessDataProperty(root, 'host') === undefined
         ? 'document-fragment'
         : 'shadow-root';
     }

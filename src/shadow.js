@@ -21,6 +21,7 @@ import { acquireShadowResources } from './shadow-resources.js';
 import { acquireShadowStyles } from './shadow-styles.js';
 import {
   assertShadowRoot,
+  intrinsicDocumentView,
   resolveShadowTarget,
 } from './shadow-target.js';
 import {
@@ -309,7 +310,7 @@ export function createShadowScope(root, optionsInput = undefined) {
     return register(
       annotateSelectionWithEnvironment(rawOptions, selection, {
         root,
-        view: resources.view ?? resources.document.defaultView,
+        view: resources.view ?? intrinsicDocumentView(resources.document),
         createAnnotation(range, options) {
           return createAnnotation(range, options, annotationEnvironment());
         },

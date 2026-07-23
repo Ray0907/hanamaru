@@ -15,6 +15,7 @@ import {
 } from './controller-metadata.js';
 import { acquireDocumentResources } from './scheduler.js';
 import {
+  intrinsicDocumentView,
   intrinsicOwnerDocumentOf,
   intrinsicRootForNode,
   intrinsicRootKind,
@@ -220,9 +221,7 @@ export function createGroupEnvironmentWithResources({
 }) {
   if (resources === null || typeof resources !== 'object'
     || resources.root !== root
-    || resources.document !== (
-      intrinsicOwnerDocumentOf(root) ?? root?.ownerDocument
-    )
+    || resources.document !== intrinsicOwnerDocumentOf(root)
     || typeof resources.allocateId !== 'function'
     || typeof resources.createEvent !== 'function'
     || resources.lease === null
@@ -233,7 +232,7 @@ export function createGroupEnvironmentWithResources({
     throw new TypeError('group target resolver must be a function');
   }
   const doc = resources.document;
-  const view = resources.view ?? doc.defaultView;
+  const view = resources.view ?? intrinsicDocumentView(doc);
   const memberErrors = new WeakMap();
   let memberErrorObserver = null;
   return {

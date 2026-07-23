@@ -1936,6 +1936,7 @@ test('scope factories use authenticated resource snapshots after DOM properties 
       },
     };
     let rootReads = 0;
+    let nodeTypeReads = 0;
     let viewReads = 0;
     Object.defineProperty(root, 'ownerDocument', {
       configurable: true,
@@ -1949,6 +1950,13 @@ test('scope factories use authenticated resource snapshots after DOM properties 
       get() {
         viewReads += 1;
         throw new Error('poisoned Document.defaultView');
+      },
+    });
+    Object.defineProperty(document, 'nodeType', {
+      configurable: true,
+      get() {
+        nodeTypeReads += 1;
+        throw new Error('poisoned Document.nodeType');
       },
     });
 
@@ -1993,12 +2001,14 @@ test('scope factories use authenticated resource snapshots after DOM properties 
 
     delete root.ownerDocument;
     delete document.defaultView;
+    delete document.nodeType;
     selection.removeAllRanges();
     for (const controller of controllers) controller.destroy();
     scope.destroy();
     return {
       outcomes,
       capturedView,
+      nodeTypeReads,
       rootReads,
       viewReads,
       portals: document.querySelectorAll('[data-hana-shadow-overlay]').length,
@@ -2014,6 +2024,7 @@ test('scope factories use authenticated resource snapshots after DOM properties 
       selection: { ok: true, state: 'idle' },
       restore: { ok: true, state: 'idle' },
     },
+    nodeTypeReads: 0,
     rootReads: 0,
     viewReads: 0,
     portals: 0,

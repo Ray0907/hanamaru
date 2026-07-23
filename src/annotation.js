@@ -23,6 +23,7 @@ import {
 import { runtimeState } from './runtime-state.js';
 import { acquireDocumentResources } from './scheduler.js';
 import {
+  intrinsicDocumentView,
   intrinsicOwnerDocumentOf,
   intrinsicRootForNode,
   intrinsicRootKind,
@@ -375,9 +376,10 @@ function createDomAnnotationEnvironment({
   createErrorEvent,
   resolveCandidate,
 }) {
-  const win = view ?? doc?.defaultView;
+  const win = view ?? intrinsicDocumentView(doc);
   if (doc === null || typeof doc !== 'object'
-    || doc.nodeType !== 9 || win === null || typeof win !== 'object') {
+    || intrinsicRootKind(doc) !== 'document'
+    || win === null || typeof win !== 'object') {
     throw new TypeError('annotation document must be a Document with a browsing context');
   }
 
@@ -450,9 +452,7 @@ export function createAnnotationEnvironmentWithResources({
 }) {
   if (resources === null || typeof resources !== 'object'
     || resources.root !== root
-    || resources.document !== (
-      intrinsicOwnerDocumentOf(root) ?? root?.ownerDocument
-    )
+    || resources.document !== intrinsicOwnerDocumentOf(root)
     || typeof resources.allocateId !== 'function'
     || typeof resources.createEvent !== 'function'
     || resources.lease === null

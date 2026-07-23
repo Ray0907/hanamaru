@@ -979,6 +979,48 @@ test('scoped controller environments reject foreign resources before allocating 
   assert.equal(allocations, 0);
 });
 
+test('scoped controller environments reject accessor-only root ownership without invoking it', () => {
+  const cause = new Error('ownerDocument accessor must not run');
+  let ownerDocumentReads = 0;
+  let allocations = 0;
+  const shadow = {};
+  Object.defineProperty(shadow, 'ownerDocument', {
+    get() {
+      ownerDocumentReads += 1;
+      throw cause;
+    },
+  });
+  const resources = {
+    root: shadow,
+    document: { defaultView: {}, nodeType: 9 },
+    lease: { shared: {}, release() {} },
+    allocateId() {
+      allocations += 1;
+      return 'must-not-allocate';
+    },
+    createEvent() {},
+  };
+
+  for (const create of [
+    createAnnotationEnvironmentWithResources,
+    createStoryEnvironmentWithResources,
+    createGroupEnvironmentWithResources,
+  ]) {
+    assert.throws(
+      () => create({
+        root: shadow,
+        resources,
+        resolveTarget() {},
+      }),
+      (error) => error instanceof TypeError
+        && error !== cause
+        && /exact injected root/u.test(error.message),
+    );
+  }
+  assert.equal(ownerDocumentReads, 0);
+  assert.equal(allocations, 0);
+});
+
 test('scoped restore and serialized entrypoints preflight before controller creation with exact contexts', () => {
   const calls = [];
   const controller = { destroy() {} };
