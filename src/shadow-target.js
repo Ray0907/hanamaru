@@ -315,7 +315,9 @@ export function shadowDomIntrinsics(root) {
   return Object.freeze({
     document: context.document,
     host: context.readers.host(context.root),
-    layoutDependencies: shadowLayoutDependencies(context),
+    layoutDependencies() {
+      return shadowLayoutDependencies(context);
+    },
     view: context.realm,
     assertElement(element) {
       assertExactElement(element, context);

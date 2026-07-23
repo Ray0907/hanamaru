@@ -742,8 +742,11 @@ class SharedDocumentResources {
     const token = renewToken ? {} : controller.token;
     const mutationRoot = options.mutationRoot ?? this.#doc;
     const mutationHost = options.mutationHost ?? null;
+    const readLayoutDependencies = typeof options.layoutDependencies === 'function'
+      ? options.layoutDependencies
+      : null;
     const layoutDependencies = this.#discoverLayoutDependencies(
-      options.layoutDependencies,
+      readLayoutDependencies?.() ?? options.layoutDependencies,
     );
     const binding = {
       generation,
@@ -757,6 +760,7 @@ class SharedDocumentResources {
       prepare,
       apply,
       read,
+      readLayoutDependencies,
       record,
       resizeTargets: this.#discoverResizeTargets(record, note, layoutDependencies),
       scrollTargets: this.#discoverScrollTargets(record, layoutDependencies),
@@ -867,6 +871,48 @@ class SharedDocumentResources {
     return mutationRoot;
   }
 
+  #mutationMatches(binding, record, mutationRoot, mutationHost) {
+    const internal = binding.mutationRoot === mutationRoot
+      && (record.target === mutationHost
+        || binding.mutationScope === mutationRoot
+        || record.target === binding.mutationScope
+        || binding.mutationScope.contains?.(record.target)
+        || (mutationRoot !== this.#doc
+          && record.target.contains?.(binding.mutationScope)));
+    const external = binding.mutationRoot !== this.#doc
+      && (binding.layoutDependencies.exactMutations.has(record.target)
+        || [...binding.layoutDependencies.subtreeMutations].some((dependency) => (
+          dependency === record.target || dependency.contains?.(record.target)
+        )));
+    return internal || external;
+  }
+
+  #refreshLayoutDependencies(binding) {
+    if (binding.readLayoutDependencies === null) return;
+    const layoutDependencies = this.#discoverLayoutDependencies(
+      binding.readLayoutDependencies(),
+    );
+    const mutationScope = this.#discoverMutationScope(
+      binding.record,
+      binding.mutationRoot,
+    );
+    const resizeTargets = this.#discoverResizeTargets(
+      binding.record,
+      binding.note,
+      layoutDependencies,
+    );
+    const scrollTargets = this.#discoverScrollTargets(
+      binding.record,
+      layoutDependencies,
+    );
+    this.#diffScrollTargets(binding.id, binding.scrollTargets, scrollTargets);
+    this.#diffResizeTargets(binding.id, binding.resizeTargets, resizeTargets);
+    binding.layoutDependencies = layoutDependencies;
+    binding.mutationScope = mutationScope;
+    binding.resizeTargets = resizeTargets;
+    binding.scrollTargets = scrollTargets;
+  }
+
   #signalMutations(records, mutationRoot, mutationHost = null) {
     if (!this.#alive) {
       return;
@@ -874,6 +920,7 @@ class SharedDocumentResources {
 
     const ignoredPortals = resourceInternals.get(this)?.ignoredPortals ?? new Set();
     const ids = new Set();
+    const refreshed = new Set();
     for (const record of records) {
       let ignored = false;
       for (const portal of ignoredPortals) {
@@ -885,21 +932,19 @@ class SharedDocumentResources {
       if (ignored) continue;
 
       for (const binding of this.#layouts.values()) {
-        const internal = binding.mutationRoot === mutationRoot
-          && (record.target === mutationHost
-            || binding.mutationScope === mutationRoot
-            || record.target === binding.mutationScope
-            || binding.mutationScope.contains?.(record.target)
-            || (mutationRoot !== this.#doc
-              && record.target.contains?.(binding.mutationScope)));
-        const external = binding.mutationRoot !== this.#doc
-          && (binding.layoutDependencies.exactMutations.has(record.target)
-            || [...binding.layoutDependencies.subtreeMutations].some((dependency) => (
-              dependency === record.target || dependency.contains?.(record.target)
-            )));
-        if (internal || external) {
-          ids.add(binding.id);
+        if (!this.#mutationMatches(binding, record, mutationRoot, mutationHost)) {
+          continue;
         }
+        if (!refreshed.has(binding.id)) {
+          try {
+            this.#refreshLayoutDependencies(binding);
+          } catch (error) {
+            binding.onError?.(error);
+            continue;
+          }
+          refreshed.add(binding.id);
+        }
+        ids.add(binding.id);
       }
     }
     for (const id of ids) {

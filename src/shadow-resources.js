@@ -18,6 +18,8 @@ import { assertShadowStyleLease } from './shadow-styles.js';
 import { shadowDomIntrinsics } from './shadow-target.js';
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+const MIRROR_CLASS = 'hana-shadow-mirror';
+const MIRROR_MARKER = 'data-hana-shadow-mirror';
 
 function stateError(cause, details = {}) {
   return new HanamaruStateError(
@@ -63,6 +65,29 @@ function createPortal(document, root, rootId) {
   };
 }
 
+function observeMutationRoots(observer, host, roots) {
+  for (const observedRoot of roots) {
+    observer.observe(observedRoot, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: [
+        'class',
+        'style',
+        'hidden',
+        'id',
+        MIRROR_MARKER,
+        'aria-describedby',
+      ],
+    });
+  }
+  observer.observe(host, {
+    attributes: true,
+    attributeFilter: ['class', 'style', 'hidden', 'aria-describedby'],
+  });
+}
+
 function createMutationObserver(root, host, notify, roots = [root]) {
   const Observer = root.ownerDocument.defaultView.MutationObserver;
   if (typeof Observer !== 'function') {
@@ -70,19 +95,7 @@ function createMutationObserver(root, host, notify, roots = [root]) {
   }
   const observer = new Observer(notify);
   try {
-    for (const observedRoot of roots) {
-      observer.observe(observedRoot, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-        attributes: true,
-        attributeFilter: ['class', 'style', 'hidden', 'aria-describedby'],
-      });
-    }
-    observer.observe(host, {
-      attributes: true,
-      attributeFilter: ['class', 'style', 'hidden', 'aria-describedby'],
-    });
+    observeMutationRoots(observer, host, roots);
   } catch (error) {
     try { observer.disconnect(); } catch {}
     throw error;
@@ -100,12 +113,97 @@ function createMutationObserver(root, host, notify, roots = [root]) {
 
 function createMirror(root, id, text) {
   const mirror = root.ownerDocument.createElement('span');
-  mirror.className = 'hana-shadow-mirror';
-  mirror.setAttribute('data-hana-shadow-mirror', '');
+  mirror.className = MIRROR_CLASS;
+  mirror.setAttribute(MIRROR_MARKER, '');
   mirror.id = id;
   mirror.textContent = text;
   root.append(mirror);
   return mirror;
+}
+
+function markedElements(node) {
+  if (node === null || typeof node !== 'object') return [];
+  const marked = [];
+  if (node.nodeType === 1 && node.hasAttribute?.(MIRROR_MARKER)) {
+    marked.push(node);
+  }
+  if (typeof node.querySelectorAll === 'function') {
+    marked.push(...node.querySelectorAll(`[${MIRROR_MARKER}]`));
+  }
+  return marked;
+}
+
+function recordContainsAlias(record, aliases) {
+  const target = record.target;
+  for (const alias of aliases) {
+    if (target === alias || alias.contains?.(target)) return true;
+  }
+  if (record.type !== 'childList') return false;
+  for (const node of [...record.addedNodes, ...record.removedNodes]) {
+    for (const alias of aliases) {
+      if (node === alias || node.contains?.(alias)) return true;
+    }
+  }
+  return false;
+}
+
+function isOwnedMirrorMutation(root, record, entries) {
+  const ownedIds = new Set(entries.map((entry) => entry.id));
+  for (const entry of entries) {
+    if (record.type === 'attributes'
+      && record.attributeName === 'aria-describedby'
+      && record.target === entry.owner) {
+      return true;
+    }
+    if (recordContainsAlias(record, entry.aliases)) return true;
+  }
+  if (record.type !== 'childList') return false;
+  for (const node of [...record.addedNodes, ...record.removedNodes]) {
+    if (markedElements(node).some((mirror) => ownedIds.has(mirror.id))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function reconcileMirror(root, mirror, id, text, records, ownedIds) {
+  const addedMarked = [];
+  let removedCurrent = false;
+  for (const record of records) {
+    if (record.type !== 'childList') continue;
+    for (const node of record.removedNodes) {
+      if (node === mirror || node.contains?.(mirror)) removedCurrent = true;
+    }
+    for (const node of record.addedNodes) {
+      addedMarked.push(...markedElements(node));
+    }
+  }
+
+  const rootMarked = [...root.querySelectorAll(`[${MIRROR_MARKER}]`)];
+  const exact = rootMarked.filter((candidate) => candidate.id === id);
+  const replacement = removedCurrent
+    ? addedMarked.filter((candidate) => (
+      candidate.getRootNode() === root
+      && (candidate.id === id || !ownedIds.has(candidate.id))
+    ))
+    : [];
+  let current = mirror.getRootNode() === root
+    ? mirror
+    : (exact[0] ?? replacement[0] ?? mirror);
+  if (current.getRootNode() !== root) root.append(current);
+
+  const ownedCandidates = new Set([
+    ...exact,
+    ...replacement,
+  ]);
+  for (const candidate of ownedCandidates) {
+    if (candidate !== current) candidate.remove();
+  }
+  if (current.className !== MIRROR_CLASS) current.className = MIRROR_CLASS;
+  if (!current.hasAttribute(MIRROR_MARKER)) current.setAttribute(MIRROR_MARKER, '');
+  if (current.id !== id) current.id = id;
+  if (current.textContent !== text) current.textContent = text;
+  return current;
 }
 
 function releaseRawRecord(raw) {
@@ -122,6 +220,7 @@ function releaseRawRecord(raw) {
 
 function browserAdapter() {
   const roots = new WeakMap();
+  const mutationObservers = new WeakMap();
   const contextFor = (root) => {
     const context = roots.get(root);
     if (context === undefined) {
@@ -141,7 +240,7 @@ function browserAdapter() {
       return contextFor(root).host;
     },
     layoutDependenciesForRoot(root) {
-      return contextFor(root).layoutDependencies;
+      return contextFor(root).layoutDependencies();
     },
     viewForRoot(root) {
       return contextFor(root).view;
@@ -156,12 +255,46 @@ function browserAdapter() {
       releaseRawRecord(raw);
     },
     createMutationObserver(root, notify, layoutDependencies) {
-      return createMutationObserver(
+      const installation = createMutationObserver(
         root,
         contextFor(root).host,
         notify,
         layoutDependencies.roots,
       );
+      mutationObservers.set(installation.observer, {
+        host: contextFor(root).host,
+        roots: [...layoutDependencies.roots],
+      });
+      return {
+        observer: installation.observer,
+        release() {
+          mutationObservers.delete(installation.observer);
+          installation.release();
+        },
+      };
+    },
+    updateMutationObserverRoots(_root, observer, layoutDependencies) {
+      const state = mutationObservers.get(observer);
+      if (state === undefined) {
+        throw new TypeError('Unknown Shadow root MutationObserver');
+      }
+      const nextRoots = [...layoutDependencies.roots];
+      if (nextRoots.length === state.roots.length
+        && nextRoots.every((candidate, index) => candidate === state.roots[index])) {
+        return;
+      }
+      const previousRoots = state.roots;
+      observer.disconnect();
+      try {
+        observeMutationRoots(observer, state.host, nextRoots);
+        state.roots = nextRoots;
+      } catch (error) {
+        try {
+          observer.disconnect();
+          observeMutationRoots(observer, state.host, previousRoots);
+        } catch {}
+        throw error;
+      }
     },
     rollbackObserver(_root, raw) {
       releaseRawRecord(raw);
@@ -170,16 +303,11 @@ function browserAdapter() {
     updateMirror(mirror, text) {
       mirror.textContent = text;
     },
-    ensureMirror(root, mirror, id, text) {
-      if (mirror.getRootNode() !== root) root.append(mirror);
-      if (mirror.className !== 'hana-shadow-mirror') {
-        mirror.className = 'hana-shadow-mirror';
-      }
-      if (!mirror.hasAttribute('data-hana-shadow-mirror')) {
-        mirror.setAttribute('data-hana-shadow-mirror', '');
-      }
-      if (mirror.id !== id) mirror.id = id;
-      if (mirror.textContent !== text) mirror.textContent = text;
+    ensureMirror(root, mirror, id, text, records = [], ownedIds = new Set([id])) {
+      return reconcileMirror(root, mirror, id, text, records, ownedIds);
+    },
+    isOwnedMirrorMutation(root, record, entries) {
+      return isOwnedMirrorMutation(root, record, entries);
     },
     removeMirror(mirror) {
       mirror.remove();
@@ -278,7 +406,7 @@ function rollbackRaw(activeAdapter, method, context, raw, install) {
   return releaseRawRecord(raw);
 }
 
-function createScopedShared(documentShared, root, host, portal, layoutDependencies) {
+function createScopedShared(documentShared, root, host, portal, readLayoutDependencies) {
   const methodCache = new Map();
   const local = {
     noteLayer: portal.noteLayer,
@@ -294,7 +422,7 @@ function createScopedShared(documentShared, root, host, portal, layoutDependenci
         if (!methodCache.has(key)) {
           methodCache.set(key, (options) => documentShared.observeLayout({
             ...options,
-            layoutDependencies,
+            layoutDependencies: readLayoutDependencies,
             mutationHost: host,
             mutationRoot: root,
           }));
@@ -305,7 +433,7 @@ function createScopedShared(documentShared, root, host, portal, layoutDependenci
         if (!methodCache.has(key)) {
           methodCache.set(key, (id, options) => documentShared.rebindLayout(id, {
             ...options,
-            layoutDependencies,
+            layoutDependencies: readLayoutDependencies,
             mutationHost: host,
             mutationRoot: root,
           }));
@@ -450,11 +578,13 @@ function environmentFor(record) {
       throw new TypeError('mirror text must be a string');
     }
     const entry = {
+      aliases: new Set(),
+      cleanedMirrors: new Set(),
       descriptionCleaned: false,
       id: null,
       mirror: null,
-      mirrorCleaned: false,
       owner,
+      text,
     };
     pendingMirrors.add(entry);
     try {
@@ -469,6 +599,7 @@ function environmentFor(record) {
         || (typeof entry.mirror !== 'object' && typeof entry.mirror !== 'function')) {
         throw new TypeError('mirror creation returned an invalid node');
       }
+      entry.aliases.add(entry.mirror);
       assertOperation(token, operation);
       writeDescriptionDuringOperation(
         owner,
@@ -493,7 +624,8 @@ function environmentFor(record) {
   function updateOwnedMirror(mirror, text) {
     const operation = 'update mirror';
     const token = beginOperation(operation);
-    if (!mirrors.has(mirror)) {
+    const entry = mirrors.get(mirror);
+    if (entry === undefined) {
       endOperation(token);
       throw new TypeError('mirror must be an active owned mirror');
     }
@@ -502,8 +634,9 @@ function environmentFor(record) {
       throw new TypeError('mirror text must be a string');
     }
     try {
-      adapter.updateMirror(mirror, text);
+      adapter.updateMirror(entry.mirror, text);
       assertOperation(token, operation);
+      entry.text = text;
     } catch (error) {
       throw operationError(error, operation);
     } finally {
@@ -511,7 +644,7 @@ function environmentFor(record) {
     }
   }
 
-  function ensureOwnedMirror(mirror, text) {
+  function ensureOwnedMirror(mirror, text, records = []) {
     const operation = 'ensure mirror';
     const token = beginOperation(operation);
     const entry = mirrors.get(mirror);
@@ -524,12 +657,33 @@ function environmentFor(record) {
       throw new TypeError('mirror text must be a string');
     }
     try {
+      const ownedIds = new Set(
+        [...new Set(mirrors.values())].map((candidate) => candidate.id),
+      );
       if (typeof adapter.ensureMirror === 'function') {
-        adapter.ensureMirror(root, entry.mirror, entry.id, text);
+        const reconciled = adapter.ensureMirror(
+          root,
+          entry.mirror,
+          entry.id,
+          text,
+          records,
+          ownedIds,
+        );
+        if (reconciled !== undefined && reconciled !== entry.mirror) {
+          if (reconciled === null
+            || (typeof reconciled !== 'object' && typeof reconciled !== 'function')) {
+            throw new TypeError('mirror reconciliation returned an invalid node');
+          }
+          entry.mirror = reconciled;
+          entry.aliases.add(reconciled);
+          mirrors.set(reconciled, entry);
+          knownMirrors.add(reconciled);
+        }
       } else {
         adapter.updateMirror(entry.mirror, text);
       }
       assertOperation(token, operation);
+      entry.text = text;
       writeDescriptionDuringOperation(
         entry.owner,
         entry.id,
@@ -546,8 +700,30 @@ function environmentFor(record) {
     }
   }
 
+  function reconcileMirrorMutations(records) {
+    const entries = [...new Set(mirrors.values())];
+    if (entries.length === 0
+      || typeof adapter.isOwnedMirrorMutation !== 'function') {
+      return records;
+    }
+    const layoutRecords = [];
+    let ownedMutation = false;
+    for (const mutation of records) {
+      if (adapter.isOwnedMirrorMutation(root, mutation, entries)) {
+        ownedMutation = true;
+      } else {
+        layoutRecords.push(mutation);
+      }
+    }
+    if (!ownedMutation) return records;
+    for (const entry of entries) {
+      ensureOwnedMirror(entry.mirror, entry.text, records);
+    }
+    return layoutRecords;
+  }
+
   function removeEntry(entry) {
-    mirrors.delete(entry.mirror);
+    for (const alias of entry.aliases) mirrors.delete(alias);
     pendingMirrors.delete(entry);
     let failure;
     if (entry.id !== null && !entry.descriptionCleaned) {
@@ -558,12 +734,14 @@ function environmentFor(record) {
         failure = error;
       }
     }
-    if (entry.mirror !== null && !entry.mirrorCleaned) {
-      entry.mirrorCleaned = true;
-      try {
-        adapter.removeMirror(entry.mirror);
-      } catch (error) {
-        failure ??= error;
+    for (const mirror of entry.aliases) {
+      if (!entry.cleanedMirrors.has(mirror)) {
+        entry.cleanedMirrors.add(mirror);
+        try {
+          adapter.removeMirror(mirror);
+        } catch (error) {
+          failure ??= error;
+        }
       }
     }
     if (failure !== undefined) throw failure;
@@ -578,7 +756,7 @@ function environmentFor(record) {
       if (knownMirrors.has(mirror)) return;
       throw new TypeError('mirror must be an owned mirror');
     }
-    mirrors.delete(mirror);
+    for (const alias of entry.aliases) mirrors.delete(alias);
     pendingMirrors.add(entry);
     try {
       writeDescriptionDuringOperation(
@@ -589,9 +767,11 @@ function environmentFor(record) {
         operation,
       );
       entry.descriptionCleaned = true;
-      adapter.removeMirror(entry.mirror);
-      assertOperation(token, operation);
-      entry.mirrorCleaned = true;
+      for (const alias of entry.aliases) {
+        adapter.removeMirror(alias);
+        assertOperation(token, operation);
+        entry.cleanedMirrors.add(alias);
+      }
       pendingMirrors.delete(entry);
     } catch (error) {
       try { removeEntry(entry); } catch {}
@@ -603,6 +783,7 @@ function environmentFor(record) {
   }
 
   record.removeMirrorEntry = removeEntry;
+  record.reconcileMirrorMutations = reconcileMirrorMutations;
 
   return Object.freeze({
     root,
@@ -667,7 +848,7 @@ function leaseFor(root, record) {
       for (const entry of [...record.pendingMirrors]) {
         cleanup(() => record.removeMirrorEntry(entry));
       }
-      for (const entry of [...record.mirrors.values()]) {
+      for (const entry of new Set(record.mirrors.values())) {
         cleanup(() => record.removeMirrorEntry(entry));
       }
       cleanup(() => record.unregisterPortal());
@@ -713,7 +894,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
   const host = typeof activeAdapter.hostForRoot === 'function'
     ? activeAdapter.hostForRoot(root)
     : null;
-  const layoutDependencies = typeof activeAdapter.layoutDependenciesForRoot === 'function'
+  let layoutDependencies = typeof activeAdapter.layoutDependenciesForRoot === 'function'
     ? activeAdapter.layoutDependenciesForRoot(root)
     : Object.freeze({
       ancestors: Object.freeze(host === null ? [] : [host]),
@@ -731,6 +912,18 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
   let portalInstall;
   let observerInstall;
   let record;
+  const readLayoutDependencies = () => {
+    const next = typeof activeAdapter.layoutDependenciesForRoot === 'function'
+      ? activeAdapter.layoutDependenciesForRoot(root)
+      : layoutDependencies;
+    if (record?.phase === 'active'
+      && typeof activeAdapter.updateMutationObserverRoots === 'function') {
+      activeAdapter.updateMutationObserverRoots(root, observerInstall.observer, next);
+    }
+    layoutDependencies = next;
+    if (record !== undefined) record.layoutDependencies = next;
+    return next;
+  };
   let unregisterPortal = () => {};
   try {
     rawDocumentLease = activeAdapter.acquireDocumentResources(document);
@@ -759,9 +952,11 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
     }
     rawObserverInstall = activeAdapter.createMutationObserver(root, (records) => {
       if (record?.phase !== 'active') return;
+      const layoutRecords = record.reconcileMirrorMutations(records);
+      if (layoutRecords.length === 0) return;
       activeAdapter.signalMutations(
         documentLease.shared,
-        records,
+        layoutRecords,
         root,
         portalInstall.overlay,
         ...(host === null ? [] : [host]),
@@ -778,7 +973,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
       root,
       host,
       portalInstall,
-      layoutDependencies,
+      readLayoutDependencies,
     );
     record = {
       adapter: activeAdapter,
@@ -795,6 +990,7 @@ export function acquireShadowResources(root, styleLease, adapter = undefined) {
       pendingMirrors: new Set(),
       phase: 'active',
       portalInstall,
+      reconcileMirrorMutations: null,
       removeMirrorEntry: null,
       root,
       rootId,
