@@ -29,7 +29,6 @@ const storySteps = [
 const status = document.querySelector('.demo-status');
 const version = document.querySelector('[data-demo-version]');
 const locatorProof = document.querySelector('#locator-proof');
-const storyProof = document.querySelector('.demo-proof-fields');
 const storyState = document.querySelector('[data-demo-story-state]');
 const storyStep = document.querySelector('[data-demo-story-step]');
 const storyRun = document.querySelector('[data-demo-story-run]');
@@ -85,18 +84,12 @@ let ledgerMark = 'underline';
 let modeController = null;
 let reflowRequested = false;
 let appliedMode = null;
-let proofStoryActivated = false;
-let proofStoryRestoring = false;
 
-function createProofStory() {
-  return story(storySteps, {
-    trigger: 'manual',
-    gap: 180,
-    motion: 'system',
-  });
-}
-
-let proofStory = createProofStory();
+const proofStory = story(storySteps, {
+  trigger: 'manual',
+  gap: 180,
+  motion: 'system',
+});
 
 function setSequenceStage(name) {
   for (const stage of sequenceStages) {
@@ -146,15 +139,15 @@ function synchronizeCodeStep() {
 }
 
 function renderStoryState() {
-  const state = proofStory?.state ?? 'offscreen';
+  const state = proofStory.state;
   storyState.textContent = state;
   storyStep.textContent = activeIndex < 0 ? `— / ${storySteps.length}` : `${activeIndex + 1} / ${storySteps.length}`;
   storyRun.textContent = String(runCount);
   completion.textContent = `${acceptedSteps} of ${storySteps.length} accepted · ${state}`;
-  storyButtons.play.disabled = proofStory === null || state !== 'idle';
-  storyButtons.pause.disabled = proofStory === null || state !== 'playing';
-  storyButtons.resume.disabled = proofStory === null || state !== 'paused';
-  storyButtons.replay.disabled = proofStory === null || state === 'idle' || state === 'destroyed';
+  storyButtons.play.disabled = state !== 'idle';
+  storyButtons.pause.disabled = state !== 'playing';
+  storyButtons.resume.disabled = state !== 'paused';
+  storyButtons.replay.disabled = state === 'idle' || state === 'destroyed';
   modeApplyButton.disabled = state === 'playing' || state === 'paused';
 }
 
@@ -215,8 +208,6 @@ for (const tab of tabs) {
 storyButtons.play.addEventListener('click', () => {
   suspendSectionProofs();
   destroyModeProof({ forget: true });
-  proofStoryActivated = true;
-  proofStoryRestoring = false;
   proofStory.play();
   renderStoryState();
 });
@@ -236,8 +227,6 @@ storyButtons.resume.addEventListener('click', () => {
 storyButtons.replay.addEventListener('click', () => {
   suspendSectionProofs();
   destroyModeProof({ forget: true });
-  proofStoryActivated = true;
-  proofStoryRestoring = false;
   proofStory.replay();
   renderStoryState();
 });
@@ -250,9 +239,7 @@ locatorProof.addEventListener('hana:start', (event) => {
   acceptedSteps = 0;
   renderStoryState();
   synchronizeCodeStep();
-  status.textContent = proofStoryRestoring
-    ? `Restoring story run ${runCount}.`
-    : `Story run ${runCount} started.`;
+  status.textContent = `Story run ${runCount} started.`;
 });
 
 locatorProof.addEventListener('hana:step', (event) => {
@@ -279,10 +266,7 @@ locatorProof.addEventListener('hana:complete', (event) => {
   if (event.detail.controller !== proofStory) return;
   acceptedSteps = storySteps.length;
   renderStoryState();
-  status.textContent = proofStoryRestoring
-    ? 'Story restored after returning to proof.'
-    : 'Story complete.';
-  proofStoryRestoring = false;
+  status.textContent = 'Story complete.';
 });
 
 locatorProof.addEventListener('hana:cancel', (event) => {
@@ -488,12 +472,17 @@ modeApplyButton.addEventListener('click', () => {
   modeState.scrollIntoView({ block: 'center', behavior: 'auto' });
 });
 
-function isInViewport(node) {
+function isInViewport(node, root = null) {
   const rect = node.getBoundingClientRect();
-  return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+  const rootRect = root?.getBoundingClientRect();
+  const left = Math.max(0, rootRect?.left ?? 0);
+  const right = Math.min(innerWidth, rootRect?.right ?? innerWidth);
+  const top = Math.max(0, rootRect?.top ?? 0);
+  const bottom = Math.min(innerHeight, rootRect?.bottom ?? innerHeight);
+  return rect.bottom > top && rect.top < bottom && rect.right > left && rect.left < right;
 }
 
-function observeViewport(node, onChange) {
+function observeViewport(node, onChange, { root = null } = {}) {
   let prior;
   const update = (visible) => {
     if (visible === prior) return;
@@ -504,7 +493,7 @@ function observeViewport(node, onChange) {
   if ('IntersectionObserver' in window) {
     const observer = new IntersectionObserver(([entry]) => {
       update(entry.isIntersecting && entry.intersectionRatio > 0);
-    }, { threshold: [0, 0.01] });
+    }, { root, threshold: [0, 0.01] });
     observer.observe(node);
     return () => observer.disconnect();
   }
@@ -512,46 +501,25 @@ function observeViewport(node, onChange) {
   let frame = null;
   const check = () => {
     frame = null;
-    update(isInViewport(node));
+    update(isInViewport(node, root));
   };
   const schedule = () => {
     if (frame === null) frame = requestAnimationFrame(check);
   };
   document.addEventListener('scroll', schedule, { capture: true, passive: true });
+  root?.addEventListener('scroll', schedule, { passive: true });
   window.addEventListener('resize', schedule, { passive: true });
   schedule();
   return () => {
     if (frame !== null) cancelAnimationFrame(frame);
     document.removeEventListener('scroll', schedule, true);
+    root?.removeEventListener('scroll', schedule);
     window.removeEventListener('resize', schedule);
   };
 }
 
-function suspendProofStoryForViewport() {
-  if (!proofStoryActivated || proofStory === null) return;
-  phaseEpoch += 1;
-  activeAnnotation = null;
-  const exitingStory = proofStory;
-  proofStory = null;
-  exitingStory.destroy();
-  renderStoryState();
-  status.textContent = 'Story proof is offscreen · return to redraw.';
-}
-
-function restoreProofStoryForViewport() {
-  if (!proofStoryActivated || proofStory !== null) return;
-  proofStoryRestoring = true;
-  proofStory = createProofStory();
-  proofStory.play();
-  renderStoryState();
-}
-
 const visibilityCleanups = [
-  observeViewport(storyProof, (visible) => {
-    if (visible) restoreProofStoryForViewport();
-    else suspendProofStoryForViewport();
-  }),
-  observeViewport(reflowSpecimen, (visible) => {
+  observeViewport(reflowTarget, (visible) => {
     if (!reflowRequested) return;
     if (!visible) {
       reflowController?.hide();
@@ -562,7 +530,7 @@ const visibilityCleanups = [
       reflowController.show();
       reflowController.refresh();
     }
-  }),
+  }, { root: reflowStage }),
   observeViewport(modeTarget, (visible) => {
     if (appliedMode === null) return;
     if (!visible) {

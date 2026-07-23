@@ -11,6 +11,15 @@ export function rect(x, y, width, height) {
   };
 }
 
+export function intersectsViewport(input, viewport) {
+  return input.width > 0
+    && input.height > 0
+    && input.right > 0
+    && input.bottom > 0
+    && input.left < viewport.width
+    && input.top < viewport.height;
+}
+
 export function fnv1a(value) {
   let hash = 2166136261;
 

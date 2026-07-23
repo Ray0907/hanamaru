@@ -179,6 +179,7 @@ export function createRenderer({ id, record, options, lease }) {
   let descriptionAssociated = false;
   let destroyed = false;
   let activeAnimations = [];
+  let layoutVisible = true;
   let motionRun = null;
   let overflowSequence = 0;
 
@@ -229,6 +230,31 @@ export function createRenderer({ id, record, options, lease }) {
     });
   }
 
+  function applyLayoutVisibility() {
+    if (noteElement !== null) {
+      noteElement.hidden = false;
+      associateDescription();
+    }
+    if (!layoutVisible) {
+      overflowSequence += 1;
+      group.setAttribute('hidden', '');
+      group.classList.remove('hana-is-visible');
+      if (noteElement !== null) {
+        noteElement.classList.add('hana-is-hidden');
+        noteElement.classList.remove('hana-is-visible');
+        noteElement.removeAttribute('tabindex');
+      }
+      return;
+    }
+    group.removeAttribute('hidden');
+    group.classList.add('hana-is-visible');
+    if (noteElement !== null) {
+      noteElement.classList.remove('hana-is-hidden');
+      noteElement.classList.add('hana-is-visible');
+      scheduleOverflowCheck();
+    }
+  }
+
   function measure() {
     const noteRect = noteElement === null ? null : copyRect(noteElement.getBoundingClientRect());
     const peerNoteRects = [...shared.noteLayer.children]
@@ -267,20 +293,15 @@ export function createRenderer({ id, record, options, lease }) {
         layout.connector.head,
       ));
     }
+    layoutVisible = layout.targetVisible !== false;
     group.replaceChildren(fragment);
-    group.removeAttribute('hidden');
-    group.classList.add('hana-is-visible');
 
     if (noteElement !== null) {
       noteElement.style.left = `${layout.noteRect.x}px`;
       noteElement.style.top = `${layout.noteRect.y}px`;
       noteElement.setAttribute('data-hana-side', layout.side);
-      noteElement.hidden = false;
-      noteElement.classList.remove('hana-is-hidden');
-      noteElement.classList.add('hana-is-visible');
-      associateDescription();
-      scheduleOverflowCheck();
     }
+    applyLayoutVisibility();
   }
 
   function updateOwner(nextOwner) {
@@ -386,12 +407,7 @@ export function createRenderer({ id, record, options, lease }) {
       return { animations: [], finished: Promise.resolve() };
     }
     cancelMotion();
-    group.removeAttribute('hidden');
-    if (noteElement !== null) {
-      noteElement.hidden = false;
-      noteElement.classList.remove('hana-is-hidden');
-      associateDescription();
-    }
+    applyLayoutVisibility();
 
     const resolvedDuration = duration ?? readThemeMetrics(group).duration;
     const markDuration = resolvedDuration * 0.55;

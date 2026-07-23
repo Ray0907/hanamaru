@@ -107,6 +107,72 @@ test('renderer structure keeps an undrawn note measurable without revealing it',
   });
 });
 
+test('renderer suppresses offscreen layout through draw animate and finish then reveals on redraw', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    lease.shared.registerController('visual-viewport');
+    const owner = document.querySelector('#target');
+    const renderer = createRenderer({
+      id: 'visual-viewport',
+      record: { kind: 'element', element: owner, ownerElement: owner },
+      options: { mark: 'underline', note: 'Viewport note', accessible: true },
+      lease,
+    });
+    const layout = {
+      targetRects: [{ x: 10, y: -40, width: 80, height: 20 }],
+      unionRect: { x: 10, y: -40, width: 80, height: 20 },
+      markPaths: ['M 10 -20 L 90 -20'],
+      side: 'bottom',
+      noteRect: { x: 10, y: 12, width: 120, height: 40 },
+      connector: { shaft: 'M 50 -20 L 50 4', head: 'M 45 0 L 50 12 L 55 0' },
+      viewport: { width: innerWidth, height: innerHeight },
+      targetVisible: false,
+    };
+    const snapshot = () => ({
+      describedBy: owner.getAttribute('aria-describedby'),
+      groupHidden: renderer.group.hasAttribute('hidden'),
+      measurable: renderer.measure().noteRect.width > 0,
+      noteHidden: renderer.noteElement.classList.contains('hana-is-hidden'),
+    });
+
+    renderer.draw(layout);
+    const afterDraw = snapshot();
+    await renderer.animate(0).finished;
+    const afterAnimate = snapshot();
+    renderer.finish();
+    const afterFinish = snapshot();
+    renderer.draw({ ...layout, targetVisible: true });
+    const afterVisibleRedraw = snapshot();
+    renderer.draw(layout);
+    const afterSecondSuppression = snapshot();
+    renderer.destroy();
+    lease.shared.releaseController('visual-viewport');
+    lease.release();
+    return { afterAnimate, afterDraw, afterFinish, afterSecondSuppression, afterVisibleRedraw };
+  });
+
+  const suppressed = {
+    describedBy: 'author-token hana-note-visual-viewport',
+    groupHidden: true,
+    measurable: true,
+    noteHidden: true,
+  };
+  expect(result).toEqual({
+    afterDraw: suppressed,
+    afterAnimate: suppressed,
+    afterFinish: suppressed,
+    afterSecondSuppression: suppressed,
+    afterVisibleRedraw: {
+      describedBy: 'author-token hana-note-visual-viewport',
+      groupHidden: false,
+      measurable: true,
+      noteHidden: false,
+    },
+  });
+});
+
 test('renderer structure fails before owned DOM or ARIA mutation for an unregistered id', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireDocumentResources } = await import('/src/scheduler.js');

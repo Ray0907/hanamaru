@@ -3,7 +3,13 @@ import {
   HanamaruStateError,
   HanamaruTargetError,
 } from './errors.js';
-import { buildConnector, buildMarkPaths, choosePlacement, unionRects } from './geometry.js';
+import {
+  buildConnector,
+  buildMarkPaths,
+  choosePlacement,
+  intersectsViewport,
+  unionRects,
+} from './geometry.js';
 import {
   createRenderer as createDomRenderer,
   readThemeMetrics,
@@ -118,6 +124,7 @@ function layoutFor(record, renderer, options, env) {
   const measured = renderer.measure();
   const metrics = env.readThemeMetrics(renderer.group);
   const markPaths = buildMarkPaths(options.mark, targetRects, options.seed);
+  const targetVisible = targetRects.some((item) => intersectsViewport(item, measured.viewport));
 
   if (measured.noteRect === null) {
     return {
@@ -128,6 +135,7 @@ function layoutFor(record, renderer, options, env) {
       noteRect: null,
       connector: { shaft: '', head: '' },
       viewport: measured.viewport,
+      targetVisible,
     };
   }
 
@@ -148,6 +156,7 @@ function layoutFor(record, renderer, options, env) {
     noteRect: placement.rect,
     connector: buildConnector(targetRect, placement.rect, placement.side),
     viewport: measured.viewport,
+    targetVisible,
   };
 }
 

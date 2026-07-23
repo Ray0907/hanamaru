@@ -7,6 +7,7 @@ import {
   choosePlacement,
   connectorDistance,
   intersectionArea,
+  intersectsViewport,
   noteCandidates,
   overflowPixels,
   rect,
@@ -91,6 +92,18 @@ test('intersectionArea returns positive overlap and zero for touching edges', ()
   assert.equal(intersectionArea(rect(0, 0, 20, 20), rect(10, 5, 20, 10)), 100);
   assert.equal(intersectionArea(rect(0, 0, 10, 10), rect(10, 0, 10, 10)), 0);
   assert.equal(intersectionArea(rect(0, 0, 10, 10), rect(30, 0, 10, 10)), 0);
+});
+
+test('intersectsViewport accepts partial visual intersection and rejects outside or touching rects', () => {
+  const viewport = { width: 100, height: 80 };
+
+  assert.equal(intersectsViewport(rect(-5, 10, 10, 10), viewport), true);
+  assert.equal(intersectsViewport(rect(95, 75, 10, 10), viewport), true);
+  assert.equal(intersectsViewport(rect(10, 10, 0, 10), viewport), false);
+  assert.equal(intersectsViewport(rect(10, 10, 10, 0), viewport), false);
+  assert.equal(intersectsViewport(rect(-20, 10, 10, 10), viewport), false);
+  assert.equal(intersectsViewport(rect(100, 10, 10, 10), viewport), false);
+  assert.equal(intersectsViewport(rect(10, 80, 10, 10), viewport), false);
 });
 
 test('overflowPixels sums every edge excess outside the inset viewport', () => {

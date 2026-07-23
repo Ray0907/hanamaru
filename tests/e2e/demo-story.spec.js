@@ -87,6 +87,47 @@ test('proves a selector-scoped text story without touching the authored prose', 
   expect(await seriousOrCritical(page, '#proof')).toEqual([]);
 });
 
+test('mobile story suppresses offscreen target output without changing its completed run', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.evaluate(() => {
+    window.__demoStoryStarts = 0;
+    document.querySelector('#locator-proof').addEventListener('hana:start', (event) => {
+      if (typeof event.detail.controller?.play === 'function') window.__demoStoryStarts += 1;
+    });
+  });
+  const proof = page.locator('#locator-proof');
+  const tray = page.locator('[data-demo-story-tray]');
+  const play = page.getByRole('button', { name: 'Play story', exact: true });
+  const state = page.locator('[data-demo-story-state]');
+  const run = page.locator('[data-demo-story-run]');
+  const storyNotes = page.locator('.hana-note:not(.hana-is-hidden)', {
+    hasText: /Still attached|Measured again/,
+  });
+
+  await play.scrollIntoViewIfNeeded();
+  await expect.poll(() => proof.evaluate((node) => node.getBoundingClientRect().bottom <= 0)).toBe(true);
+  await expect(tray).toBeInViewport();
+  await play.click();
+  await expect(state).toHaveText('complete', { timeout: 8_000 });
+  const completedRun = await run.textContent();
+  expect(await page.evaluate(() => window.__demoStoryStarts)).toBe(1);
+  await expect(storyNotes).toHaveCount(0);
+  await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(0);
+
+  await proof.scrollIntoViewIfNeeded();
+  await expect(state).toHaveText('complete');
+  await expect(run).toHaveText(completedRun);
+  expect(await page.evaluate(() => window.__demoStoryStarts)).toBe(1);
+  await expect(storyNotes).toHaveCount(2);
+  await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
+
+  await play.scrollIntoViewIfNeeded();
+  await expect(storyNotes).toHaveCount(0);
+  await expect(state).toHaveText('complete');
+  await expect(run).toHaveText(completedRun);
+});
+
 test('playback controls pause, resume, complete, and replay the same real story', async ({ page }) => {
   await page.goto('/');
   const play = page.getByRole('button', { name: 'Play story', exact: true });

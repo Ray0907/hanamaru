@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 
 function capturePageFailures(page) {
@@ -355,53 +356,163 @@ test('390px ruler preserves the exact 320 to 760 measure inside a contained prev
   expect(failures).toEqual([]);
 });
 
-test('completed main story leaves with its proof and restores once without cross-flow leaks', async ({ page }) => {
+for (const observerMode of ['native', 'fallback']) {
+  test(`390px reflow note hides when horizontally clipped with ${observerMode} visibility`, async ({ page }) => {
+    const failures = capturePageFailures(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    if (observerMode === 'fallback') {
+      await page.addInitScript(() => { delete window.IntersectionObserver; });
+    }
+    await page.goto('/');
+    const ruler = page.locator('[data-demo-reflow-control]');
+    const stage = page.locator('.demo-reflow-stage');
+    const target = page.locator('[data-demo-reflow-target]');
+    const note = page.locator('.hana-note:not(.hana-is-hidden)', {
+      hasText: 'Placed again after reflow.',
+    });
+    const intersectsStageAndViewport = () => target.evaluate((node) => {
+      const stageRect = node.closest('.demo-reflow-stage').getBoundingClientRect();
+      const left = Math.max(0, stageRect.left);
+      const right = Math.min(innerWidth, stageRect.right);
+      const top = Math.max(0, stageRect.top);
+      const bottom = Math.min(innerHeight, stageRect.bottom);
+      return [...node.getClientRects()].some((rect) => (
+        rect.right > left && rect.left < right && rect.bottom > top && rect.top < bottom
+      ));
+    });
+
+    await ruler.scrollIntoViewIfNeeded();
+    await ruler.fill('760');
+    await stage.evaluate((node) => node.scrollTo({ left: 0, behavior: 'auto' }));
+    await expect.poll(intersectsStageAndViewport).toBe(true);
+    await expect(note).toBeVisible();
+
+    await stage.evaluate((node) => node.scrollTo({ left: node.scrollWidth, behavior: 'auto' }));
+    await expect.poll(intersectsStageAndViewport).toBe(false);
+    await expect(note).toHaveCount(0);
+
+    await stage.evaluate((node) => node.scrollTo({ left: 0, behavior: 'auto' }));
+    await expect.poll(intersectsStageAndViewport).toBe(true);
+    await expect(note).toBeVisible();
+    const id = await note.getAttribute('data-hana-id');
+    await expect(page.locator(`.hana-annotation[data-hana-id="${id}"] .hana-connector-path`).first())
+      .toHaveAttribute('d', /\S/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    expect(failures).toEqual([]);
+  });
+}
+
+test('390px horizontal proof region is named, instructed, keyboard-scrollable, and accessible', async ({ page }) => {
   const failures = capturePageFailures(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  await expect(page.locator('[data-demo-story-state]')).toHaveText('idle');
-  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
-
-  await page.getByRole('button', { name: 'Play story', exact: true }).click();
-  await expect(page.locator('[data-demo-story-state]')).toHaveText('complete', { timeout: 8_000 });
-  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(2);
-  const firstRun = await page.locator('[data-demo-story-run]').textContent();
-
-  const applyJson = async () => {
-    await page.getByRole('tab', { name: 'JSON', exact: true }).click();
-    await page.getByRole('button', { name: 'Apply active mode' }).click();
-    await expect(page.locator('.hana-note:not(.hana-is-hidden)', {
-      hasText: 'Parsed locally, rendered through annotate().',
-    })).toBeVisible();
-    await expect(page.locator('.hana-note:not(.hana-is-hidden)', {
-      hasText: /Still attached|Measured again/,
-    })).toHaveCount(0);
-    await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(1);
-  };
-
-  await applyJson();
-  await page.locator('#quick-start').scrollIntoViewIfNeeded();
-  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
-
-  const locatorProof = page.locator('#locator-proof');
-  await locatorProof.scrollIntoViewIfNeeded();
-  await expect(page.locator('[data-demo-story-state]')).toHaveText('complete', { timeout: 8_000 });
-  await expect(page.locator('[data-demo-completion]')).toContainText('2 of 2 accepted · complete');
-  await expect(page.getByRole('button', { name: 'Replay story' })).toBeEnabled();
-  await expect(page.locator('[data-demo-story-run]')).not.toHaveText(firstRun);
-  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(2);
-  await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
-  const secondRun = await page.locator('[data-demo-story-run]').textContent();
-
-  await applyJson();
-  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(1);
-  await locatorProof.scrollIntoViewIfNeeded();
-  await expect(page.locator('[data-demo-story-state]')).toHaveText('complete', { timeout: 8_000 });
-  await expect(page.locator('[data-demo-story-run]')).not.toHaveText(secondRun);
-  await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(2);
-  await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
+  const ruler = page.locator('[data-demo-reflow-control]');
+  const stage = page.getByRole('region', { name: 'Responsive proof preview' });
+  await ruler.scrollIntoViewIfNeeded();
+  await ruler.fill('760');
+  await expect(stage).toHaveAttribute('tabindex', '0');
+  await expect(stage).toHaveAccessibleDescription(/scroll horizontally/i);
+  await stage.focus();
+  await expect(stage).toBeFocused();
+  const focusStyle = await stage.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
+  });
+  expect(focusStyle.outlineStyle).not.toBe('none');
+  expect(Number.parseFloat(focusStyle.outlineWidth)).toBeGreaterThanOrEqual(3);
+  await stage.press('ArrowRight');
+  await expect.poll(() => stage.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
+  const results = await new AxeBuilder({ page }).include('[data-demo-proof-sections]').analyze();
+  expect(results.violations.filter(({ impact }) => impact === 'serious' || impact === 'critical'))
+    .toEqual([]);
   expect(failures).toEqual([]);
 });
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'mobile', width: 390, height: 844 },
+]) {
+  for (const priorState of ['paused', 'complete']) {
+    test(`${priorState} main story preserves its run while visual output follows the viewport on ${viewport.name}`, async ({ page }) => {
+      const failures = capturePageFailures(page);
+      await page.setViewportSize(viewport);
+      await page.goto('/');
+      await page.evaluate(() => {
+        window.__demoStoryStarts = 0;
+        document.querySelector('#locator-proof').addEventListener('hana:start', (event) => {
+          if (typeof event.detail.controller?.play === 'function') window.__demoStoryStarts += 1;
+        });
+      });
+
+      const state = page.locator('[data-demo-story-state]');
+      const run = page.locator('[data-demo-story-run]');
+      const completionState = page.locator('[data-demo-completion]');
+      const storyNotes = page.locator('.hana-note:not(.hana-is-hidden)', {
+        hasText: /Still attached|Measured again/,
+      });
+      const visibleStoryGroups = page.locator([
+        '.hana-annotation[data-hana-mark="underline"]:not([hidden])',
+        '.hana-annotation[data-hana-mark="circle"]:not([hidden])',
+      ].join(','));
+      const replay = page.getByRole('button', { name: 'Replay story' });
+      await expect(state).toHaveText('idle');
+      await expect(replay).toBeDisabled();
+
+      await page.getByRole('button', { name: 'Play story', exact: true }).click();
+      if (priorState === 'paused') {
+        await expect(state).toHaveText('playing');
+        await page.getByRole('button', { name: 'Pause story' }).click();
+        await expect(state).toHaveText('paused');
+        await page.getByRole('region', { name: 'Reliability docket' }).scrollIntoViewIfNeeded();
+      } else {
+        await expect(state).toHaveText('complete', { timeout: 8_000 });
+        await page.getByRole('tab', { name: 'JSON', exact: true }).click();
+        await page.getByRole('button', { name: 'Apply active mode' }).click();
+        await expect(page.locator('.hana-note:not(.hana-is-hidden)', {
+          hasText: 'Parsed locally, rendered through annotate().',
+        })).toBeVisible();
+      }
+
+      const runBeforeExit = await run.textContent();
+      const startsBeforeExit = await page.evaluate(() => window.__demoStoryStarts);
+      expect(startsBeforeExit).toBe(1);
+      await expect(state).toHaveText(priorState);
+      await expect(run).toHaveText(runBeforeExit);
+      await expect(storyNotes).toHaveCount(0);
+      await expect(visibleStoryGroups).toHaveCount(0);
+
+      await page.locator('#locator-proof').scrollIntoViewIfNeeded();
+      await page.evaluate(() => new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      }));
+      await expect(state).toHaveText(priorState);
+      await expect(run).toHaveText(runBeforeExit);
+      expect(await page.evaluate(() => window.__demoStoryStarts)).toBe(startsBeforeExit);
+      await expect(completionState).toHaveText(
+        priorState === 'complete' ? '2 of 2 accepted · complete' : '0 of 2 accepted · paused',
+      );
+      await expect(storyNotes).toHaveCount(priorState === 'complete' ? 2 : 1);
+      const action = priorState === 'complete'
+        ? replay
+        : page.getByRole('button', { name: 'Resume story' });
+      await action.scrollIntoViewIfNeeded();
+      await expect(action).toBeVisible();
+      await expect(action).toBeEnabled();
+
+      await action.click();
+      await expect(state).toHaveText('complete', { timeout: 8_000 });
+      await expect(run).toHaveText(String(
+        Number(runBeforeExit) + (priorState === 'complete' ? 1 : 0),
+      ));
+      expect(await page.evaluate(() => window.__demoStoryStarts))
+        .toBe(startsBeforeExit + (priorState === 'complete' ? 1 : 0));
+      await page.locator('#locator-proof').scrollIntoViewIfNeeded();
+      await expect(storyNotes).toHaveCount(2);
+      await expect(page.locator('.hana-annotation:not([hidden])')).toHaveCount(2);
+      expect(failures).toEqual([]);
+    });
+  }
+}
 
 for (const viewport of [
   { name: 'desktop', width: 1440, height: 900 },

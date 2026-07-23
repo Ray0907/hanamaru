@@ -769,6 +769,12 @@
   font-size: 0.68rem;
 }
 
+.demo-scroll-instruction {
+  margin: 0.8rem 0 0;
+  color: var(--demo-muted);
+  font: 700 0.7rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .demo-reflow-stage {
   width: 100%;
   min-width: 0;
@@ -777,6 +783,11 @@
   overflow-x: auto;
   overscroll-behavior-inline: contain;
   scrollbar-color: var(--demo-red) rgb(31 39 51 / 12%);
+}
+
+.demo-reflow-stage:focus-visible {
+  outline: 3px solid var(--demo-red);
+  outline-offset: 4px;
 }
 
 .demo-reflow-specimen {
