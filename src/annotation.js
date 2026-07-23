@@ -895,7 +895,7 @@ export function createAnnotation(target, rawOptions, env) {
       invalid('mark', nextOptions.mark);
     }
     const nextRecord = env.resolveTarget(nextTarget);
-    if (nextOptions.mark !== options.mark && nextMarkPlugin !== null) {
+    if (nextMarkPlugin !== null) {
       const nextRects = env.targetRects(nextRecord);
       buildMarkPaths(nextOptions.mark, nextRects, nextOptions.seed, 5, nextMarkPlugin);
     }

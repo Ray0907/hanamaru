@@ -217,6 +217,25 @@ test('helpers validate finite points/options and never mutate their inputs', () 
   }
 });
 
+test('helper options distinguish absent properties from explicit nullish values', () => {
+  let helpers;
+  render('helper-nullish-options', ({ helpers: value }) => {
+    helpers = value;
+    return { paths: ['M 0 0'] };
+  });
+  const start = { x: 0, y: 0 };
+  const end = { x: 1, y: 1 };
+  for (const options of [
+    { label: null },
+    { label: undefined },
+    { wobble: null },
+    { wobble: undefined },
+  ]) {
+    assertConfigError(() => helpers.line(start, end, options));
+  }
+  assert.doesNotThrow(() => helpers.line(start, end, {}));
+});
+
 test('factory results require one own data paths property on a plain object', () => {
   const hostile = [];
   hostile.push(null, [], { paths: ['M 0 0'], extra: true }, { paths: [] });
@@ -238,6 +257,52 @@ test('factory results require one own data paths property on a plain object', ()
         && error.details.cause instanceof HanamaruConfigError,
     );
   }
+});
+
+test('hostile result and helper accessors are rejected without invoking getters', () => {
+  let resultGetterCalls = 0;
+  const result = {};
+  Object.defineProperty(result, 'paths', {
+    enumerable: true,
+    get() {
+      resultGetterCalls += 1;
+      throw new Error('result getter must not run');
+    },
+  });
+  assert.throws(
+    () => render('accessor-result', () => result),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_MARK_PLUGIN'
+      && error.details.mark === 'accessor-result'
+      && error.details.cause instanceof HanamaruConfigError,
+  );
+  assert.equal(resultGetterCalls, 0);
+
+  let helperGetterCalls = 0;
+  let helpers;
+  render('accessor-helpers', ({ helpers: value }) => {
+    helpers = value;
+    return { paths: ['M 0 0'] };
+  });
+  const accessorPoint = { y: 0 };
+  Object.defineProperty(accessorPoint, 'x', {
+    enumerable: true,
+    get() {
+      helperGetterCalls += 1;
+      return 0;
+    },
+  });
+  const accessorOptions = {};
+  Object.defineProperty(accessorOptions, 'label', {
+    enumerable: true,
+    get() {
+      helperGetterCalls += 1;
+      return 'unsafe';
+    },
+  });
+  assertConfigError(() => helpers.line(accessorPoint, { x: 1, y: 1 }));
+  assertConfigError(() => helpers.line({ x: 0, y: 0 }, { x: 1, y: 1 }, accessorOptions));
+  assert.equal(helperGetterCalls, 0);
 });
 
 test('factory path output is syntax checked and cost bounded before return', () => {
@@ -274,6 +339,31 @@ test('factory path output is syntax checked and cost bounded before return', () 
   ]);
 });
 
+test('SVG arc parser accepts compact lexical flags and preserves numeric grammar', () => {
+  const paths = [
+    'M0 0 A10 10 0 0 110 10',
+    'M0,0A10,10,0,0,1,10,10',
+    'M1e1-2a3 4 45 1 0-5.5 6.25 3 4 0 0 1 8 9',
+    'M 0 0 a 4 5 0 01-6-7',
+  ];
+  assert.deepEqual(render('valid-arc-grammar', () => ({ paths })), paths);
+});
+
+test('SVG arc parser rejects flags that are numerically valid but lexically invalid', () => {
+  for (const [index, flag] of ['1.0', '+1', '1e0', '-0'].entries()) {
+    for (const [position, flags] of [[0, `${flag} 0`], [1, `0 ${flag}`]]) {
+      assert.throws(
+        () => render(`invalid-arc-flag-${index}-${position}`, () => ({
+          paths: [`M0 0 A10 10 0 ${flags} 10 10`],
+        })),
+        (error) => error instanceof HanamaruStateError
+          && error.code === 'HANA_STATE_MARK_PLUGIN'
+          && error.details.cause instanceof HanamaruConfigError,
+      );
+    }
+  }
+});
+
 test('factory throws and invalid results preserve cause under the plugin state error', () => {
   const cause = new RangeError('factory exploded');
   assert.throws(
@@ -287,11 +377,13 @@ test('factory throws and invalid results preserve cause under the plugin state e
 
 function annotationHarness() {
   const calls = [];
+  const events = [];
   const owner = { ownerDocument: { readyState: 'complete' } };
   const record = {
     element: owner,
     ownerElement: owner,
     range: null,
+    rects: [rect(10, 20, 30, 8)],
     refresh() { return this; },
   };
   let generation = 0;
@@ -308,11 +400,11 @@ function annotationHarness() {
   const env = {
     id: `plugin-annotation-${++nextHarnessId}`,
     lease: { shared, release() {} },
-    resolveTarget() { return record; },
-    targetRects() { return [rect(10, 20, 30, 8)]; },
+    resolveTarget(target) { return target?.record ?? record; },
+    targetRects(targetRecord) { return targetRecord.rects; },
     readThemeMetrics() { return { noteGap: 16 }; },
     reducedMotion() { return true; },
-    createEvent() {},
+    createEvent(type, detail, eventOwner) { events.push({ type, detail, owner: eventOwner }); },
     createRenderer({ options }) {
       calls.push(['create', options.mark]);
       return {
@@ -330,7 +422,7 @@ function annotationHarness() {
       };
     },
   };
-  return { calls, env, owner };
+  return { calls, env, events, owner, record };
 }
 
 test('annotations capture custom factories across unregister, refresh, replay, and same-mark update', () => {
@@ -395,6 +487,69 @@ test('mark-changing update preflights plugin output transactionally', () => {
   controller.destroy();
   unregisterStable();
   unregisterBroken();
+});
+
+test('same custom mark updates preflight seed and target changes without corrupting visible state', () => {
+  const seedCause = new Error('seed rejected');
+  const targetCause = new Error('target rejected');
+  const unregister = registerMark('same-mark-transaction', ({ rects, seed }) => {
+    if (seed === 'bad-seed') throw seedCause;
+    if (rects[0].left === 99) throw targetCause;
+    return { paths: [`M ${rects[0].left} 0 L ${rects[0].right} 1`] };
+  });
+  const harness = annotationHarness();
+  const controller = createAnnotation(
+    harness.owner,
+    { mark: 'same-mark-transaction', seed: 'good-seed' },
+    harness.env,
+  );
+  controller.show();
+  const priorFinished = controller.finished;
+  const priorDraw = harness.calls.at(-1);
+  let priorDrawCount = harness.calls.filter(([name]) => name === 'draw').length;
+  const priorCreateCount = harness.calls.filter(([name]) => name === 'create').length;
+  const priorEventCount = harness.events.length;
+  unregister();
+
+  assert.throws(
+    () => controller.update({ mark: 'same-mark-transaction', seed: 'bad-seed' }),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_MARK_PLUGIN'
+      && error.details.cause === seedCause,
+  );
+  assert.equal(controller.state, 'visible');
+  assert.equal(controller.finished, priorFinished);
+  assert.equal(harness.calls.filter(([name]) => name === 'create').length, priorCreateCount);
+  assert.equal(harness.calls.filter(([name]) => name === 'draw').length, priorDrawCount);
+  assert.equal(harness.events.length, priorEventCount);
+  controller.refresh();
+  priorDrawCount += 1;
+  assert.deepEqual(harness.calls.at(-1), priorDraw);
+
+  const replacementOwner = { ownerDocument: harness.owner.ownerDocument };
+  const replacement = {
+    record: {
+      element: replacementOwner,
+      ownerElement: replacementOwner,
+      range: null,
+      rects: [rect(99, 20, 30, 8)],
+      refresh() { return this; },
+    },
+  };
+  assert.throws(
+    () => controller.update({ target: replacement }),
+    (error) => error instanceof HanamaruStateError
+      && error.code === 'HANA_STATE_MARK_PLUGIN'
+      && error.details.cause === targetCause,
+  );
+  assert.equal(controller.state, 'visible');
+  assert.equal(controller.finished, priorFinished);
+  assert.equal(harness.calls.filter(([name]) => name === 'create').length, priorCreateCount);
+  assert.equal(harness.calls.filter(([name]) => name === 'draw').length, priorDrawCount);
+  assert.equal(harness.events.length, priorEventCount);
+  controller.refresh();
+  assert.deepEqual(harness.calls.at(-1), priorDraw);
+  controller.destroy();
 });
 
 test('declarative custom marks validate and capture through Annotation construction', () => {

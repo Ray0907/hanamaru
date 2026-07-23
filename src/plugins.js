@@ -65,8 +65,10 @@ function helperOptions(input, defaults) {
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
     if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) invalid(key, input);
   }
-  const label = Object.getOwnPropertyDescriptor(input, 'label')?.value ?? defaults.label;
-  const wobble = Object.getOwnPropertyDescriptor(input, 'wobble')?.value ?? defaults.wobble;
+  const labelProperty = Object.getOwnPropertyDescriptor(input, 'label');
+  const wobbleProperty = Object.getOwnPropertyDescriptor(input, 'wobble');
+  const label = labelProperty === undefined ? defaults.label : labelProperty.value;
+  const wobble = wobbleProperty === undefined ? defaults.wobble : wobbleProperty.value;
   if (typeof label !== 'string') invalid('label', label);
   finite(wobble, 'wobble');
   if (wobble < 0) invalid('wobble', wobble);
@@ -135,65 +137,62 @@ function copyRect(input, field) {
   return Object.freeze(output);
 }
 
-function tokenizePath(path) {
-  const tokens = [];
-  let index = 0;
-  let previous = null;
-  while (index < path.length) {
-    while (index < path.length && /[\t\n\f\r ]/.test(path[index])) index += 1;
-    if (index === path.length) break;
-    if (path[index] === ',') {
-      if (previous === null || previous.type !== 'number') return null;
-      index += 1;
-      while (index < path.length && /[\t\n\f\r ]/.test(path[index])) index += 1;
-      if (index === path.length || path[index] === ',' || /[A-Za-z]/.test(path[index])) return null;
-    }
-    const command = path[index];
-    if (/[A-Za-z]/.test(command)) {
-      if (!Object.hasOwn(PATH_ARITY, command.toUpperCase())) return null;
-      previous = { type: 'command', value: command };
-      tokens.push(previous);
-      index += 1;
-      continue;
-    }
-    const number = /^[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?/.exec(path.slice(index));
-    if (number === null) return null;
-    const value = Number(number[0]);
-    if (!Number.isFinite(value)) return null;
-    previous = { type: 'number', value };
-    tokens.push(previous);
-    index += number[0].length;
-  }
-  return tokens;
-}
-
 function validPath(path) {
-  const tokens = tokenizePath(path);
-  if (tokens === null || tokens.length === 0
-    || tokens[0].type !== 'command' || tokens[0].value.toUpperCase() !== 'M') return false;
   let index = 0;
-  while (index < tokens.length) {
-    const command = tokens[index];
-    if (command.type !== 'command') return false;
-    const upper = command.value.toUpperCase();
-    const arity = PATH_ARITY[upper];
+  let firstCommand = true;
+  const whitespace = () => {
+    while (index < path.length && /[\t\n\f\r ]/.test(path[index])) index += 1;
+  };
+  const value = (flag, mayFollowValue) => {
+    whitespace();
+    if (path[index] === ',') {
+      if (!mayFollowValue) return false;
+      index += 1;
+      whitespace();
+      if (index === path.length || path[index] === ','
+        || /[A-Za-z]/.test(path[index])) return false;
+    }
+    if (flag) {
+      if (path[index] !== '0' && path[index] !== '1') return false;
+      index += 1;
+      return true;
+    }
+    const match = /^[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?/.exec(
+      path.slice(index),
+    );
+    if (match === null || !Number.isFinite(Number(match[0]))) return false;
+    index += match[0].length;
+    return true;
+  };
+
+  while (true) {
+    whitespace();
+    if (index === path.length) return !firstCommand;
+    const command = path[index];
+    if (!/[A-Za-z]/.test(command)
+      || !Object.hasOwn(PATH_ARITY, command.toUpperCase())) return false;
+    const upper = command.toUpperCase();
+    if (firstCommand && upper !== 'M') return false;
+    firstCommand = false;
     index += 1;
-    const start = index;
-    while (index < tokens.length && tokens[index].type === 'number') index += 1;
-    const count = index - start;
+    const arity = PATH_ARITY[upper];
     if (arity === 0) {
-      if (count !== 0) return false;
       continue;
     }
-    if (count === 0 || count % arity !== 0) return false;
-    if (upper === 'A') {
-      for (let offset = start; offset < index; offset += arity) {
-        if (![0, 1].includes(tokens[offset + 3].value)
-          || ![0, 1].includes(tokens[offset + 4].value)) return false;
+
+    let groups = 0;
+    while (true) {
+      for (let parameter = 0; parameter < arity; parameter += 1) {
+        const flag = upper === 'A' && (parameter === 3 || parameter === 4);
+        if (!value(flag, parameter > 0 || groups > 0)) return false;
       }
+      groups += 1;
+      const next = index;
+      whitespace();
+      if (index === path.length || /[A-Za-z]/.test(path[index])) break;
+      index = next;
     }
   }
-  return true;
 }
 
 function validateResult(result) {
