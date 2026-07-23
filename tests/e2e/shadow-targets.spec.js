@@ -1218,6 +1218,98 @@ test('preinstalled marker verification rejects inherited host marker but accepts
   });
 });
 
+test('inherited marker cannot combine with markerless mirror CSS in sheet or preinstalled mode', async ({ page }) => {
+  const result = await evaluateStyles(page, `(() => {
+    const root = window.__shadowFixture.openRoot;
+    const host = root.host;
+    host.style.setProperty('--hana-shadow-style', '1');
+    const markerless = new CSSStyleSheet();
+    markerless.replaceSync(\`
+      .hana-shadow-mirror {
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        padding: 0 !important;
+        margin: -1px !important;
+        overflow: hidden !important;
+        clip: rect(0 0 0 0) !important;
+        clip-path: inset(50%) !important;
+        white-space: nowrap !important;
+        border: 0 !important;
+      }
+    \`);
+    const attempt = (mode) => {
+      try {
+        const lease = acquireShadowStyles(root, mode === 'sheet'
+          ? { mode, sheet: markerless }
+          : { mode });
+        lease.release();
+        return 'ok';
+      } catch (error) {
+        return {
+          typed: error instanceof HanamaruStateError,
+          code: error.code,
+        };
+      }
+    };
+
+    const sheet = attempt('sheet');
+    const sheetRollback = {
+      adopted: root.adoptedStyleSheets.includes(markerless),
+      state: runtimeState.shadows.has(root),
+    };
+
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, markerless];
+    const preinstalled = attempt('preinstalled');
+    const preinstalledRollback = {
+      authorRetained: root.adoptedStyleSheets.includes(markerless),
+      exactAuthorCount: root.adoptedStyleSheets
+        .filter((candidate) => candidate === markerless).length,
+      state: runtimeState.shadows.has(root),
+    };
+    const temporaryCleanup = {
+      hosts: document.querySelectorAll('[data-hana-shadow-probe-host]').length,
+      wrappers: root.querySelectorAll('[data-hana-shadow-probe]').length,
+      probes: root.querySelectorAll('.hana-shadow-mirror').length,
+    };
+    root.adoptedStyleSheets = root.adoptedStyleSheets
+      .filter((candidate) => candidate !== markerless);
+    host.style.removeProperty('--hana-shadow-style');
+    return {
+      sheet,
+      sheetRollback,
+      preinstalled,
+      preinstalledRollback,
+      temporaryCleanup,
+    };
+  })()`);
+
+  expect(result).toEqual({
+    sheet: {
+      typed: true,
+      code: 'HANA_STATE_SHADOW_STYLES',
+    },
+    sheetRollback: {
+      adopted: false,
+      state: false,
+    },
+    preinstalled: {
+      typed: true,
+      code: 'HANA_STATE_SHADOW_STYLES',
+    },
+    preinstalledRollback: {
+      authorRetained: true,
+      exactAuthorCount: 1,
+      state: false,
+    },
+    temporaryCleanup: {
+      hosts: 0,
+      wrappers: 0,
+      probes: 0,
+    },
+  });
+});
+
 test('sheet configuration rejects forged and wrong-realm identities before adoption', async ({ page }) => {
   const result = await evaluateStyles(page, `(() => {
     const fixture = window.__shadowFixture;

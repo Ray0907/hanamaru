@@ -192,6 +192,7 @@ function verifyRootMarker(root) {
   const sentinel = document.createElement('span');
   const probe = document.createElement('span');
   wrapper.setAttribute('data-hana-shadow-probe', '');
+  wrapper.style.setProperty('--hana-shadow-style', '__hana-shadow-unset__');
   sentinel.setAttribute('data-hana-shadow-sentinel', '');
   probe.className = 'hana-shadow-mirror';
   probe.setAttribute('aria-hidden', 'true');
