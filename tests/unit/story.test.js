@@ -24,15 +24,18 @@ function fakeEnvironment({ reducedMotion = false } = {}) {
   const events = [];
   const annotations = [];
   const failures = new Map();
+  const destroyFailures = new Map();
   const refreshedOwners = new Map();
   let clock = 0;
   let nextTimer = 0;
   const timers = new Map();
   let eventHandler = null;
   let annotationHandler = null;
+  let createFailure = null;
 
   function makeAnnotation(target, options) {
     calls.push(['createAnnotation', target]);
+    if (createFailure?.index === annotations.length) throw createFailure.error;
     let state = 'idle';
     let run = null;
     const annotation = {
@@ -73,6 +76,7 @@ function fakeEnvironment({ reducedMotion = false } = {}) {
         calls.push(['annotation:destroy', target]);
         annotation.hide();
         state = 'destroyed';
+        if (destroyFailures.has(target)) throw destroyFailures.get(target);
         return annotation;
       },
     };
@@ -86,6 +90,8 @@ function fakeEnvironment({ reducedMotion = false } = {}) {
     annotations,
     setAnnotationHandler(handler) { annotationHandler = handler; },
     setEventHandler(handler) { eventHandler = handler; },
+    failCreate(index, error) { createFailure = { index, error }; },
+    failDestroy(target, error) { destroyFailures.set(target, error); },
     failTarget(target, error) { failures.set(target, error); },
     refreshOwner(target, owner) { refreshedOwners.set(target, owner); },
     clearTargetFailure(target) { failures.delete(target); },
@@ -105,6 +111,7 @@ function fakeEnvironment({ reducedMotion = false } = {}) {
     },
     get timerCount() { return timers.size; },
     env: {
+      recordMetadata: false,
       clearTimeout(id) { timers.delete(id); },
       createAnnotation: makeAnnotation,
       createEvent(type, detail, owner) {
@@ -183,6 +190,55 @@ test('story construction rejects a bad final target without mounting a partial s
 
   assert.throws(() => createStory(steps(), {}, environment.env), (thrown) => thrown === error);
   assert.equal(environment.annotations.length, 0);
+});
+
+test('story construction failure rolls created annotations back in input order', () => {
+  const environment = fakeEnvironment();
+  const cause = new Error('third annotation failed');
+  environment.failCreate(2, cause);
+  const definitions = [
+    { target: 'first', mark: 'underline' },
+    { target: 'second', mark: 'circle' },
+    { target: 'third', mark: 'box' },
+  ];
+
+  assert.throws(
+    () => createStory(definitions, {}, environment.env),
+    (error) => error === cause,
+  );
+  assert.deepEqual(
+    environment.calls
+      .filter(([name]) => name === 'annotation:destroy')
+      .map(([, target]) => target),
+    ['first', 'second'],
+  );
+});
+
+test('story trigger setup failure tears annotations down in input order', () => {
+  const environment = fakeEnvironment();
+  const cause = new Error('trigger setup failed');
+  environment.env.document = {
+    readyState: 'loading',
+    addEventListener() { throw cause; },
+  };
+  environment.env.microtask = (callback) => queueMicrotask(callback);
+  const definitions = [
+    { target: 'first', mark: 'underline' },
+    { target: 'second', mark: 'circle' },
+    { target: 'third', mark: 'box' },
+  ];
+
+  assert.throws(
+    () => createStory(definitions, { trigger: 'load' }, environment.env),
+    (error) => error instanceof HanamaruStateError
+      && error.details.cause === cause,
+  );
+  assert.deepEqual(
+    environment.calls
+      .filter(([name]) => name === 'annotation:destroy')
+      .map(([, target]) => target),
+    ['first', 'second', 'third'],
+  );
 });
 
 test('story construction rejects malformed and unknown story input', () => {
@@ -517,6 +573,38 @@ test('destroy aborts once, clears timers, destroys annotations, and makes contro
   }
   assert.equal(environment.calls.length, calls);
   assert.equal(story.finished, finished);
+});
+
+test('destroy reports the lowest failing input index and still tears down forward', () => {
+  const environment = fakeEnvironment();
+  const definitions = [
+    { target: 'first', mark: 'underline' },
+    { target: 'second', mark: 'circle' },
+    { target: 'third', mark: 'box' },
+  ];
+  const firstCause = new Error('first destroy failed');
+  const thirdCause = new Error('third destroy failed');
+  const story = createStory(definitions, {}, environment.env);
+  environment.failDestroy('first', firstCause);
+  environment.failDestroy('third', thirdCause);
+  environment.calls.length = 0;
+
+  assert.equal(story.destroy(), story);
+
+  assert.deepEqual(
+    environment.calls
+      .filter(([name]) => name === 'annotation:destroy')
+      .map(([, target]) => target),
+    ['first', 'second', 'third'],
+  );
+  assert.deepEqual(environment.annotations.map(({ state }) => state), [
+    'destroyed', 'destroyed', 'destroyed',
+  ]);
+  const event = environment.events.at(-1);
+  assert.equal(event.type, 'hana:error');
+  assert.equal(event.detail.index, 0);
+  assert.ok(event.detail.error instanceof HanamaruStateError);
+  assert.equal(event.detail.error.details.cause, firstCause);
 });
 
 test('current target loss cancels with its typed error and leaves every mark untouched', async () => {

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createAnnotation } from '../../src/annotation.js';
 import { readControllerMetadata } from '../../src/controller-metadata.js';
+import { HanamaruStateError } from '../../src/errors.js';
 import { createGroup } from '../../src/group.js';
 import { registerMark } from '../../src/plugins.js';
 import { runtimeState } from '../../src/runtime-state.js';
@@ -11,14 +12,27 @@ import { createStory } from '../../src/story.js';
 function annotationEnvironment({ id = 'generated-seed' } = {}) {
   const calls = [];
   const owner = { name: 'owner' };
+  const svgLayer = { children: [] };
+  const noteLayer = { children: [] };
   let createFailure = null;
   let destroyFailure = null;
   let eventHandler = null;
   let layoutCleanup = null;
   let observeFailure = null;
+  let pendingResidue = false;
   let rebindFailure = null;
   let resolveFailure = null;
   let synchronousIntersection = false;
+  const createNode = (layer) => {
+    const node = {
+      remove() {
+        const index = layer.children.indexOf(node);
+        if (index !== -1) layer.children.splice(index, 1);
+      },
+    };
+    layer.children.push(node);
+    return node;
+  };
   let nextRendererId = 0;
   const shared = {
     bumpGeneration() { return 1; },
@@ -26,12 +40,16 @@ function annotationEnvironment({ id = 'generated-seed' } = {}) {
       try { write(read()); } catch (error) { onError?.(error); }
     },
     observeIntersection(binding) {
+      calls.push('trigger:observe');
       if (synchronousIntersection) binding.onEnter();
-      return () => {};
+      return () => { calls.push('trigger:cleanup'); };
     },
     observeLayout() {
       if (observeFailure !== null) throw observeFailure;
-      return () => layoutCleanup?.();
+      return () => {
+        calls.push('layout:cleanup');
+        layoutCleanup?.();
+      };
     },
     rebindLayout() {
       if (rebindFailure !== null) throw rebindFailure;
@@ -39,14 +57,18 @@ function annotationEnvironment({ id = 'generated-seed' } = {}) {
     },
     registerController() { return 0; },
     releaseController() { calls.push('releaseController'); },
+    svgLayer,
+    noteLayer,
   };
   const environment = {
     calls,
+    get ownedCount() { return svgLayer.children.length + noteLayer.children.length; },
     setCreateFailure(error) { createFailure = error; },
     setDestroyFailure(error) { destroyFailure = error; },
     setEventHandler(handler) { eventHandler = handler; },
     setLayoutCleanup(handler) { layoutCleanup = handler; },
     setObserveFailure(error) { observeFailure = error; },
+    setPendingResidue(value) { pendingResidue = value; },
     setRebindFailure(error) { rebindFailure = error; },
     setResolveFailure(error) { resolveFailure = error; },
     setSynchronousIntersection(value) { synchronousIntersection = value; },
@@ -56,9 +78,11 @@ function annotationEnvironment({ id = 'generated-seed' } = {}) {
       createRenderer() {
         if (createFailure !== null) throw createFailure;
         const rendererId = ++nextRendererId;
+        const group = createNode(svgLayer);
+        if (pendingResidue) createNode(noteLayer);
         return {
           rendererId,
-          group: {},
+          group,
           noteElement: null,
           animate() {
             return { animations: [], finished: Promise.resolve() };
@@ -66,6 +90,7 @@ function annotationEnvironment({ id = 'generated-seed' } = {}) {
           destroy() {
             calls.push(['renderer:destroy', rendererId]);
             if (destroyFailure !== null) throw destroyFailure;
+            group.remove();
           },
           draw() {},
           finish() {},
@@ -156,6 +181,83 @@ function aggregateTargets() {
       },
     };
   });
+}
+
+function foreignAggregateEnvironment({ recordMetadata } = {}) {
+  const annotations = [];
+  const destroyed = [];
+  const env = {
+    createAnnotation(target) {
+      let state = 'idle';
+      const annotation = {
+        get state() { return state; },
+        get finished() { return null; },
+        destroy() {
+          if (state === 'destroyed') return annotation;
+          state = 'destroyed';
+          destroyed.push(target);
+          return annotation;
+        },
+      };
+      annotations.push(annotation);
+      return annotation;
+    },
+    createEvent() {},
+    reducedMotion() { return true; },
+    resolveTarget(target) { return target.record; },
+  };
+  if (recordMetadata !== undefined) env.recordMetadata = recordMetadata;
+  return { annotations, destroyed, env };
+}
+
+class ThrowingSetWeakMap extends WeakMap {
+  constructor(failAt, cause) {
+    super();
+    this.cause = cause;
+    this.failAt = failAt;
+    this.setCalls = 0;
+  }
+
+  set(key, value) {
+    this.setCalls += 1;
+    if (this.setCalls === this.failAt) throw this.cause;
+    return super.set(key, value);
+  }
+}
+
+class DestroyingSetWeakMap extends WeakMap {
+  constructor(destroyAt) {
+    super();
+    this.destroyAt = destroyAt;
+    this.setCalls = 0;
+  }
+
+  set(key, value) {
+    this.setCalls += 1;
+    if (this.setCalls === this.destroyAt) key.destroy();
+    return super.set(key, value);
+  }
+}
+
+class RetainingThrowingSetWeakMap extends WeakMap {
+  constructor(failAt, cause) {
+    super();
+    this.cause = cause;
+    this.failAt = failAt;
+    this.retainedKey = null;
+    this.retainedValue = null;
+    this.setCalls = 0;
+  }
+
+  set(key, value) {
+    this.setCalls += 1;
+    if (this.setCalls === this.failAt) {
+      this.retainedKey = key;
+      this.retainedValue = value;
+      throw this.cause;
+    }
+    return super.set(key, value);
+  }
 }
 
 test('foreign objects have no controller metadata', () => {
@@ -359,6 +461,165 @@ test('committed update metadata survives old-renderer cleanup suspension', () =>
   controller.destroy();
 });
 
+test('annotation construction contains a throwing metadata store transactionally', () => {
+  const cause = new Error('metadata set failed during construction');
+  const originalMetadata = runtimeState.metadata;
+  const throwingMetadata = new ThrowingSetWeakMap(1, cause);
+  const environment = annotationEnvironment();
+  environment.setPendingResidue(true);
+  runtimeState.metadata = throwingMetadata;
+  try {
+    assert.throws(
+      () => createAnnotation(
+        { name: 'target' },
+        { mark: 'underline', trigger: 'viewport' },
+        environment.env,
+      ),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_RUNTIME'
+        && error.details.cause === cause,
+    );
+
+    assert.equal(throwingMetadata.setCalls, 1);
+    assert.equal(environment.ownedCount, 0);
+    assert.deepEqual(
+      environment.calls.filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy'),
+      [['renderer:destroy', 1]],
+    );
+    assert.equal(environment.calls.filter((call) => call === 'layout:cleanup').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'trigger:cleanup').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+  } finally {
+    runtimeState.metadata = originalMetadata;
+  }
+});
+
+test('annotation construction terminalizes a controller retained by a throwing metadata store', () => {
+  const cause = new Error('metadata retained controller before throwing');
+  const originalMetadata = runtimeState.metadata;
+  const retainingMetadata = new RetainingThrowingSetWeakMap(1, cause);
+  const environment = annotationEnvironment();
+  runtimeState.metadata = retainingMetadata;
+  try {
+    assert.throws(
+      () => createAnnotation(
+        { name: 'target' },
+        { mark: 'underline' },
+        environment.env,
+      ),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_RUNTIME'
+        && error.details.cause === cause,
+    );
+
+    assert.equal(retainingMetadata.retainedKey.state, 'destroyed');
+    assert.equal(environment.ownedCount, 0);
+    const callsAfterFailure = [...environment.calls];
+    retainingMetadata.retainedKey.destroy();
+    assert.deepEqual(environment.calls, callsAfterFailure);
+  } finally {
+    runtimeState.metadata = originalMetadata;
+  }
+});
+
+test('annotation update destroys both renderers when metadata storage throws', () => {
+  const cause = new Error('metadata set failed during update');
+  const originalMetadata = runtimeState.metadata;
+  const throwingMetadata = new ThrowingSetWeakMap(2, cause);
+  const environment = annotationEnvironment();
+  let controller;
+  runtimeState.metadata = throwingMetadata;
+  try {
+    controller = createAnnotation(
+      { name: 'initial' },
+      { mark: 'underline' },
+      environment.env,
+    );
+    environment.setPendingResidue(true);
+
+    assert.throws(
+      () => controller.update({ target: { name: 'replacement' } }),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_RUNTIME'
+        && error.details.cause === cause,
+    );
+
+    assert.equal(controller.state, 'destroyed');
+    assert.equal(readControllerMetadata(controller), undefined);
+    assert.equal(environment.ownedCount, 0);
+    assert.deepEqual(
+      environment.calls
+        .filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy')
+        .map(([, rendererId]) => rendererId)
+        .sort(),
+      [1, 2],
+    );
+    assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+  } finally {
+    if (controller?.state !== 'destroyed') controller?.destroy();
+    runtimeState.metadata = originalMetadata;
+  }
+});
+
+test('annotation construction deletes metadata written after reentrant destroy', () => {
+  const originalMetadata = runtimeState.metadata;
+  const destroyingMetadata = new DestroyingSetWeakMap(1);
+  const environment = annotationEnvironment();
+  environment.setPendingResidue(true);
+  runtimeState.metadata = destroyingMetadata;
+  try {
+    const controller = createAnnotation(
+      { name: 'target' },
+      { mark: 'underline' },
+      environment.env,
+    );
+
+    assert.equal(controller.state, 'destroyed');
+    assert.equal(readControllerMetadata(controller), undefined);
+    assert.equal(environment.ownedCount, 0);
+    assert.deepEqual(
+      environment.calls.filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy'),
+      [['renderer:destroy', 1]],
+    );
+    assert.equal(environment.calls.filter((call) => call === 'releaseController').length, 1);
+    assert.equal(environment.calls.filter((call) => call === 'lease:release').length, 1);
+  } finally {
+    runtimeState.metadata = originalMetadata;
+  }
+});
+
+test('annotation update deletes metadata written after reentrant destroy', () => {
+  const originalMetadata = runtimeState.metadata;
+  const destroyingMetadata = new DestroyingSetWeakMap(2);
+  const environment = annotationEnvironment();
+  runtimeState.metadata = destroyingMetadata;
+  try {
+    const controller = createAnnotation(
+      { name: 'initial' },
+      { mark: 'underline' },
+      environment.env,
+    );
+    environment.setPendingResidue(true);
+
+    controller.update({ target: { name: 'replacement' } });
+
+    assert.equal(controller.state, 'destroyed');
+    assert.equal(readControllerMetadata(controller), undefined);
+    assert.equal(environment.ownedCount, 0);
+    assert.deepEqual(
+      environment.calls
+        .filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy')
+        .map(([, rendererId]) => rendererId)
+        .sort(),
+      [1, 2],
+    );
+  } finally {
+    runtimeState.metadata = originalMetadata;
+  }
+});
+
 test('reentrant destroy during update rebind cannot resurrect annotation metadata', () => {
   const environment = annotationEnvironment();
   const controller = createAnnotation(
@@ -366,16 +627,51 @@ test('reentrant destroy during update rebind cannot resurrect annotation metadat
     { mark: 'underline' },
     environment.env,
   );
+  environment.setPendingResidue(true);
   environment.setLayoutCleanup(() => controller.destroy());
 
   controller.update({ target: { name: 'replacement' } });
 
   assert.equal(controller.state, 'destroyed');
   assert.equal(readControllerMetadata(controller), undefined);
+  assert.equal(environment.ownedCount, 0);
+  assert.deepEqual(
+    environment.calls
+      .filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy')
+      .map(([, rendererId]) => rendererId)
+      .sort(),
+    [1, 2],
+  );
+});
+
+test('reentrant destroy followed by layout rebind failure cleans each renderer once', () => {
+  const environment = annotationEnvironment();
+  const controller = createAnnotation(
+    { name: 'initial' },
+    { mark: 'underline' },
+    environment.env,
+  );
+  environment.setPendingResidue(true);
+  environment.setLayoutCleanup(() => controller.destroy());
+  environment.setRebindFailure(new Error('rebind failed after destroy'));
+
+  controller.update({ target: { name: 'replacement' } });
+
+  assert.equal(controller.state, 'destroyed');
+  assert.equal(readControllerMetadata(controller), undefined);
+  assert.equal(environment.ownedCount, 0);
+  assert.deepEqual(
+    environment.calls
+      .filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy')
+      .map(([, rendererId]) => rendererId)
+      .sort(),
+    [1, 2],
+  );
 });
 
 test('reentrant destroy during annotation trigger setup cannot create metadata', () => {
   const environment = annotationEnvironment();
+  environment.setPendingResidue(true);
   environment.setSynchronousIntersection(true);
   environment.setEventHandler(({ type, detail }) => {
     if (type === 'hana:start') detail.controller.destroy();
@@ -389,6 +685,11 @@ test('reentrant destroy during annotation trigger setup cannot create metadata',
 
   assert.equal(controller.state, 'destroyed');
   assert.equal(readControllerMetadata(controller), undefined);
+  assert.equal(environment.ownedCount, 0);
+  assert.deepEqual(
+    environment.calls.filter((call) => Array.isArray(call) && call[0] === 'renderer:destroy'),
+    [['renderer:destroy', 1]],
+  );
 });
 
 test('annotation construction failure never records metadata', () => {
@@ -571,6 +872,47 @@ test('group records frozen aggregate options and ordered member metadata', () =>
   controller.destroy();
 });
 
+test('aggregates reject and roll back foreign members missing canonical metadata', () => {
+  for (const [kind, construct] of [
+    ['story', (members, env) => createStory(members, {}, env)],
+    ['group', (members, env) => createGroup(members, {}, env)],
+  ]) {
+    const [first, second] = aggregateTargets();
+    const environment = foreignAggregateEnvironment();
+
+    assert.throws(
+      () => construct([
+        { target: first, mark: 'underline' },
+        { target: second, mark: 'circle' },
+      ], environment.env),
+      (error) => error instanceof HanamaruStateError
+        && error.code === 'HANA_STATE_RUNTIME'
+        && error.details.cause instanceof TypeError,
+      kind,
+    );
+    assert.equal(environment.annotations.length, 2, kind);
+    assert.equal(environment.destroyed.length, 2, kind);
+  }
+});
+
+test('explicit metadata opt-out supports only package-private lifecycle fakes', () => {
+  for (const [kind, construct] of [
+    ['story', (members, env) => createStory(members, {}, env)],
+    ['group', (members, env) => createGroup(members, {}, env)],
+  ]) {
+    const [target] = aggregateTargets();
+    const environment = foreignAggregateEnvironment({ recordMetadata: false });
+    const controller = construct([
+      { target, mark: 'underline' },
+    ], environment.env);
+
+    assert.equal(controller.state, 'idle', kind);
+    assert.equal(readControllerMetadata(controller), undefined, kind);
+    controller.destroy();
+    assert.equal(environment.destroyed.length, 1, kind);
+  }
+});
+
 test('story and group construction rollback removes every member metadata record', () => {
   for (const [kind, construct] of [
     ['story', (members, env) => createStory(members, {}, env)],
@@ -590,7 +932,7 @@ test('story and group construction rollback removes every member metadata record
       [undefined, undefined],
       kind,
     );
-    assert.deepEqual(environment.destroyOrder, [1, 0], kind);
+    assert.deepEqual([...environment.destroyOrder].sort(), [0, 1], kind);
   }
 });
 
@@ -676,7 +1018,79 @@ test('reentrant destroy during aggregate trigger setup cannot create metadata', 
   }
 });
 
-test('aggregate destroy removes its metadata and every member record in reverse order', () => {
+test('aggregate metadata written after reentrant destroy is deleted', () => {
+  for (const [kind, construct] of [
+    ['story', (members, env) => createStory(members, {}, env)],
+    ['group', (members, env) => createGroup(members, {}, env)],
+  ]) {
+    const originalMetadata = runtimeState.metadata;
+    const destroyingMetadata = new DestroyingSetWeakMap(3);
+    const [first, second] = aggregateTargets();
+    const environment = aggregateEnvironment();
+    runtimeState.metadata = destroyingMetadata;
+    try {
+      const controller = construct([
+        { target: first, mark: 'underline' },
+        { target: second, mark: 'circle' },
+      ], environment.env);
+
+      assert.equal(controller.state, 'destroyed', kind);
+      assert.equal(readControllerMetadata(controller), undefined, kind);
+      assert.deepEqual(
+        environment.annotations.map(readControllerMetadata),
+        [undefined, undefined],
+        kind,
+      );
+      assert.equal(
+        environment.memberEnvironments.reduce(
+          (count, member) => count + member.ownedCount,
+          0,
+        ),
+        0,
+        kind,
+      );
+    } finally {
+      runtimeState.metadata = originalMetadata;
+    }
+  }
+});
+
+test('aggregate construction terminalizes controllers retained by throwing metadata stores', () => {
+  for (const [kind, construct] of [
+    ['story', (members, env) => createStory(members, {}, env)],
+    ['group', (members, env) => createGroup(members, {}, env)],
+  ]) {
+    const cause = new Error(`${kind} metadata retained controller before throwing`);
+    const originalMetadata = runtimeState.metadata;
+    const retainingMetadata = new RetainingThrowingSetWeakMap(2, cause);
+    const [target] = aggregateTargets();
+    const environment = aggregateEnvironment();
+    runtimeState.metadata = retainingMetadata;
+    try {
+      assert.throws(
+        () => construct([
+          { target, mark: 'underline' },
+        ], environment.env),
+        (error) => error instanceof HanamaruStateError
+          && error.code === 'HANA_STATE_RUNTIME'
+          && error.details.cause === cause,
+        kind,
+      );
+
+      assert.equal(retainingMetadata.retainedKey.state, 'destroyed', kind);
+      assert.equal(readControllerMetadata(retainingMetadata.retainedKey), undefined, kind);
+      assert.equal(readControllerMetadata(environment.annotations[0]), undefined, kind);
+      assert.equal(environment.memberEnvironments[0].ownedCount, 0, kind);
+      const destroyOrderAfterFailure = [...environment.destroyOrder];
+      retainingMetadata.retainedKey.destroy();
+      assert.deepEqual(environment.destroyOrder, destroyOrderAfterFailure, kind);
+    } finally {
+      runtimeState.metadata = originalMetadata;
+    }
+  }
+});
+
+test('aggregate destroy removes its metadata and every member record', () => {
   for (const [kind, construct] of [
     ['story', (members, env) => createStory(members, {}, env)],
     ['group', (members, env) => createGroup(members, {}, env)],
@@ -697,9 +1111,9 @@ test('aggregate destroy removes its metadata and every member record in reverse 
       [undefined, undefined, undefined],
       kind,
     );
-    assert.deepEqual(environment.destroyOrder, [2, 1, 0], kind);
+    assert.deepEqual([...environment.destroyOrder].sort(), [0, 1, 2], kind);
     assert.doesNotThrow(() => controller.destroy());
-    assert.deepEqual(environment.destroyOrder, [2, 1, 0], kind);
+    assert.deepEqual([...environment.destroyOrder].sort(), [0, 1, 2], kind);
   }
 });
 

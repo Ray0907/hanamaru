@@ -42,7 +42,9 @@ export function recordAnnotationMetadata(controller, target, options) {
 
 function annotationMetadataFor(controllers) {
   const records = controllers.map((controller) => readControllerMetadata(controller));
-  if (records.some((record) => record === undefined)) return null;
+  if (records.some((record) => record === undefined)) {
+    throw new TypeError('aggregate member metadata is missing');
+  }
   if (records.some((record) => record?.kind !== 'annotation')) {
     throw new TypeError('aggregate members must be Annotation controllers');
   }
@@ -55,7 +57,6 @@ export function recordStoryMetadata(controller, options, annotations) {
     throw new TypeError('story annotations must be an array');
   }
   const steps = annotationMetadataFor(annotations);
-  if (steps === null) return undefined;
   const canonicalOptions = options.trigger === 'viewport'
     ? Object.freeze({
       trigger: options.trigger,
@@ -83,7 +84,6 @@ export function recordGroupMetadata(controller, options, annotations) {
     throw new TypeError('group annotations must be an array');
   }
   const members = annotationMetadataFor(annotations);
-  if (members === null) return undefined;
   const metadata = Object.freeze({
     kind: 'group',
     options: Object.freeze({

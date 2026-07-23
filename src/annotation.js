@@ -211,15 +211,19 @@ function commitRenderer(renderer) {
   pendingRendererMounts.delete(renderer);
 }
 
-function cleanupUncommittedRenderer(renderer) {
+function discardUncommittedRendererMount(renderer) {
   const layers = pendingRendererMounts.get(renderer) ?? [];
   pendingRendererMounts.delete(renderer);
-  try { renderer.destroy(); } catch { /* The overlay snapshot remains authoritative. */ }
   for (const { layer, previous } of layers) {
     for (const child of [...layer.children]) {
       if (!previous.has(child)) child.remove();
     }
   }
+}
+
+function cleanupUncommittedRenderer(renderer) {
+  try { renderer.destroy(); } catch { /* The overlay snapshot remains authoritative. */ }
+  discardUncommittedRendererMount(renderer);
 }
 
 function cancelNodeAnimations(node) {
@@ -1068,7 +1072,13 @@ export function createAnnotation(target, rawOptions, env) {
     try {
       rebindLayout();
     } catch (error) {
-      cleanupUncommittedRenderer(renderer);
+      if (destroyed) {
+        discardUncommittedRendererMount(nextRenderer);
+        try { oldRenderer.destroy(); } catch { /* Destroy already owns the lifecycle outcome. */ }
+        forceRemoveRenderer(oldRenderer, knownOwners);
+        return controller;
+      }
+      cleanupUncommittedRenderer(nextRenderer);
       renderer = oldRenderer;
       currentTarget = oldTarget;
       options = oldOptions;
@@ -1079,13 +1089,29 @@ export function createAnnotation(target, rawOptions, env) {
       return controller;
     }
     if (destroyed) {
-      cleanupUncommittedRenderer(nextRenderer);
+      discardUncommittedRendererMount(nextRenderer);
+      try { oldRenderer.destroy(); } catch { /* Destroy already owns the lifecycle outcome. */ }
+      forceRemoveRenderer(oldRenderer, knownOwners);
+      return controller;
+    }
+    try {
+      recordAnnotationMetadata(controller, currentTarget, options);
+    } catch (error) {
+      destroy();
+      discardUncommittedRendererMount(nextRenderer);
+      try { oldRenderer.destroy(); } catch { /* The metadata failure remains authoritative. */ }
+      forceRemoveRenderer(oldRenderer, knownOwners);
+      deleteControllerMetadata(controller);
+      throw stateError(error);
+    }
+    if (destroyed) {
+      deleteControllerMetadata(controller);
+      discardUncommittedRendererMount(nextRenderer);
       try { oldRenderer.destroy(); } catch { /* Destroy already owns the lifecycle outcome. */ }
       forceRemoveRenderer(oldRenderer, knownOwners);
       return controller;
     }
     commitRenderer(renderer);
-    recordAnnotationMetadata(controller, currentTarget, options);
     knownOwners.add(nextRecord.ownerElement);
     let cleanupFailure = null;
     try { oldRenderer.hide(); } catch (error) { cleanupFailure = error; }
@@ -1153,18 +1179,25 @@ export function createAnnotation(target, rawOptions, env) {
     bindLayout();
     installAutomaticTrigger();
     if (destroyed) {
-      cleanupUncommittedRenderer(renderer);
+      discardUncommittedRendererMount(renderer);
+      return controller;
+    }
+    recordAnnotationMetadata(controller, currentTarget, options);
+    if (destroyed) {
+      deleteControllerMetadata(controller);
+      discardUncommittedRendererMount(renderer);
       return controller;
     }
     commitRenderer(renderer);
   } catch (error) {
-    activeRenderers.delete(controller);
-    try { stopAutomaticTrigger(); } catch { /* Preserve binding or trigger failure. */ }
-    cleanupUncommittedRenderer(renderer);
-    try { shared.releaseController(id); } catch { /* Preserve binding failure. */ }
-    try { lease.release(); } catch { /* Preserve binding failure. */ }
+    deleteControllerMetadata(controller);
+    if (destroyed) {
+      discardUncommittedRendererMount(renderer);
+    } else {
+      destroy();
+      discardUncommittedRendererMount(renderer);
+    }
     throw stateError(error);
   }
-  recordAnnotationMetadata(controller, currentTarget, options);
   return controller;
 }

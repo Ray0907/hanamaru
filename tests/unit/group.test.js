@@ -277,6 +277,7 @@ function fakeEnvironment({ readyState = 'loading' } = {}) {
       await flushMicrotasks();
     },
     env: {
+      recordMetadata: false,
       root,
       document: root,
       triggerId: 'fake-group-trigger',

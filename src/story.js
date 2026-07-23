@@ -169,7 +169,7 @@ export function createStory(steps, rawOptions = {}, env) {
       annotations.push(env.createAnnotation(step.target, step.annotationOptions));
     }
   } catch (error) {
-    for (let index = annotations.length - 1; index >= 0; index -= 1) {
+    for (let index = 0; index < annotations.length; index += 1) {
       try { annotations[index].destroy(); } catch { /* Preserve the construction failure. */ }
     }
     throw error;
@@ -708,7 +708,7 @@ export function createStory(steps, rawOptions = {}, env) {
     stopAutomaticTrigger(true);
     let destroyFailure = null;
     let destroyFailureIndex = -1;
-    for (let index = annotations.length - 1; index >= 0; index -= 1) {
+    for (let index = 0; index < annotations.length; index += 1) {
       try {
         annotations[index].destroy();
       } catch (error) {
@@ -725,15 +725,23 @@ export function createStory(steps, rawOptions = {}, env) {
   }
   try {
     installAutomaticTrigger();
-    if (state !== 'destroyed') {
+    if (state !== 'destroyed' && env.recordMetadata !== false) {
       recordStoryMetadata(controller, options, annotations);
+      if (state === 'destroyed') deleteControllerMetadata(controller);
     }
   } catch (error) {
-    stopAutomaticTrigger(true);
-    for (let index = annotations.length - 1; index >= 0; index -= 1) {
-      try {
-        annotations[index].destroy();
-      } catch { /* Preserve trigger installation failure. */ }
+    if (state !== 'destroyed') {
+      operationEpoch += 1;
+      clearPendingTimer();
+      rejectPending(abortError('destroyed'));
+      phase = null;
+      state = 'destroyed';
+      stopAutomaticTrigger(true);
+      for (let index = 0; index < annotations.length; index += 1) {
+        try {
+          annotations[index].destroy();
+        } catch { /* Preserve trigger installation or metadata failure. */ }
+      }
     }
     deleteControllerMetadata(controller);
     throw runtimeError(error);

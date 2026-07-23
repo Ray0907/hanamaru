@@ -1028,15 +1028,23 @@ export function createGroup(members, rawOptions = {}, env) {
       stopMemberErrors = env.observeMemberErrors(handleMemberError);
     }
     installAutomaticTrigger();
-    if (state !== 'destroyed') {
+    if (state !== 'destroyed' && env.recordMetadata !== false) {
       recordGroupMetadata(controller, options, annotations);
+      if (state === 'destroyed') deleteControllerMetadata(controller);
     }
   } catch (error) {
-    stopAutomaticTrigger();
-    try { stopMemberErrors?.(); } catch { /* Preserve setup failure. */ }
-    stopMemberErrors = null;
-    for (let index = annotations.length - 1; index >= 0; index -= 1) {
-      try { annotations[index].destroy(); } catch { /* Preserve trigger setup failure. */ }
+    if (state !== 'destroyed') {
+      operationEpoch += 1;
+      abortPending('destroyed');
+      requestedVisible = false;
+      state = 'destroyed';
+      cancelRefreshObservation();
+      stopAutomaticTrigger();
+      try { stopMemberErrors?.(); } catch { /* Preserve setup failure. */ }
+      stopMemberErrors = null;
+      for (let index = annotations.length - 1; index >= 0; index -= 1) {
+        try { annotations[index].destroy(); } catch { /* Preserve setup or metadata failure. */ }
+      }
     }
     deleteControllerMetadata(controller);
     throw runtimeError(error);
