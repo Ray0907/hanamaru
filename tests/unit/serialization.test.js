@@ -1090,16 +1090,16 @@ test('annotation metadata snapshots accepted locator bytes without changing runt
     occurrence: 1,
   };
   const environment = annotationEnvironment();
-  let resolvedSource;
+  const resolvedSources = [];
   const originalResolve = environment.env.resolveTarget;
   environment.env.resolveTarget = (target) => {
-    resolvedSource = target;
+    resolvedSources.push(target);
     return originalResolve(target);
   };
   const controller = createAnnotation(source, { mark: 'underline' }, environment.env);
   const metadata = readControllerMetadata(controller);
 
-  assert.equal(resolvedSource, source);
+  assert.equal(resolvedSources[0], source);
   assert.notEqual(metadata.target, source);
   assert.equal(Object.isFrozen(metadata.target), true);
   assert.deepEqual(metadata.target, {
@@ -1112,11 +1112,39 @@ test('annotation metadata snapshots accepted locator bytes without changing runt
   source.text = 'Mutated text';
   source.occurrence = 9;
   controller.update({ note: 'Updated without replacing target' });
+  assert.notEqual(resolvedSources[1], source);
+  assert.equal(Object.isFrozen(resolvedSources[1]), true);
+  assert.deepEqual(resolvedSources[1], {
+    within: '#original-scope',
+    text: 'Original text',
+    occurrence: 1,
+  });
   assert.deepEqual(serialize(controller).target, {
     type: 'locator',
     within: { type: 'selector', selector: '#original-scope' },
     text: 'Original text',
     occurrence: 1,
+  });
+
+  const replacement = {
+    within: '#replacement-scope',
+    text: 'Replacement text',
+  };
+  controller.update({ target: replacement });
+  assert.equal(resolvedSources[2], replacement);
+  replacement.within = '#replacement-mutated';
+  replacement.text = 'Replacement mutated';
+  controller.update({ duration: 20 });
+  assert.notEqual(resolvedSources[3], replacement);
+  assert.equal(Object.isFrozen(resolvedSources[3]), true);
+  assert.deepEqual(resolvedSources[3], {
+    within: '#replacement-scope',
+    text: 'Replacement text',
+  });
+  assert.deepEqual(serialize(controller).target, {
+    type: 'locator',
+    within: { type: 'selector', selector: '#replacement-scope' },
+    text: 'Replacement text',
   });
 
   controller.destroy();

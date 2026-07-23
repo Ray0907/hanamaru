@@ -417,6 +417,7 @@ export function createAnnotation(target, rawOptions, env) {
   let currentTarget = target;
   let record = env.resolveTarget(target);
   let currentMetadataTarget = snapshotAnnotationTarget(target);
+  currentTarget = currentMetadataTarget;
   const lease = env.lease;
   const { shared } = lease;
   let generation;
@@ -1074,7 +1075,7 @@ export function createAnnotation(target, rawOptions, env) {
     const oldMarkPlugin = markPlugin;
     const oldRecord = record;
     const priorState = state;
-    currentTarget = nextTarget;
+    currentTarget = nextMetadataTarget;
     currentMetadataTarget = nextMetadataTarget;
     options = nextOptions;
     markPlugin = nextMarkPlugin;
