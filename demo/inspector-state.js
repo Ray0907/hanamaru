@@ -87,24 +87,27 @@ function snapshotOptions(options) {
 }
 
 function snapshotTransient(transient) {
-  if (transient == null) return { ok: true, value: null };
+  if (transient == null) return { ok: true, value: null, identity: null };
   const status = recordStatus(transient);
-  if (!status.ok) return { ok: false, value: null };
-  if (!status.isRecord) return { ok: true, value: null };
+  if (!status.ok) return { ok: false, value: null, identity: null };
+  if (!status.isRecord) return { ok: true, value: null, identity: null };
 
   const kind = readField(transient, 'kind');
-  if (!kind.ok) return { ok: false, value: null };
+  if (!kind.ok) return { ok: false, value: null, identity: null };
   if (kind.value !== 'note' && kind.value !== 'palette') {
-    return { ok: true, value: null };
+    return { ok: true, value: null, identity: null };
   }
 
   const opener = readField(transient, 'opener');
-  if (!opener.ok) return { ok: false, value: null };
-  if (!isOpaqueControlToken(opener.value)) return { ok: true, value: null };
+  if (!opener.ok) return { ok: false, value: null, identity: null };
+  if (!isOpaqueControlToken(opener.value)) {
+    return { ok: true, value: null, identity: null };
+  }
 
   return {
     ok: true,
     value: { kind: kind.value, opener: opener.value },
+    identity: transient,
   };
 }
 
@@ -115,6 +118,7 @@ function snapshotModel(model) {
       ok: false,
       stateOk: false,
       value: { state: undefined, transient: null, mark: undefined, options: {} },
+      transientIdentity: null,
     };
   }
   if (state.value === 'closed') {
@@ -122,6 +126,7 @@ function snapshotModel(model) {
       ok: true,
       stateOk: true,
       value: { state: 'closed', transient: null, mark: undefined, options: {} },
+      transientIdentity: null,
     };
   }
 
@@ -130,7 +135,7 @@ function snapshotModel(model) {
   const options = readField(model, 'options');
   const transientSnapshot = transient.ok
     ? snapshotTransient(transient.value)
-    : { ok: false, value: null };
+    : { ok: false, value: null, identity: null };
   const optionsSnapshot = options.ok
     ? snapshotOptions(options.value)
     : { ok: false, value: {} };
@@ -142,6 +147,7 @@ function snapshotModel(model) {
       && transientSnapshot.ok
       && optionsSnapshot.ok,
     stateOk: true,
+    transientIdentity: transientSnapshot.identity,
     value: {
       state: state.value,
       transient: transientSnapshot.value,
@@ -221,6 +227,14 @@ export function createInspectorEffectContext(previous, event, result) {
   return stored.context;
 }
 
+/**
+ * Reduce exactly one Inspector event.
+ *
+ * Palette commands use two reducer calls: first dispatch `escape` and interpret
+ * its close/focus effects, then dispatch the command against the returned
+ * model. Direct normative transitions intentionally retain an open transient
+ * and emit only that transition row's effects.
+ */
 export function reduceInspector(model, event) {
   const typeField = readField(event, 'type');
   const snapshot = snapshotModel(model);
@@ -247,8 +261,15 @@ export function reduceInspector(model, event) {
     changes = {},
     acceptedEvent = eventSnapshot,
   ) => {
-    const result = changed(current, state, effects, changes);
-    return complete(result, acceptedEvent, result.model);
+    const semanticResult = changed(current, state, effects, changes);
+    const transient = Object.hasOwn(changes, 'transient')
+      ? changes.transient
+      : snapshot.transientIdentity;
+    const result = {
+      model: { ...semanticResult.model, transient },
+      effects: semanticResult.effects,
+    };
+    return complete(result, acceptedEvent, semanticResult.model);
   };
 
   if (!typeField.ok || typeof typeField.value !== 'string') return noChange();
@@ -268,15 +289,6 @@ export function reduceInspector(model, event) {
     ) {
       return change('closed', CLOSE_EFFECTS, { transient: null });
     }
-    return noChange();
-  }
-
-  if (
-    isTransientOpen(current)
-    && type !== 'escape'
-    && type !== 'close'
-    && type !== 'navigation'
-  ) {
     return noChange();
   }
 

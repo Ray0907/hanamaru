@@ -271,39 +271,112 @@ test('a second transient cannot replace the topmost transient', () => {
 });
 
 const OPEN_STATES = ['idle', 'selected', 'editing', 'applied'];
-const UNDERLYING_EVENTS = [
-  { type: 'open', invoker: 'open-button' },
-  { type: 'valid-selection', range: { id: 'range' } },
-  { type: 'invalid-selection' },
-  { type: 'choose-mark', mark: 'circle' },
-  { type: 'change-mark', mark: 'circle' },
-  { type: 'valid-option', name: 'placement', value: 'right' },
-  { type: 'add-note', opener: 'add-note-button' },
-  { type: 'open-palette', opener: 'shortcut' },
-  { type: 'apply' },
-  { type: 'cancel' },
-  { type: 'edit' },
-  { type: 'new-valid-selection', range: { id: 'new-range' } },
+const TRANSIENT_NORMATIVE_ROWS = [
+  {
+    state: 'idle',
+    event: { type: 'valid-selection', range: { id: 'range' } },
+    next: 'selected',
+    effects: ['clone-selection', 'show-toolbar'],
+  },
+  {
+    state: 'selected',
+    event: { type: 'invalid-selection' },
+    next: 'idle',
+    effects: ['clear-selection', 'hide-toolbar'],
+  },
+  {
+    state: 'selected',
+    event: { type: 'choose-mark', mark: 'circle' },
+    next: 'editing',
+    effects: ['create-preview', 'show-output'],
+  },
+  {
+    state: 'editing',
+    event: { type: 'change-mark', mark: 'circle' },
+    next: 'editing',
+    effects: ['update-preview', 'refresh-output'],
+  },
+  {
+    state: 'editing',
+    event: { type: 'valid-option', name: 'placement', value: 'right' },
+    next: 'editing',
+    effects: ['update-preview', 'refresh-output'],
+  },
+  {
+    state: 'editing',
+    event: { type: 'apply' },
+    next: 'applied',
+    effects: ['commit-preview', 'refresh-output'],
+  },
+  {
+    state: 'editing',
+    event: { type: 'cancel' },
+    next: 'selected',
+    effects: ['destroy-owned', 'retain-range', 'hide-output'],
+  },
+  {
+    state: 'applied',
+    event: { type: 'edit' },
+    next: 'editing',
+    effects: ['reuse-controller', 'focus-first-editor'],
+  },
+  {
+    state: 'applied',
+    event: { type: 'new-valid-selection', range: { id: 'new-range' } },
+    next: 'selected',
+    effects: [
+      'clone-selection',
+      'validate-clone',
+      'destroy-owned',
+      'replace-range',
+      'show-toolbar',
+    ],
+  },
 ];
 
 for (const kind of ['note', 'palette']) {
-  for (const state of OPEN_STATES) {
-    for (const event of UNDERLYING_EVENTS) {
-      test(`${kind} transient gates ${event.type} while Inspector is ${state}`, () => {
-        const model = {
-          state,
-          transient: { kind, opener: `${kind}-button` },
-          mark: 'underline',
-          options: { placement: 'auto' },
-        };
-        const result = reduceInspector(model, event);
+  for (const row of TRANSIENT_NORMATIVE_ROWS) {
+    test(`${kind} transient preserves the ${row.state}/${row.event.type} row`, () => {
+      const transient = { kind, opener: { id: `${kind}-button` } };
+      const model = {
+        state: row.state,
+        transient,
+        mark: 'underline',
+        options: { placement: 'auto' },
+      };
+      const result = reduceInspector(model, row.event);
 
-        assert.equal(result.model, model);
-        assert.deepEqual(result.effects, []);
-      });
-    }
+      assert.equal(result.model.state, row.next);
+      assert.equal(result.model.transient, transient);
+      assert.deepEqual(result.effects, row.effects);
+    });
   }
 }
+
+test('palette command protocol dismisses first then runs the normative command', () => {
+  const editing = {
+    state: 'editing',
+    transient: null,
+    mark: 'underline',
+    options: {},
+  };
+  const palette = reduceInspector(editing, {
+    type: 'open-palette',
+    opener: { id: 'shortcut' },
+  });
+  const dismissed = reduceInspector(palette.model, { type: 'escape' });
+  const command = reduceInspector(dismissed.model, { type: 'apply' });
+
+  assert.equal(dismissed.model.state, 'editing');
+  assert.equal(dismissed.model.transient, null);
+  assert.deepEqual(dismissed.effects, [
+    'close-transient',
+    'focus-transient-opener',
+  ]);
+  assert.equal(command.model.state, 'applied');
+  assert.equal(command.model.transient, null);
+  assert.deepEqual(command.effects, ['commit-preview', 'refresh-output']);
+});
 
 for (const kind of ['note', 'palette']) {
   for (const state of OPEN_STATES) {
