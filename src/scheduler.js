@@ -11,6 +11,10 @@ export class FrameQueue {
 
   #generationFor;
 
+  #beforeFlush;
+
+  #afterFlush;
+
   #pending = new Map();
 
   #scheduled = null;
@@ -22,14 +26,24 @@ export class FrameQueue {
       throw new TypeError('FrameQueue callbacks must be an object');
     }
 
-    const { requestFrame, cancelFrame, generationFor } = callbacks;
+    const {
+      requestFrame,
+      cancelFrame,
+      generationFor,
+      beforeFlush,
+      afterFlush,
+    } = callbacks;
     requireFunction('requestFrame', requestFrame);
     requireFunction('cancelFrame', cancelFrame);
     requireFunction('generationFor', generationFor);
+    if (beforeFlush !== undefined) requireFunction('beforeFlush', beforeFlush);
+    if (afterFlush !== undefined) requireFunction('afterFlush', afterFlush);
 
     this.#requestFrame = requestFrame;
     this.#cancelFrame = cancelFrame;
     this.#generationFor = generationFor;
+    this.#beforeFlush = beforeFlush;
+    this.#afterFlush = afterFlush;
   }
 
   enqueue(candidate) {
@@ -112,72 +126,77 @@ export class FrameQueue {
     this.#scheduled = null;
     const jobs = this.#pending;
     this.#pending = new Map();
-    const reads = [];
-    const readErrors = [];
+    try {
+      this.#beforeFlush?.();
+      const reads = [];
+      const readErrors = [];
 
-    for (const job of jobs.values()) {
-      if (!this.#alive) {
-        return;
-      }
+      for (const job of jobs.values()) {
+        if (!this.#alive) {
+          return;
+        }
 
-      let currentGeneration;
-      try {
-        currentGeneration = this.#generationFor(job.key);
-      } catch (error) {
-        readErrors.push({ job, error });
-        continue;
-      }
-      if (currentGeneration !== job.generation) {
-        continue;
-      }
+        let currentGeneration;
+        try {
+          currentGeneration = this.#generationFor(job.key);
+        } catch (error) {
+          readErrors.push({ job, error });
+          continue;
+        }
+        if (currentGeneration !== job.generation) {
+          continue;
+        }
 
-      try {
-        reads.push({ job, value: job.read() });
-      } catch (error) {
-        readErrors.push({ job, error });
-      }
-    }
-
-    for (const entry of readErrors) {
-      if (!this.#alive) {
-        return;
+        try {
+          reads.push({ job, value: job.read() });
+        } catch (error) {
+          readErrors.push({ job, error });
+        }
       }
 
-      let currentGeneration;
-      try {
-        currentGeneration = this.#generationFor(entry.job.key);
-      } catch (error) {
-        this.#report(entry.job, error);
-        continue;
-      }
-      if (currentGeneration !== entry.job.generation) {
-        continue;
+      for (const entry of readErrors) {
+        if (!this.#alive) {
+          return;
+        }
+
+        let currentGeneration;
+        try {
+          currentGeneration = this.#generationFor(entry.job.key);
+        } catch (error) {
+          this.#report(entry.job, error);
+          continue;
+        }
+        if (currentGeneration !== entry.job.generation) {
+          continue;
+        }
+
+        this.#report(entry.job, entry.error);
       }
 
-      this.#report(entry.job, entry.error);
-    }
+      for (const entry of reads) {
+        if (!this.#alive) {
+          return;
+        }
 
-    for (const entry of reads) {
-      if (!this.#alive) {
-        return;
-      }
+        let currentGeneration;
+        try {
+          currentGeneration = this.#generationFor(entry.job.key);
+        } catch (error) {
+          this.#report(entry.job, error);
+          continue;
+        }
+        if (currentGeneration !== entry.job.generation) {
+          continue;
+        }
 
-      let currentGeneration;
-      try {
-        currentGeneration = this.#generationFor(entry.job.key);
-      } catch (error) {
-        this.#report(entry.job, error);
-        continue;
+        try {
+          entry.job.write(entry.value);
+        } catch (error) {
+          this.#report(entry.job, error);
+        }
       }
-      if (currentGeneration !== entry.job.generation) {
-        continue;
-      }
-
-      try {
-        entry.job.write(entry.value);
-      } catch (error) {
-        this.#report(entry.job, error);
-      }
+    } finally {
+      this.#afterFlush?.();
     }
   }
 
@@ -228,6 +247,8 @@ class SharedDocumentResources {
 
   #layouts = new Map();
 
+  #notePlacementReservations = null;
+
   #mutationObserver;
 
   #resizeObserver;
@@ -261,6 +282,12 @@ class SharedDocumentResources {
       requestFrame,
       cancelFrame,
       generationFor: (key) => this.#controllers.get(key.id)?.token,
+      beforeFlush: () => {
+        this.#notePlacementReservations = new Map();
+      },
+      afterFlush: () => {
+        this.#notePlacementReservations = null;
+      },
     });
 
     const ResizeObserverConstructor = this.#window.ResizeObserver;
@@ -343,6 +370,41 @@ class SharedDocumentResources {
 
   generationFor(id) {
     return this.#requireController(id).generation;
+  }
+
+  reserveNotePlacement(id, input) {
+    const controller = this.#controllers.get(id);
+    if (this.#notePlacementReservations === null || controller === undefined) {
+      return false;
+    }
+    this.#notePlacementReservations.set(id, {
+      rect: {
+        x: input.x,
+        y: input.y,
+        width: input.width,
+        height: input.height,
+        top: input.top,
+        right: input.right,
+        bottom: input.bottom,
+        left: input.left,
+      },
+      token: controller.token,
+    });
+    return true;
+  }
+
+  notePlacementReservations(id) {
+    if (this.#notePlacementReservations === null) {
+      return [];
+    }
+    const reservations = [];
+    for (const [ownerId, reservation] of this.#notePlacementReservations) {
+      if (ownerId === id || this.#controllers.get(ownerId)?.token !== reservation.token) {
+        continue;
+      }
+      reservations.push(reservation.rect);
+    }
+    return reservations;
   }
 
   enqueue(options) {

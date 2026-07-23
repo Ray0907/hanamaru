@@ -107,6 +107,85 @@ test('renderer structure keeps an undrawn note measurable without revealing it',
   });
 });
 
+test('renderer measurement merges visible peers with frame reservations and removes self and duplicates', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { createRenderer } = await import('/src/renderer.js');
+    const lease = acquireDocumentResources(document);
+    const { shared } = lease;
+    for (const id of ['visible-peer', 'virtual-peer', 'measurer']) shared.registerController(id);
+    const owner = document.querySelector('#target');
+    const record = { kind: 'element', element: owner, ownerElement: owner };
+    const visible = createRenderer({
+      id: 'visible-peer', record,
+      options: { mark: 'circle', note: 'Visible peer', accessible: false }, lease,
+    });
+    const measurer = createRenderer({
+      id: 'measurer', record,
+      options: { mark: 'circle', note: 'Measuring peer', accessible: false }, lease,
+    });
+    visible.draw({
+      targetRects: [], unionRect: null, markPaths: [], side: 'right',
+      noteRect: { x: 100, y: 100, width: 120, height: 40 },
+      connector: { shaft: '', head: '' },
+      viewport: { width: innerWidth, height: innerHeight },
+      targetVisible: true,
+    });
+    const visibleRect = visible.noteElement.getBoundingClientRect();
+    const copy = (input) => ({
+      x: input.x, y: input.y, width: input.width, height: input.height,
+      top: input.top, right: input.right, bottom: input.bottom, left: input.left,
+    });
+    const virtualRect = {
+      x: 300, y: 100, width: 120, height: 40,
+      top: 100, right: 420, bottom: 140, left: 300,
+    };
+    const selfRect = {
+      x: 500, y: 100, width: 120, height: 40,
+      top: 100, right: 620, bottom: 140, left: 500,
+    };
+    let inside;
+    shared.enqueue({
+      id: 'visible-peer', generation: 0,
+      read() { shared.reserveNotePlacement('visible-peer', copy(visibleRect)); },
+      write() {},
+    });
+    shared.enqueue({
+      id: 'virtual-peer', generation: 0,
+      read() { shared.reserveNotePlacement('virtual-peer', virtualRect); },
+      write() {},
+    });
+    shared.enqueue({
+      id: 'measurer', generation: 0,
+      read() {
+        shared.reserveNotePlacement('measurer', selfRect);
+        inside = measurer.measure().peerNoteRects;
+      },
+      write() {},
+    });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const outside = measurer.measure().peerNoteRects;
+    const output = {
+      insideCount: inside.length,
+      insideLefts: inside.map((entry) => Math.round(entry.left)).sort((a, b) => a - b),
+      outsideCount: outside.length,
+      outsideLefts: outside.map((entry) => Math.round(entry.left)),
+    };
+    visible.destroy();
+    measurer.destroy();
+    for (const id of ['visible-peer', 'virtual-peer', 'measurer']) shared.releaseController(id);
+    lease.release();
+    return output;
+  });
+
+  expect(result).toEqual({
+    insideCount: 2,
+    insideLefts: [100, 300],
+    outsideCount: 1,
+    outsideLefts: [100],
+  });
+});
+
 test('renderer suppresses offscreen layout through draw animate and finish then reveals on redraw', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { acquireDocumentResources } = await import('/src/scheduler.js');
@@ -749,7 +828,7 @@ test('motion reads author duration and note-gap theme metrics without changing r
   expect(result.elapsed).toBeGreaterThanOrEqual(75);
   expect(result.measureKeys).toEqual(['noteRect', 'peerNoteRects', 'viewport']);
   expect(result.rendererKeys).toEqual([
-    'group', 'noteElement', 'measure', 'draw', 'animate',
+    'group', 'noteElement', 'measure', 'reserveNote', 'draw', 'animate',
     'updateOwner', 'pause', 'resume', 'finish', 'hide', 'destroy',
   ]);
 });

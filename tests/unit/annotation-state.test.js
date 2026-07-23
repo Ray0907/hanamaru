@@ -897,6 +897,58 @@ test('scheduler read phases for two controllers finish before owner and draw wri
   second.destroy();
 });
 
+test('layout reserves only a successfully computed visible note placement', () => {
+  const noteMeasurement = {
+    noteRect: {
+      x: 0, y: 0, width: 120, height: 40,
+      top: 0, right: 120, bottom: 40, left: 0,
+    },
+    peerNoteRects: [],
+    viewport: { width: 800, height: 600, left: 0, top: 0 },
+  };
+
+  const visible = fakeEnvironment();
+  const visibleReservations = [];
+  visible.renderer.measure = () => noteMeasurement;
+  visible.renderer.reserveNote = (rect) => visibleReservations.push(rect);
+  const visibleController = create({ note: 'Visible note' }, {}, visible).controller;
+  visibleController.show();
+  assert.equal(visibleReservations.length, 1);
+  assert.equal(visibleReservations[0].width, 120);
+  visibleController.destroy();
+
+  const noteFree = fakeEnvironment();
+  const noteFreeReservations = [];
+  noteFree.renderer.reserveNote = (rect) => noteFreeReservations.push(rect);
+  const noteFreeController = create({}, {}, noteFree).controller;
+  noteFreeController.show();
+  assert.deepEqual(noteFreeReservations, []);
+  noteFreeController.destroy();
+
+  const offscreen = fakeEnvironment();
+  const offscreenReservations = [];
+  offscreen.renderer.measure = () => noteMeasurement;
+  offscreen.renderer.reserveNote = (rect) => offscreenReservations.push(rect);
+  offscreen.env.targetRects = () => [{
+    x: 10, y: 700, width: 100, height: 20,
+    top: 700, right: 110, bottom: 720, left: 10,
+  }];
+  const offscreenController = create({ note: 'Offscreen note' }, {}, offscreen).controller;
+  offscreenController.show();
+  assert.deepEqual(offscreenReservations, []);
+  offscreenController.destroy();
+
+  const failed = fakeEnvironment();
+  const failedReservations = [];
+  failed.renderer.reserveNote = (rect) => failedReservations.push(rect);
+  failed.setRendererMethodFailure('measure', new Error('measurement failed'));
+  const failedController = create({ note: 'Failed note' }, {}, failed).controller;
+  failedController.show();
+  assert.deepEqual(failedReservations, []);
+  assert.equal(failedController.state, 'suspended');
+  failedController.destroy();
+});
+
 test('replacement renderer construction failure is contained and leaves the old annotation suspended', async () => {
   const { controller, environment } = create();
   controller.show();

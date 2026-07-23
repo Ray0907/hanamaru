@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { FrameQueue } from '../../src/scheduler.js';
 
-function createHarness() {
+function createHarness(callbackOverrides = {}) {
   const generations = new Map();
   const requested = [];
   const canceled = [];
@@ -22,6 +22,7 @@ function createHarness() {
     generationFor(key) {
       return generations.get(key);
     },
+    ...callbackOverrides,
   });
 
   function runFrame(index = requested.length - 1) {
@@ -84,6 +85,60 @@ test('runs every surviving read before any write', () => {
     'read:b',
     'write:a:value:a',
     'write:b:value:b',
+  ]);
+});
+
+test('brackets the complete read-all write-all batch with one pair of frame hooks', () => {
+  const events = [];
+  const { generations, queue, runFrame } = createHarness({
+    beforeFlush() { events.push('before'); },
+    afterFlush() { events.push('after'); },
+  });
+  generations.set('a', 1);
+  generations.set('b', 1);
+
+  queue.enqueue(job('a', 1, events));
+  queue.enqueue(job('b', 1, events));
+  runFrame();
+
+  assert.deepEqual(events, [
+    'before',
+    'read:a',
+    'read:b',
+    'write:a:value:a',
+    'write:b:value:b',
+    'after',
+  ]);
+});
+
+test('runs the afterFlush hook when error reporting destroys the queue mid-flush', () => {
+  const events = [];
+  const { generations, queue, runFrame } = createHarness({
+    beforeFlush() { events.push('before'); },
+    afterFlush() { events.push('after'); },
+  });
+  generations.set('broken', 1);
+  generations.set('peer', 1);
+
+  queue.enqueue(job('broken', 1, events, 'broken', {
+    read() {
+      events.push('read:broken');
+      throw new Error('stop this frame');
+    },
+    onError(error) {
+      events.push(`error:broken:${error.message}`);
+      queue.destroy();
+    },
+  }));
+  queue.enqueue(job('peer', 1, events));
+  runFrame();
+
+  assert.deepEqual(events, [
+    'before',
+    'read:broken',
+    'read:peer',
+    'error:broken:stop this frame',
+    'after',
   ]);
 });
 
@@ -374,6 +429,18 @@ test('validates required injected callbacks and job callbacks clearly', () => {
   assert.throws(
     () => new FrameQueue({ requestFrame: null, cancelFrame: noop, generationFor: noop }),
     /requestFrame.*function/i,
+  );
+  assert.throws(
+    () => new FrameQueue({
+      requestFrame: noop, cancelFrame: noop, generationFor: noop, beforeFlush: null,
+    }),
+    /beforeFlush.*function/i,
+  );
+  assert.throws(
+    () => new FrameQueue({
+      requestFrame: noop, cancelFrame: noop, generationFor: noop, afterFlush: null,
+    }),
+    /afterFlush.*function/i,
   );
 
   const { queue } = createHarness();

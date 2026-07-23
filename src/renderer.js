@@ -95,6 +95,13 @@ function copyRect(input) {
   };
 }
 
+function sameRect(first, second) {
+  return first.x === second.x
+    && first.y === second.y
+    && first.width === second.width
+    && first.height === second.height;
+}
+
 function writeDescription(owner, noteId, add) {
   if (owner === null) {
     return;
@@ -258,13 +265,21 @@ export function createRenderer({ id, record, options, lease }) {
   function measure() {
     const visualViewport = win.visualViewport;
     const noteRect = noteElement === null ? null : copyRect(noteElement.getBoundingClientRect());
-    const peerNoteRects = [...shared.noteLayer.children]
+    const peerNoteRects = [];
+    const addPeerRect = (input) => {
+      const candidate = copyRect(input);
+      if (!peerNoteRects.some((peer) => sameRect(peer, candidate))) {
+        peerNoteRects.push(candidate);
+      }
+    };
+    [...shared.noteLayer.children]
       .filter((candidate) => (
         candidate !== noteElement
         && !candidate.hidden
         && !candidate.classList.contains('hana-is-hidden')
       ))
-      .map((candidate) => copyRect(candidate.getBoundingClientRect()));
+      .forEach((candidate) => addPeerRect(candidate.getBoundingClientRect()));
+    shared.notePlacementReservations(id).forEach(addPeerRect);
     return {
       noteRect,
       peerNoteRects,
@@ -275,6 +290,10 @@ export function createRenderer({ id, record, options, lease }) {
         top: visualViewport?.offsetTop ?? 0,
       },
     };
+  }
+
+  function reserveNote(rect) {
+    return shared.reserveNotePlacement(id, rect);
   }
 
   function draw(layout) {
@@ -559,6 +578,7 @@ export function createRenderer({ id, record, options, lease }) {
     group,
     noteElement,
     measure,
+    reserveNote,
     draw,
     animate,
     updateOwner,

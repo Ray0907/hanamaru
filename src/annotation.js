@@ -148,7 +148,7 @@ function layoutFor(record, renderer, options, env) {
     otherNotes: measured.peerNoteRects,
     gap: metrics.noteGap,
   });
-  return {
+  const layout = {
     targetRects,
     unionRect: targetRect,
     markPaths,
@@ -158,6 +158,8 @@ function layoutFor(record, renderer, options, env) {
     viewport: measured.viewport,
     targetVisible,
   };
+  if (targetVisible) renderer.reserveNote?.(layout.noteRect);
+  return layout;
 }
 
 function dispatch(env, owner, type, detail) {

@@ -667,6 +667,92 @@ test('annotation lifecycle renders, dispatches exact events, transfers ARIA, and
   expect(result.final).toEqual({ state: 'destroyed', owned: 0, overlay: 0, description: 'author-token' });
 });
 
+test('same-frame animated notes settle without collisions and keep deterministic refresh layout', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const target = document.querySelector('#direct-target');
+    const controllers = ['A', 'B', 'C'].map((label, index) => annotate(target, {
+      mark: 'circle',
+      note: `Same frame note ${label}`,
+      duration: 20,
+      motion: 'system',
+      seed: index + 1,
+    }));
+    const events = controllers.map(() => []);
+    for (const type of ['hana:start', 'hana:complete']) {
+      target.addEventListener(type, (event) => {
+        const index = controllers.indexOf(event.detail.controller);
+        if (index !== -1) events[index].push(type);
+      });
+    }
+
+    controllers.forEach((controller) => controller.show());
+    const runs = controllers.map((controller) => controller.finished);
+    await Promise.all(runs);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    const snapshot = () => [...document.querySelectorAll('.hana-note')]
+      .map((note) => {
+        const bounds = note.getBoundingClientRect();
+        return {
+          text: note.textContent,
+          side: note.getAttribute('data-hana-side'),
+          rect: {
+            left: Math.round(bounds.left * 10) / 10,
+            top: Math.round(bounds.top * 10) / 10,
+            right: Math.round(bounds.right * 10) / 10,
+            bottom: Math.round(bounds.bottom * 10) / 10,
+          },
+        };
+      })
+      .sort((a, b) => a.text.localeCompare(b.text));
+
+    const initial = snapshot();
+    window.dispatchEvent(new Event('resize'));
+    window.dispatchEvent(new Event('scroll'));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const refreshed = snapshot();
+    const output = {
+      initial,
+      refreshed,
+      states: controllers.map((controller) => controller.state),
+      sameRuns: controllers.map((controller, index) => controller.finished === runs[index]),
+      events,
+      groups: document.querySelectorAll('.hana-annotation').length,
+      notes: document.querySelectorAll('.hana-note').length,
+      ids: new Set([...document.querySelectorAll('[data-hana-id]')]
+        .map((node) => node.getAttribute('data-hana-id'))).size,
+    };
+    controllers.forEach((controller) => controller.destroy());
+    return output;
+  });
+
+  const overlapArea = (first, second) => Math.max(
+    0,
+    Math.min(first.right, second.right) - Math.max(first.left, second.left),
+  ) * Math.max(
+    0,
+    Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top),
+  );
+  const pairOverlaps = (snapshot) => snapshot.flatMap((entry, index) => (
+    snapshot.slice(index + 1).map((peer) => overlapArea(entry.rect, peer.rect))
+  ));
+
+  expect(result.initial.map(({ side }) => side)).toEqual(['right', 'top', 'bottom']);
+  expect(pairOverlaps(result.initial)).toEqual([0, 0, 0]);
+  expect(result.refreshed).toEqual(result.initial);
+  expect(pairOverlaps(result.refreshed)).toEqual([0, 0, 0]);
+  expect(result.states).toEqual(['visible', 'visible', 'visible']);
+  expect(result.sameRuns).toEqual([true, true, true]);
+  expect(result.events).toEqual([
+    ['hana:start', 'hana:complete'],
+    ['hana:start', 'hana:complete'],
+    ['hana:start', 'hana:complete'],
+  ]);
+  expect(result).toMatchObject({ groups: 3, notes: 3, ids: 3 });
+});
+
 test('private pause intent survives until same-task show motion is created', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const result = await page.evaluate(async () => {
@@ -754,6 +840,44 @@ test('motion never reaches visible synchronously without waiting for a frame', a
     return immediate;
   });
   expect(result).toEqual({ state: 'visible', paths: 2, noteVisible: true });
+});
+
+test('synchronous reduced-motion notes avoid collisions through visible DOM peers', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { annotate } = await import('/src/index.js');
+    const target = document.querySelector('#direct-target');
+    const controllers = ['A', 'B'].map((label) => annotate(target, {
+      mark: 'box', note: `Synchronous note ${label}`, motion: 'never', duration: 900,
+    }));
+    controllers.forEach((controller) => controller.show());
+    const notes = [...document.querySelectorAll('.hana-note')].map((note) => {
+      const bounds = note.getBoundingClientRect();
+      return {
+        side: note.getAttribute('data-hana-side'),
+        rect: {
+          left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom,
+        },
+      };
+    });
+    const overlap = Math.max(
+      0,
+      Math.min(notes[0].rect.right, notes[1].rect.right)
+        - Math.max(notes[0].rect.left, notes[1].rect.left),
+    ) * Math.max(
+      0,
+      Math.min(notes[0].rect.bottom, notes[1].rect.bottom)
+        - Math.max(notes[0].rect.top, notes[1].rect.top),
+    );
+    const output = {
+      overlap,
+      sides: notes.map(({ side }) => side),
+      states: controllers.map((controller) => controller.state),
+    };
+    controllers.forEach((controller) => controller.destroy());
+    return output;
+  });
+
+  expect(result).toEqual({ overlap: 0, sides: ['right', 'top'], states: ['visible', 'visible'] });
 });
 
 test('hana:start reentrancy cannot revive a show hidden by its listener', async ({ page }) => {

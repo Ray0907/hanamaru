@@ -183,11 +183,13 @@ test('shared ownership keeps one document root and observer set until the final 
       'bumpGeneration',
       'enqueue',
       'generationFor',
+      'notePlacementReservations',
       'observeIntersection',
       'observeLayout',
       'rebindLayout',
       'registerController',
       'releaseController',
+      'reserveNotePlacement',
     ],
     overlays: 1,
     svgs: 1,
@@ -331,6 +333,157 @@ test('public queue keeps shared read/write ordering and rejects stale controller
     ordered: ['read:alpha', 'read:beta', 'write:alpha', 'write:beta'],
     finalEvents: ['read:alpha', 'read:beta', 'write:alpha', 'write:beta', 'aba-read'],
     staleError: 'stale controller generation: alpha',
+  });
+});
+
+test('frame placement reservations are ordered, controller-scoped, generation-safe, and ephemeral', async ({ page }) => {
+  await installInstrumentation(page);
+
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const lease = acquireDocumentResources(document);
+    const { shared } = lease;
+    const state = window.__resources;
+    const rect = (x) => ({
+      x, y: 20, width: 80, height: 30,
+      top: 20, right: x + 80, bottom: 50, left: x,
+    });
+    const events = [];
+    for (const id of ['alpha', 'beta', 'stale', 'cancelled']) shared.registerController(id);
+
+    const outsideBefore = {
+      accepted: shared.reserveNotePlacement('alpha', rect(10)),
+      peers: shared.notePlacementReservations('beta'),
+    };
+    shared.enqueue({
+      id: 'alpha', generation: 0,
+      read() {
+        events.push(`alpha-before:${shared.notePlacementReservations('alpha').length}`);
+        events.push(`alpha-reserved:${shared.reserveNotePlacement('alpha', rect(10))}`);
+        events.push(`alpha-after:${shared.notePlacementReservations('alpha').length}`);
+        return 'alpha';
+      },
+      write(value) { events.push(`write:${value}`); },
+    });
+    shared.enqueue({
+      id: 'beta', generation: 0,
+      read() {
+        const peers = shared.notePlacementReservations('beta');
+        events.push(`beta-sees:${peers.map((entry) => entry.left).join(',')}`);
+        events.push(`beta-reserved:${shared.reserveNotePlacement('beta', rect(120))}`);
+        return 'beta';
+      },
+      write(value) { events.push(`write:${value}`); },
+    });
+    shared.enqueue({
+      id: 'stale', generation: 0,
+      read() {
+        events.push('stale-read');
+        shared.reserveNotePlacement('stale', rect(230));
+      },
+      write() { events.push('stale-write'); },
+    });
+    shared.bumpGeneration('stale');
+    shared.enqueue({
+      id: 'cancelled', generation: 0,
+      read() {
+        events.push('cancelled-read');
+        shared.reserveNotePlacement('cancelled', rect(340));
+      },
+      write() { events.push('cancelled-write'); },
+    });
+    shared.releaseController('cancelled');
+    state.runFrame();
+
+    const outsideAfter = {
+      accepted: shared.reserveNotePlacement('alpha', rect(450)),
+      peers: shared.notePlacementReservations('beta'),
+    };
+    for (const id of ['alpha', 'beta', 'stale']) shared.releaseController(id);
+    lease.release();
+    return { events, outsideBefore, outsideAfter };
+  });
+
+  expect(result).toEqual({
+    outsideBefore: { accepted: false, peers: [] },
+    events: [
+      'alpha-before:0',
+      'alpha-reserved:true',
+      'alpha-after:0',
+      'beta-sees:10',
+      'beta-reserved:true',
+      'write:alpha',
+      'write:beta',
+    ],
+    outsideAfter: { accepted: false, peers: [] },
+  });
+});
+
+test('frame placement reservations stay isolated between documents', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const topLease = acquireDocumentResources(document);
+    const frameLease = acquireDocumentResources(frame.contentDocument);
+    const rectangle = (x) => ({
+      x, y: 10, width: 60, height: 20,
+      top: 10, right: x + 60, bottom: 30, left: x,
+    });
+    for (const shared of [topLease.shared, frameLease.shared]) {
+      shared.registerController('first');
+      shared.registerController('reader');
+    }
+    const observations = {};
+    topLease.shared.enqueue({
+      id: 'first', generation: 0,
+      read() { topLease.shared.reserveNotePlacement('first', rectangle(10)); },
+      write() {},
+    });
+    topLease.shared.enqueue({
+      id: 'reader', generation: 0,
+      read() {
+        observations.top = topLease.shared.notePlacementReservations('reader').map(({ left }) => left);
+        observations.frameDuringTop = frameLease.shared.notePlacementReservations('reader').length;
+      },
+      write() {},
+    });
+    frameLease.shared.enqueue({
+      id: 'first', generation: 0,
+      read() { frameLease.shared.reserveNotePlacement('first', rectangle(210)); },
+      write() {},
+    });
+    frameLease.shared.enqueue({
+      id: 'reader', generation: 0,
+      read() {
+        observations.frame = frameLease.shared.notePlacementReservations('reader').map(({ left }) => left);
+      },
+      write() {},
+    });
+    await Promise.all([
+      new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      new Promise((resolve) => frame.contentWindow.requestAnimationFrame(
+        () => frame.contentWindow.requestAnimationFrame(resolve),
+      )),
+    ]);
+    observations.topAfter = topLease.shared.notePlacementReservations('reader').length;
+    observations.frameAfter = frameLease.shared.notePlacementReservations('reader').length;
+    for (const shared of [topLease.shared, frameLease.shared]) {
+      shared.releaseController('first');
+      shared.releaseController('reader');
+    }
+    topLease.release();
+    frameLease.release();
+    frame.remove();
+    return observations;
+  });
+
+  expect(result).toEqual({
+    top: [10],
+    frameDuringTop: 0,
+    frame: [210],
+    topAfter: 0,
+    frameAfter: 0,
   });
 });
 
