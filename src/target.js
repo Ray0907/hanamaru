@@ -89,10 +89,10 @@ function assertConnectedElement(element, doc, realm) {
   }
 }
 
-function findSelectorTarget(selector, doc, realm) {
+export function queryUniqueTarget(selector, queryRoot, assertElement) {
   let matches;
   try {
-    matches = doc.querySelectorAll(selector);
+    matches = queryRoot.querySelectorAll(selector);
   } catch (error) {
     throw targetError('HANA_TARGET_INVALID', 'Target selector is invalid', { selector, cause: error.message });
   }
@@ -108,14 +108,22 @@ function findSelectorTarget(selector, doc, realm) {
   }
 
   const element = matches[0];
-  assertConnectedElement(element, doc, realm);
+  assertElement(element);
   return element;
+}
+
+function findSelectorTarget(selector, doc, realm) {
+  return queryUniqueTarget(
+    selector,
+    doc,
+    (element) => assertConnectedElement(element, doc, realm),
+  );
 }
 
 const LOCATOR_KEYS = new Set(['within', 'text', 'occurrence']);
 const EXCLUDED_TEXT_ANCESTORS = 'script,style,noscript,template,[hidden],[inert]';
 
-function locatorConfig(target, realm) {
+export function readLocatorConfig(target, realm) {
   if (target === null || typeof target !== 'object' || Array.isArray(target)) {
     return null;
   }
@@ -233,7 +241,7 @@ function collectLocatorTextSegments(within, doc) {
   return segments;
 }
 
-function locatorRange(within, text, occurrence, doc) {
+export function createLocatorRange(within, text, occurrence, doc) {
   const matches = collectLocatorTextSegments(within, doc).flatMap((segment) => (
     findMatchOffsets(segment.text, text)
       .filter(([start, end]) => segment.map[start]?.start !== null && segment.map[end - 1]?.end !== null)
@@ -264,7 +272,14 @@ function locatorRange(within, text, occurrence, doc) {
   return range;
 }
 
-function locatorRecord(config, doc, realm) {
+export function createLocatorTargetRecord(
+  config,
+  {
+    resolveWithin,
+    assertWithin,
+    createRange,
+  },
+) {
   const text = normalizeLocatorText(config.text);
   const occurrence = validateOccurrence(config.occurrence);
   const source = { within: config.within, text: config.text };
@@ -281,11 +296,11 @@ function locatorRecord(config, doc, realm) {
     refresh: null,
   };
   record.refresh = () => {
-    const element = directWithin ?? resolveLocatorWithin(config.within, doc, realm);
+    const element = directWithin ?? resolveWithin(config.within);
     if (directWithin !== null) {
-      assertLocatorWithin(directWithin, doc, realm);
+      assertWithin(directWithin);
     }
-    const range = locatorRange(element, text, occurrence, doc);
+    const range = createRange(element, text, occurrence);
     record.element = element;
     record.range = range;
     record.ownerElement = element;
@@ -294,7 +309,17 @@ function locatorRecord(config, doc, realm) {
   return record.refresh();
 }
 
-function elementRecord(element, doc, realm) {
+function locatorRecord(config, doc, realm) {
+  return createLocatorTargetRecord(config, {
+    resolveWithin: (within) => resolveLocatorWithin(within, doc, realm),
+    assertWithin: (within) => assertLocatorWithin(within, doc, realm),
+    createRange: (within, text, occurrence) => (
+      createLocatorRange(within, text, occurrence, doc)
+    ),
+  });
+}
+
+export function createElementTargetRecord(element, assertElement) {
   const record = {
     kind: 'element',
     source: element,
@@ -304,13 +329,20 @@ function elementRecord(element, doc, realm) {
     refresh: null,
   };
   record.refresh = () => {
-    assertConnectedElement(element, doc, realm);
+    assertElement(element);
     return record;
   };
   return record;
 }
 
-function selectorRecord(selector, doc, realm) {
+function elementRecord(element, doc, realm) {
+  return createElementTargetRecord(
+    element,
+    (value) => assertConnectedElement(value, doc, realm),
+  );
+}
+
+export function createSelectorTargetRecord(selector, findElement) {
   const record = {
     kind: 'selector',
     source: selector,
@@ -320,12 +352,19 @@ function selectorRecord(selector, doc, realm) {
     refresh: null,
   };
   record.refresh = () => {
-    const element = findSelectorTarget(selector, doc, realm);
+    const element = findElement(selector);
     record.element = element;
     record.ownerElement = element;
     return record;
   };
   return record.refresh();
+}
+
+function selectorRecord(selector, doc, realm) {
+  return createSelectorTargetRecord(
+    selector,
+    (value) => findSelectorTarget(value, doc, realm),
+  );
 }
 
 function isConnectedBoundary(node, doc) {
@@ -353,16 +392,20 @@ function rangeOwnerElement(range, doc, realm) {
   return ancestor.parentElement ?? null;
 }
 
-function rangeRecord(source, doc, realm) {
-  assertConnectedRange(source, doc, realm);
-  const range = source.cloneRange();
-  const boundaryNodes = [range.startContainer, range.endContainer];
-  const ownerElement = rangeOwnerElement(range, doc, realm);
-  if (ownerElement === null) {
-    throw targetError('HANA_TARGET_INVALID', 'Target Range must have an Element owner in the document tree', {
-      target: source,
-    });
-  }
+export function createRangeTargetRecord(
+  source,
+  {
+    cloneRange,
+    getOwnerElement,
+    assertRange,
+    getBoundaryNodes,
+    assertBoundaryNodes,
+  },
+) {
+  assertRange(source);
+  const range = cloneRange(source);
+  const boundaryNodes = getBoundaryNodes(range);
+  const ownerElement = getOwnerElement(range);
   const record = {
     kind: 'range',
     source,
@@ -372,14 +415,34 @@ function rangeRecord(source, doc, realm) {
     refresh: null,
   };
   record.refresh = () => {
-    if (!boundaryNodes.every((node) => isConnectedBoundary(node, doc))) {
-      throw targetError('HANA_TARGET_INVALID', 'Target Range boundaries are no longer connected to the document', {
-        target: range,
-      });
-    }
+    assertBoundaryNodes(boundaryNodes, range);
     return record;
   };
   return record;
+}
+
+function rangeRecord(source, doc, realm) {
+  return createRangeTargetRecord(source, {
+    cloneRange: (range) => range.cloneRange(),
+    getOwnerElement(range) {
+      const ownerElement = rangeOwnerElement(range, doc, realm);
+      if (ownerElement === null) {
+        throw targetError('HANA_TARGET_INVALID', 'Target Range must have an Element owner in the document tree', {
+          target: source,
+        });
+      }
+      return ownerElement;
+    },
+    assertRange: (range) => assertConnectedRange(range, doc, realm),
+    getBoundaryNodes: (range) => [range.startContainer, range.endContainer],
+    assertBoundaryNodes(boundaryNodes, range) {
+      if (!boundaryNodes.every((node) => isConnectedBoundary(node, doc))) {
+        throw targetError('HANA_TARGET_INVALID', 'Target Range boundaries are no longer connected to the document', {
+          target: range,
+        });
+      }
+    },
+  });
 }
 
 export function resolveTarget(target, doc = document) {
@@ -394,7 +457,7 @@ export function resolveTarget(target, doc = document) {
   if (isRange(target, realm)) {
     return rangeRecord(target, doc, realm);
   }
-  const config = locatorConfig(target, realm);
+  const config = readLocatorConfig(target, realm);
   if (config !== null) {
     return locatorRecord(config, doc, realm);
   }
