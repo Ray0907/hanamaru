@@ -36,7 +36,8 @@ function normalizeAdapterOptions(input) {
   }
   if (own(input, 'trigger')) invalid('trigger', input.trigger);
 
-  const manual = { ...input, trigger: 'manual' };
+  const source = { ...input };
+  const manual = { ...source, trigger: 'manual' };
   const normalized = normalizeOptions(manual, DEFAULT_SEED);
   return {
     canonical: [
@@ -51,6 +52,7 @@ function normalizeAdapterOptions(input) {
     ],
     normalized,
     seedExplicit: own(input, 'seed'),
+    source,
   };
 }
 
@@ -86,6 +88,16 @@ function normalizeConfig(input = {}) {
     invalid('onError', onError);
   }
   return { enabled, onError };
+}
+
+export function prepareAdapterRequest(optionsInput, configInput = {}) {
+  const prepared = normalizeAdapterOptions(optionsInput);
+  const config = normalizeConfig(configInput);
+  return Object.freeze({
+    canonical: Object.freeze([...prepared.canonical]),
+    config: Object.freeze(config),
+    options: Object.freeze(prepared.source),
+  });
 }
 
 function sameCanonical(left, right) {

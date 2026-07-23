@@ -17,13 +17,19 @@ const application = String.raw`
     annotationRef: null,
     boundaryError: null,
     callbackSnapshots: [],
+    controllers: [],
     errors: [],
+    getterReads: {},
     renders: 0,
+    secondErrors: [],
   }
 
   const errorHandlers = {
     record(error, controller) {
       state.errors.push({ error, controller })
+    },
+    recordSecond(error, controller) {
+      state.secondErrors.push({ error, controller })
     },
     throw(error, controller) {
       state.callbackSnapshots.push({
@@ -34,6 +40,26 @@ const application = String.raw`
       })
       throw new Error('onError callback failed')
     },
+  }
+
+  function countedInput(source, fields, prefix, throwOnRepeat) {
+    const input = {}
+    for (const field of fields) {
+      Object.defineProperty(input, field, {
+        configurable: true,
+        enumerable: true,
+        get() {
+          const key = prefix + '.' + field
+          const count = (state.getterReads[key] ?? 0) + 1
+          state.getterReads[key] = count
+          if (throwOnRepeat && count > 1) {
+            throw new Error(key + ' read twice')
+          }
+          return source[field]
+        },
+      })
+    }
+    return input
   }
 
   class Boundary extends React.Component {
@@ -54,6 +80,7 @@ const application = String.raw`
 
   function Claim({
     accessible,
+    counted,
     configMode,
     duration,
     enabled,
@@ -64,29 +91,68 @@ const application = String.raw`
     patchListen,
     present,
     targetKey,
+    throwOnRepeat,
     trigger,
   }) {
     const target = useRef(null)
+    const [, setRevision] = React.useState(0)
+    const rerenderOnError = React.useCallback((error, controller) => {
+      state.errors.push({ error, controller })
+      if (state.errors.length === 1) {
+        setRevision((revision) => revision + 1)
+      }
+    }, [])
+    const selectedOnError = configMode === 'none'
+      ? undefined
+      : (configMode === 'rerender'
+        ? rerenderOnError
+        : errorHandlers[configMode])
+    const rawOptions = {
+      mark,
+      note,
+      placement: 'auto',
+      accessible,
+      ...(counted ? { seed: 'counted-seed' } : {}),
+      duration,
+      motion,
+      ...(trigger === undefined ? {} : { trigger }),
+    }
+    const rawConfig = {
+      enabled,
+      onError: selectedOnError,
+    }
+    const annotationOptions = counted
+      ? countedInput(
+        rawOptions,
+        ['mark', 'note', 'placement', 'accessible', 'seed', 'duration', 'motion'],
+        'options',
+        throwOnRepeat,
+      )
+      : rawOptions
+    const annotationConfig = counted
+      ? countedInput(
+        rawConfig,
+        ['enabled', 'onError'],
+        'config',
+        throwOnRepeat,
+      )
+      : rawConfig
     const annotation = useAnnotation(
       target,
-      {
-        mark,
-        note,
-        accessible,
-        duration,
-        motion,
-        ...(trigger === undefined ? {} : { trigger }),
-      },
-      {
-        enabled,
-        onError: configMode === 'none' ? undefined : errorHandlers[configMode],
-      },
+      annotationOptions,
+      annotationConfig,
     )
     state.annotationRef = annotation
     state.renders += 1
 
     useLayoutEffect(() => {
       state.annotationRef = annotation
+      if (
+        annotation.current !== null
+        && !state.controllers.includes(annotation.current)
+      ) {
+        state.controllers.push(annotation.current)
+      }
     })
 
     if (!present) return null
@@ -118,6 +184,7 @@ const application = String.raw`
       state.boundaryError = null
       const props = {
         accessible: input.accessible ?? true,
+        counted: input.counted ?? false,
         configMode: input.configMode ?? 'record',
         duration: input.duration ?? 0,
         enabled: input.enabled ?? true,
@@ -128,6 +195,7 @@ const application = String.raw`
         patchListen: input.patchListen ?? false,
         present: input.present ?? true,
         targetKey: input.targetKey ?? 'first',
+        throwOnRepeat: input.throwOnRepeat ?? false,
         trigger: input.trigger,
       }
       const claim = <Claim {...props} />
@@ -459,6 +527,141 @@ test('cleans before a throwing onError callback is surfaced from a microtask', a
   expect(snapshot.tokens).toBeNull()
 })
 
+test('latches an asynchronously failed request until target, options, or enabled changes', async ({ page }) => {
+  const failing = {
+    configMode: 'rerender',
+    hidden: true,
+    mark: 'underline',
+    targetKey: 'first',
+  }
+  await render(page, failing)
+  await page.waitForFunction(() => window.__reactAnnotation.errors.length >= 1)
+  await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+  })
+
+  const snapshot = () => page.evaluate(() => ({
+    controllers: window.__reactAnnotation.controllers.length,
+    errors: window.__reactAnnotation.errors.length,
+    current: window.__reactAnnotation.annotationRef.current,
+    overlays: document.querySelectorAll('[data-hana-overlay]').length,
+  }))
+  expect(await snapshot()).toEqual({
+    controllers: 1,
+    errors: 1,
+    current: null,
+    overlays: 0,
+  })
+
+  await render(page, failing)
+  await render(page, failing)
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)))
+  expect(await snapshot()).toEqual({
+    controllers: 1,
+    errors: 1,
+    current: null,
+    overlays: 0,
+  })
+
+  await render(page, { ...failing, mark: 'circle' })
+  await page.waitForFunction(() => window.__reactAnnotation.errors.length === 2)
+  expect(await snapshot()).toEqual({
+    controllers: 2,
+    errors: 2,
+    current: null,
+    overlays: 0,
+  })
+
+  await render(page, { ...failing, mark: 'circle', targetKey: 'second' })
+  await page.waitForFunction(() => window.__reactAnnotation.errors.length === 3)
+  expect(await snapshot()).toEqual({
+    controllers: 3,
+    errors: 3,
+    current: null,
+    overlays: 0,
+  })
+
+  await render(page, {
+    ...failing,
+    enabled: false,
+    mark: 'circle',
+    targetKey: 'second',
+  })
+  expect(await snapshot()).toEqual({
+    controllers: 3,
+    errors: 3,
+    current: null,
+    overlays: 0,
+  })
+  await render(page, {
+    ...failing,
+    enabled: true,
+    mark: 'circle',
+    targetKey: 'second',
+  })
+  await page.waitForFunction(() => window.__reactAnnotation.errors.length === 4)
+  expect(await snapshot()).toEqual({
+    controllers: 4,
+    errors: 4,
+    current: null,
+    overlays: 0,
+  })
+})
+
+test('uses a fresh onError callback without retrying or remounting the request', async ({ page }) => {
+  await render(page, { configMode: 'record' })
+  await waitVisible(page)
+  const result = await page.evaluate(() => {
+    const controller = window.__reactAnnotation.annotationRef.current
+    window.fixture.render({ configMode: 'recordSecond' })
+    const retained = window.__reactAnnotation.annotationRef.current
+    window.fixture.dispatch(controller, new Error('fresh callback'))
+    return {
+      controllerRetained: controller === retained,
+      controllers: window.__reactAnnotation.controllers.length,
+    }
+  })
+  await page.waitForFunction(() => window.__reactAnnotation.secondErrors.length === 1)
+
+  expect(result).toEqual({ controllerRetained: true, controllers: 1 })
+  expect(await page.evaluate(() => ({
+    current: window.__reactAnnotation.annotationRef.current,
+    firstErrors: window.__reactAnnotation.errors.length,
+    secondErrors: window.__reactAnnotation.secondErrors.length,
+  }))).toEqual({
+    current: null,
+    firstErrors: 0,
+    secondErrors: 1,
+  })
+})
+
+test('reads accessor options and config once in one committed lifecycle transition', async ({ page }) => {
+  const mounted = await render(page, {
+    counted: true,
+    throwOnRepeat: true,
+  })
+  expect(mounted.state).toMatch(/showing|visible/)
+
+  expect(await page.evaluate(() => ({
+    boundaryError: window.__reactAnnotation.boundaryError?.message ?? null,
+    reads: window.__reactAnnotation.getterReads,
+  }))).toEqual({
+    boundaryError: null,
+    reads: {
+      'config.enabled': 1,
+      'config.onError': 1,
+      'options.accessible': 1,
+      'options.duration': 1,
+      'options.mark': 1,
+      'options.motion': 1,
+      'options.note': 1,
+      'options.placement': 1,
+      'options.seed': 1,
+    },
+  })
+})
+
 test('inherits reduced motion and settles a long system animation synchronously', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const mounted = await render(page, { duration: 900, motion: 'system' })
@@ -495,12 +698,6 @@ test('keeps the same long system animation active without reduced motion', async
   const mounted = await render(page, { duration: 900, motion: 'system' })
 
   expect(mounted.state).toBe('showing')
-  await page.waitForFunction(() => {
-    const path = document.querySelector('.hana-mark-path')
-    const group = document.querySelector('.hana-annotation')
-    return (path?.getAnimations().length ?? 0) > 0
-      || group?.classList.contains('hana-is-animating')
-  })
   expect(await page.evaluate(async () => {
     const controller = window.__reactAnnotation.annotationRef.current
     let settlement = 'pending'
@@ -508,16 +705,28 @@ test('keeps the same long system animation active without reduced motion', async
       () => { settlement = 'resolved' },
       () => { settlement = 'rejected' },
     )
-    const path = document.querySelector('.hana-mark-path')
-    const group = document.querySelector('.hana-annotation')
-    const snapshot = {
-      activeMotion: path.getAnimations().length > 0
-        || group.classList.contains('hana-is-animating'),
+    for (let frame = 0; frame < 20; frame += 1) {
+      const path = document.querySelector('.hana-mark-path')
+      const group = document.querySelector('.hana-annotation')
+      const activeMotion = (path?.getAnimations().length ?? 0) > 0
+        || group?.classList.contains('hana-is-animating')
+      if (activeMotion) {
+        const snapshot = {
+          activeMotion,
+          settlement,
+          state: controller.state,
+        }
+        window.fixture.unmount()
+        return snapshot
+      }
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    }
+    window.fixture.unmount()
+    return {
+      activeMotion: false,
       settlement,
       state: controller.state,
     }
-    window.fixture.unmount()
-    return snapshot
   })).toEqual({
     activeMotion: true,
     settlement: 'pending',
