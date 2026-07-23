@@ -53,6 +53,7 @@ const reflowControl = document.querySelector('[data-demo-reflow-control]');
 const reflowValue = document.querySelector('[data-demo-reflow-value]');
 const reflowSpecimen = document.querySelector('[data-demo-reflow-specimen]');
 const reflowStage = document.querySelector('.demo-reflow-stage');
+const reflowInstruction = document.querySelector('#reflow-scroll-instruction');
 const reflowTarget = document.querySelector('[data-demo-reflow-target]');
 const reflowRegister = reflowSpecimen.querySelector('.demo-reflow-specimen__register');
 const ledgerButtons = [...document.querySelectorAll('[data-demo-mark]')];
@@ -362,12 +363,38 @@ function centerReflowTarget() {
   reflowStage.scrollTo({ left: Math.max(0, centered), behavior: 'auto' });
 }
 
+function updateReflowScrollAffordance() {
+  const overflows = reflowStage.scrollWidth > reflowStage.clientWidth;
+  reflowInstruction.hidden = !overflows;
+  if (overflows) {
+    reflowStage.tabIndex = 0;
+    reflowStage.setAttribute('aria-describedby', reflowInstruction.id);
+    return;
+  }
+  reflowStage.removeAttribute('tabindex');
+  reflowStage.removeAttribute('aria-describedby');
+  reflowStage.scrollLeft = 0;
+}
+
+function observeReflowOverflow() {
+  updateReflowScrollAffordance();
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(updateReflowScrollAffordance);
+    observer.observe(reflowStage);
+    observer.observe(reflowSpecimen);
+    return () => observer.disconnect();
+  }
+  window.addEventListener('resize', updateReflowScrollAffordance, { passive: true });
+  return () => window.removeEventListener('resize', updateReflowScrollAffordance);
+}
+
 reflowControl.addEventListener('input', () => {
   const width = Number(reflowControl.value);
   reflowRequested = true;
   reflowSpecimen.style.width = `${width}px`;
   reflowValue.textContent = `${width}px`;
   reflowRegister.textContent = `${width} / responsive copy measure`;
+  updateReflowScrollAffordance();
   centerReflowTarget();
   if (reflowController === null) createReflowProof();
   reflowController.refresh();
@@ -519,6 +546,7 @@ function observeViewport(node, onChange, { root = null } = {}) {
 }
 
 const visibilityCleanups = [
+  observeReflowOverflow(),
   observeViewport(reflowTarget, (visible) => {
     if (!reflowRequested) return;
     if (!visible) {

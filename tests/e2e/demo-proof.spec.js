@@ -428,6 +428,54 @@ test('390px horizontal proof region is named, instructed, keyboard-scrollable, a
   expect(failures).toEqual([]);
 });
 
+test('proof scroll affordance stays out of the wide desktop Tab order and follows responsive overflow', async ({ page }) => {
+  const failures = capturePageFailures(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  const stage = page.getByRole('region', { name: 'Responsive proof preview' });
+  const instruction = page.locator('#reflow-scroll-instruction');
+  await expect.poll(() => stage.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await expect(instruction).toBeHidden();
+  await expect(stage).not.toHaveAttribute('tabindex', /.+/);
+  await expect(stage).not.toHaveAttribute('aria-describedby', /.+/);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => stage.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true);
+  await expect(instruction).toBeVisible();
+  await expect(stage).toHaveAttribute('tabindex', '0');
+  await expect(stage).toHaveAttribute('aria-describedby', 'reflow-scroll-instruction');
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect.poll(() => stage.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await expect(instruction).toBeHidden();
+  await expect(stage).not.toHaveAttribute('tabindex', /.+/);
+  await expect(stage).not.toHaveAttribute('aria-describedby', /.+/);
+  expect(failures).toEqual([]);
+});
+
+test('390px proof width removes and restores its scroll affordance with actual overflow', async ({ page }) => {
+  const failures = capturePageFailures(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  const ruler = page.locator('[data-demo-reflow-control]');
+  const stage = page.getByRole('region', { name: 'Responsive proof preview' });
+  const instruction = page.locator('#reflow-scroll-instruction');
+  await ruler.scrollIntoViewIfNeeded();
+
+  await ruler.fill('320');
+  await expect.poll(() => stage.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await expect(instruction).toBeHidden();
+  await expect(stage).not.toHaveAttribute('tabindex', /.+/);
+  await expect(stage).not.toHaveAttribute('aria-describedby', /.+/);
+
+  await ruler.fill('760');
+  await expect.poll(() => stage.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true);
+  await expect(instruction).toBeVisible();
+  await expect(stage).toHaveAttribute('tabindex', '0');
+  await expect(stage).toHaveAccessibleDescription(/scroll horizontally/i);
+  expect(failures).toEqual([]);
+});
+
 for (const viewport of [
   { name: 'desktop', width: 1440, height: 900 },
   { name: 'mobile', width: 390, height: 844 },
