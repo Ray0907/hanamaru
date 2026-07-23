@@ -487,8 +487,8 @@ test('Annotation selector round trip preserves updates, generated seed, plugin o
 
     return {
       bytes,
-      restoredBytes,
       definition,
+      restoredBytes,
       originalRun,
       restoredRun,
       missingPlugin,
@@ -641,6 +641,7 @@ test('Annotation native Element and Range keys preserve exact contexts and visua
         key: item.key,
         targetKind: item.targetKind,
         bytes,
+        definition,
         restoredBytes,
         originalKeyCalls,
         restoredKeyCalls,
@@ -660,12 +661,41 @@ test('Annotation native Element and Range keys preserve exact contexts and visua
   expect(result.owned).toBe(0);
   expect(result.overlays).toBe(0);
   for (const item of result.output) {
+    const expected = {
+      schema: 'hanamaru/v1',
+      kind: 'annotation',
+      target: { type: 'key', key: item.key, targetKind: item.targetKind },
+      options: {
+        mark: item.targetKind === 'element' ? 'box' : 'underline',
+        note: null,
+        placement: 'auto',
+        trigger: 'manual',
+        accessible: false,
+        seed: `stable-${item.key}`,
+        duration: 0,
+        motion: 'never',
+      },
+    };
+    expect(item.definition).toEqual(expected);
+    expect(item.bytes).toBe(JSON.stringify(expected));
+    expect(Object.keys(item.definition)).toEqual(['schema', 'kind', 'target', 'options']);
+    expect(Object.keys(item.definition.target)).toEqual(['type', 'key', 'targetKind']);
+    expect(Object.keys(item.definition.options)).toEqual([
+      'mark', 'note', 'placement', 'trigger',
+      'accessible', 'seed', 'duration', 'motion',
+    ]);
     expect(item.restoredBytes).toBe(item.bytes);
     expect(item.restoredRun).toEqual(item.originalRun);
     expect(item.restoredRun.states).toEqual(['idle', 'visible', 'hidden']);
     expect(item.restoredRun.successfulEvents).toEqual(['start', 'complete']);
     expect(item.restoredRun.cancels).toEqual(['cancel']);
     expect(item.restoredRun.paths.length).toBeGreaterThan(0);
+    expect(item.originalRun.paths.every(
+      (path) => typeof path === 'string' && path.length > 0,
+    )).toBe(true);
+    expect(item.restoredRun.paths.every(
+      (path) => typeof path === 'string' && path.length > 0,
+    )).toBe(true);
     expect(item.originalKeyCalls).toEqual([{
       sameTarget: true,
       keys: ['role', 'controllerKind', 'ownerElement', 'index'],
@@ -754,8 +784,17 @@ test('Annotation exact-text locators round trip with selector and Element within
       original.show();
       await original.finished;
       originalStates.push(original.state);
-      const originalPaths = [...document.querySelectorAll('.hana-mark-path')]
-        .map((path) => path.getAttribute('d'));
+      const originalPathElements = [...document.querySelectorAll('.hana-mark-path')];
+      const originalPaths = originalPathElements.map((path) => path.getAttribute('d'));
+      const originalPathsValid = originalPathElements.every((path) => {
+        const d = path.getAttribute('d');
+        try {
+          return typeof d === 'string' && d.length > 0
+            && Number.isFinite(path.getTotalLength());
+        } catch {
+          return false;
+        }
+      });
       original.destroy();
       item.owner.removeEventListener('hana:start', originalListener);
       item.owner.removeEventListener('hana:complete', originalListener);
@@ -781,8 +820,17 @@ test('Annotation exact-text locators round trip with selector and Element within
       restored.show();
       await restored.finished;
       restoredStates.push(restored.state);
-      const restoredPaths = [...document.querySelectorAll('.hana-mark-path')]
-        .map((path) => path.getAttribute('d'));
+      const restoredPathElements = [...document.querySelectorAll('.hana-mark-path')];
+      const restoredPaths = restoredPathElements.map((path) => path.getAttribute('d'));
+      const restoredPathsValid = restoredPathElements.every((path) => {
+        const d = path.getAttribute('d');
+        try {
+          return typeof d === 'string' && d.length > 0
+            && Number.isFinite(path.getTotalLength());
+        } catch {
+          return false;
+        }
+      });
       restored.destroy();
       item.owner.removeEventListener('hana:start', restoredListener);
       item.owner.removeEventListener('hana:complete', restoredListener);
@@ -798,7 +846,9 @@ test('Annotation exact-text locators round trip with selector and Element within
         originalStates,
         restoredStates,
         originalPaths,
+        originalPathsValid,
         restoredPaths,
+        restoredPathsValid,
       });
     }
     selectorScope.remove();
@@ -813,7 +863,56 @@ test('Annotation exact-text locators round trip with selector and Element within
   expect(result.owned).toBe(0);
   expect(result.overlays).toBe(0);
   for (const item of result.output) {
+    const expected = {
+      schema: 'hanamaru/v1',
+      kind: 'annotation',
+      target: item.key === null
+        ? {
+          type: 'locator',
+          within: { type: 'selector', selector: '#locator-selector-scope' },
+          text: 'Selector exact phrase',
+        }
+        : {
+          type: 'locator',
+          within: { type: 'key', key: 'locator-scope', targetKind: 'element' },
+          text: 'Element exact phrase',
+        },
+      options: {
+        mark: 'highlight',
+        note: null,
+        placement: 'auto',
+        trigger: 'manual',
+        accessible: false,
+        seed: `locator-${item.key ?? 'selector'}`,
+        duration: 0,
+        motion: 'never',
+      },
+    };
+    expect(item.definition).toEqual(expected);
+    expect(item.bytes).toBe(JSON.stringify(expected));
+    expect(Object.keys(item.definition)).toEqual(['schema', 'kind', 'target', 'options']);
+    expect(Object.keys(item.definition.target)).toEqual(['type', 'within', 'text']);
+    expect(Object.hasOwn(item.definition.target, 'occurrence')).toBe(false);
+    expect(Object.keys(item.definition.target.within)).toEqual(
+      item.key === null
+        ? ['type', 'selector']
+        : ['type', 'key', 'targetKind'],
+    );
+    expect(Object.keys(item.definition.options)).toEqual([
+      'mark', 'note', 'placement', 'trigger',
+      'accessible', 'seed', 'duration', 'motion',
+    ]);
     expect(item.restoredBytes).toBe(item.bytes);
+    expect(item.originalPaths.length).toBeGreaterThan(0);
+    expect(item.originalPaths.every(
+      (path) => typeof path === 'string' && path.length > 0,
+    )).toBe(true);
+    expect(item.originalPathsValid).toBe(true);
+    expect(item.restoredPaths.length).toBeGreaterThan(0);
+    expect(item.restoredPaths.every(
+      (path) => typeof path === 'string' && path.length > 0,
+    )).toBe(true);
+    expect(item.restoredPathsValid).toBe(true);
     expect(item.restoredPaths).toEqual(item.originalPaths);
     expect(item.restoredEvents).toEqual(['hana:start', 'hana:complete']);
     expect(item.restoredEvents).toEqual(item.originalEvents);
@@ -950,6 +1049,7 @@ test('Annotation iframe Document root preserves realm, bytes, paths, state, and 
     frame.remove();
     return {
       bytes,
+      definition,
       restoredBytes,
       originalRun,
       restoredRun,
@@ -959,6 +1059,29 @@ test('Annotation iframe Document root preserves realm, bytes, paths, state, and 
     };
   });
 
+  const expected = {
+    schema: 'hanamaru/v1',
+    kind: 'annotation',
+    target: { type: 'key', key: 'iframe-target', targetKind: 'element' },
+    options: {
+      mark: 'circle',
+      note: null,
+      placement: 'auto',
+      trigger: 'manual',
+      accessible: false,
+      seed: 'iframe-stable',
+      duration: 0,
+      motion: 'never',
+    },
+  };
+  expect(result.definition).toEqual(expected);
+  expect(result.bytes).toBe(JSON.stringify(expected));
+  expect(Object.keys(result.definition)).toEqual(['schema', 'kind', 'target', 'options']);
+  expect(Object.keys(result.definition.target)).toEqual(['type', 'key', 'targetKind']);
+  expect(Object.keys(result.definition.options)).toEqual([
+    'mark', 'note', 'placement', 'trigger',
+    'accessible', 'seed', 'duration', 'motion',
+  ]);
   expect(result.restoredBytes).toBe(result.bytes);
   expect(result.restoredRun).toEqual(result.originalRun);
   expect(result.restoredRun).toEqual({
@@ -971,6 +1094,12 @@ test('Annotation iframe Document root preserves realm, bytes, paths, state, and 
     paths: result.originalRun.paths,
   });
   expect(result.originalRun.paths.length).toBeGreaterThan(0);
+  expect(result.originalRun.paths.every(
+    (path) => typeof path === 'string' && path.length > 0,
+  )).toBe(true);
+  expect(result.restoredRun.paths.every(
+    (path) => typeof path === 'string' && path.length > 0,
+  )).toBe(true);
   expect(result.keyCalls).toEqual([
     {
       native: true,
@@ -1168,15 +1297,46 @@ test('Story round trip preserves every member source form, generated seeds, plug
     const keyForTarget = (target, context) => (
       `story-${context.role}-${context.index}`
     );
+    const memberIndexByOwner = new Map([
+      ['story-first', 0],
+      ['story-direct-key', 1],
+      ['story-range-key', 2],
+      ['story-selector-scope', 3],
+      ['story-element-scope', 4],
+    ]);
     const pathInventory = () => [...document.querySelectorAll('.hana-annotation')]
-      .map((group) => [...group.querySelectorAll('.hana-mark-path')]
-        .map((path) => path.getAttribute('d')));
+      .map((group, index) => {
+        const elements = [...group.querySelectorAll('.hana-mark-path')];
+        return {
+          index,
+          mark: group.getAttribute('data-hana-mark'),
+          paths: elements.map((path) => path.getAttribute('d')),
+          valid: elements.every((path) => {
+            const d = path.getAttribute('d');
+            try {
+              return typeof d === 'string' && d.length > 0
+                && Number.isFinite(path.getTotalLength());
+            } catch {
+              return false;
+            }
+          }),
+        };
+      });
     const execute = async (controller) => {
       const events = [];
+      const memberControllers = new Map();
       const listener = (event) => {
+        const aggregate = event.detail.controller === controller;
+        const memberIndex = aggregate
+          ? null
+          : memberIndexByOwner.get(event.target.id);
+        if (!aggregate && memberIndex !== undefined) {
+          memberControllers.set(event.detail.controller, memberIndex);
+        }
         events.push({
           type: event.type,
-          scope: event.detail.controller === controller ? 'story' : 'member',
+          scope: aggregate ? 'story' : 'member',
+          memberIndex: memberIndex ?? null,
           target: event.target.id,
           index: event.detail.index ?? null,
           state: event.detail.state ?? null,
@@ -1197,9 +1357,11 @@ test('Story round trip preserves every member source form, generated seeds, plug
       controller.cancel();
       const cancellation = {
         state: controller.state,
-        aggregate: events.filter(
-          (event) => event.scope === 'story' && event.type === 'hana:cancel',
-        ),
+        events: [...events],
+        cancelEvents: events.filter((event) => event.type === 'hana:cancel'),
+        memberStates: [...memberControllers]
+          .map(([member, index]) => ({ index, state: member.state }))
+          .sort((left, right) => left.index - right.index),
       };
       for (const type of ['hana:start', 'hana:step', 'hana:complete', 'hana:cancel']) {
         document.body.removeEventListener(type, listener);
@@ -1309,11 +1471,7 @@ test('Story round trip preserves every member source form, generated seeds, plug
 
   expect(result.restoredBytes).toBe(result.bytes);
   expect(Object.keys(result.definition)).toEqual(['schema', 'kind', 'options', 'steps']);
-  expect(result.definition).toMatchObject({
-    schema: 'hanamaru/v1',
-    kind: 'story',
-    options: { trigger: 'manual', gap: 0, motion: 'never' },
-  });
+  expect(Object.keys(result.definition.options)).toEqual(['trigger', 'gap', 'motion']);
   expect(result.definition.steps).toHaveLength(5);
   expect(result.definition.steps.every(
     (step) => Object.keys(step).join(',') === 'target,options',
@@ -1322,30 +1480,81 @@ test('Story round trip preserves every member source form, generated seeds, plug
     ({ options }) => Object.keys(options).join(',')
       === 'mark,note,placement,accessible,seed,duration',
   )).toBe(true);
-  expect(result.definition.steps.map(({ target }) => target)).toEqual([
-    { type: 'selector', selector: '#story-first' },
-    { type: 'key', key: 'story-target-1', targetKind: 'element' },
-    { type: 'key', key: 'story-target-2', targetKind: 'range' },
-    {
-      type: 'locator',
-      within: { type: 'selector', selector: '#story-selector-scope' },
-      text: 'selector scoped exact phrase',
-    },
-    {
-      type: 'locator',
-      within: { type: 'key', key: 'story-within-4', targetKind: 'element' },
-      text: 'element scoped exact phrase',
-    },
-  ]);
   expect(result.definition.steps.every(
     ({ options }) => /^hana-\d+$/.test(options.seed),
   )).toBe(true);
-  expect(new Set(result.definition.steps.map(({ options }) => options.seed)).size).toBe(5);
-  expect(result.definition.steps[4].options.mark).toBe('story-proof');
+  const seeds = result.definition.steps.map(({ options }) => options.seed);
+  expect(new Set(seeds).size).toBe(5);
+  const memberOptions = (mark, seed) => ({
+    mark,
+    note: null,
+    placement: 'auto',
+    accessible: false,
+    seed,
+    duration: 0,
+  });
+  const expected = {
+    schema: 'hanamaru/v1',
+    kind: 'story',
+    options: { trigger: 'manual', gap: 0, motion: 'never' },
+    steps: [
+      {
+        target: { type: 'selector', selector: '#story-first' },
+        options: memberOptions('underline', seeds[0]),
+      },
+      {
+        target: { type: 'key', key: 'story-target-1', targetKind: 'element' },
+        options: memberOptions('box', seeds[1]),
+      },
+      {
+        target: { type: 'key', key: 'story-target-2', targetKind: 'range' },
+        options: memberOptions('highlight', seeds[2]),
+      },
+      {
+        target: {
+          type: 'locator',
+          within: { type: 'selector', selector: '#story-selector-scope' },
+          text: 'selector scoped exact phrase',
+        },
+        options: memberOptions('circle', seeds[3]),
+      },
+      {
+        target: {
+          type: 'locator',
+          within: { type: 'key', key: 'story-within-4', targetKind: 'element' },
+          text: 'element scoped exact phrase',
+        },
+        options: memberOptions('story-proof', seeds[4]),
+      },
+    ],
+  };
+  expect(result.definition).toEqual(expected);
+  expect(result.bytes).toBe(JSON.stringify(expected));
   expect(result.originalRun).toEqual(result.restoredRun);
   expect(result.restoredRun.states).toEqual(['idle', 'playing', 'complete']);
   expect(result.restoredRun.paths).toHaveLength(5);
-  expect(result.restoredRun.paths[4]).toEqual(['M 2 3 L 22 13']);
+  expect(result.restoredRun.paths.map(({ index, mark }) => ({ index, mark }))).toEqual([
+    { index: 0, mark: 'underline' },
+    { index: 1, mark: 'box' },
+    { index: 2, mark: 'highlight' },
+    { index: 3, mark: 'circle' },
+    { index: 4, mark: 'story-proof' },
+  ]);
+  for (const member of result.restoredRun.paths) {
+    expect(member.valid).toBe(true);
+    expect(member.paths.length).toBeGreaterThan(0);
+    expect(member.paths.every(
+      (path) => typeof path === 'string' && path.length > 0,
+    )).toBe(true);
+  }
+  for (const member of result.originalRun.paths) {
+    expect(member.valid).toBe(true);
+    expect(member.paths.length).toBeGreaterThan(0);
+    expect(member.paths.every(
+      (path) => typeof path === 'string' && path.length > 0,
+    )).toBe(true);
+  }
+  expect(result.restoredRun.paths[4].paths).toEqual(['M 2 3 L 22 13']);
   expect(result.restoredRun.successfulEvents
     .filter(({ scope }) => scope === 'story')
     .map(({ type }) => type)).toEqual([
@@ -1357,16 +1566,60 @@ test('Story round trip preserves every member source form, generated seeds, plug
     'hana:step',
     'hana:complete',
   ]);
-  expect(result.restoredRun.cancellation).toEqual({
+  expect({
+    state: result.restoredRun.cancellation.state,
+    cancelEvents: result.restoredRun.cancellation.cancelEvents,
+    memberStates: result.restoredRun.cancellation.memberStates,
+  }).toEqual({
     state: 'cancelled',
-    aggregate: [{
-      type: 'hana:cancel',
-      scope: 'story',
-      target: 'story-first',
-      index: null,
-      state: null,
-    }],
+    cancelEvents: [
+      {
+        type: 'hana:cancel', scope: 'member', memberIndex: 0,
+        target: 'story-first', index: null, state: null,
+      },
+      {
+        type: 'hana:cancel', scope: 'member', memberIndex: 1,
+        target: 'story-direct-key', index: null, state: null,
+      },
+      {
+        type: 'hana:cancel', scope: 'member', memberIndex: 2,
+        target: 'story-range-key', index: null, state: null,
+      },
+      {
+        type: 'hana:cancel', scope: 'member', memberIndex: 3,
+        target: 'story-selector-scope', index: null, state: null,
+      },
+      {
+        type: 'hana:cancel', scope: 'member', memberIndex: 4,
+        target: 'story-element-scope', index: null, state: null,
+      },
+      {
+        type: 'hana:cancel', scope: 'story', memberIndex: null,
+        target: 'story-first', index: null, state: null,
+      },
+    ],
+    memberStates: [
+      { index: 0, state: 'visible' },
+      { index: 1, state: 'hidden' },
+      { index: 2, state: 'hidden' },
+      { index: 3, state: 'hidden' },
+      { index: 4, state: 'hidden' },
+    ],
   });
+  expect(result.restoredRun.cancellation.events.map(
+    ({ type, scope, memberIndex }) => ({ type, scope, memberIndex }),
+  )).toEqual([
+    { type: 'hana:cancel', scope: 'member', memberIndex: 0 },
+    { type: 'hana:cancel', scope: 'member', memberIndex: 1 },
+    { type: 'hana:cancel', scope: 'member', memberIndex: 2 },
+    { type: 'hana:cancel', scope: 'member', memberIndex: 3 },
+    { type: 'hana:cancel', scope: 'member', memberIndex: 4 },
+    { type: 'hana:start', scope: 'story', memberIndex: null },
+    { type: 'hana:step', scope: 'story', memberIndex: null },
+    { type: 'hana:start', scope: 'member', memberIndex: 0 },
+    { type: 'hana:complete', scope: 'member', memberIndex: 0 },
+    { type: 'hana:cancel', scope: 'story', memberIndex: null },
+  ]);
   expect(result.originalKeyCalls).toEqual([
     {
       keys: ['role', 'controllerKind', 'ownerElement', 'index'],
@@ -1443,6 +1696,7 @@ test('Group round trip preserves every member source form, generated seeds, plug
   const result = await page.evaluate(async () => {
     const { group } = await import('/src/group.js');
     const { registerMark } = await import('/src/plugins.js');
+    const { runtimeState } = await import('/src/runtime-state.js');
     const { restore, serialize } = await import('/src/serialize.js');
     const root = document.querySelector('main');
     const direct = root.appendChild(document.createElement('p'));
@@ -1501,15 +1755,78 @@ test('Group round trip preserves every member source form, generated seeds, plug
     const keyForTarget = (target, context) => (
       `group-${context.role}-${context.index}`
     );
+    const memberIndexByOwner = new Map([
+      ['group-first', 0],
+      ['group-direct-key', 1],
+      ['group-range-key', 2],
+      ['group-selector-scope', 3],
+      ['group-element-scope', 4],
+    ]);
     const pathInventory = () => [...document.querySelectorAll('.hana-annotation')]
-      .map((annotation) => [...annotation.querySelectorAll('.hana-mark-path')]
-        .map((path) => path.getAttribute('d')));
-    const execute = async (controller) => {
+      .map((annotation, index) => {
+        const elements = [...annotation.querySelectorAll('.hana-mark-path')];
+        return {
+          index,
+          mark: annotation.getAttribute('data-hana-mark'),
+          paths: elements.map((path) => path.getAttribute('d')),
+          valid: elements.every((path) => {
+            const d = path.getAttribute('d');
+            try {
+              return typeof d === 'string' && d.length > 0
+                && Number.isFinite(path.getTotalLength());
+            } catch {
+              return false;
+            }
+          }),
+        };
+      });
+    const captureMemberControllers = (create) => {
+      const metadata = runtimeState.metadata;
+      const priorDescriptor = Object.getOwnPropertyDescriptor(metadata, 'set');
+      const set = metadata.set;
+      const members = [];
+      Object.defineProperty(metadata, 'set', {
+        configurable: true,
+        value(controller, value) {
+          const result = Reflect.apply(set, this, [controller, value]);
+          if (value?.kind === 'annotation') members.push(controller);
+          return result;
+        },
+        writable: true,
+      });
+      let controller;
+      try {
+        controller = create();
+      } finally {
+        if (priorDescriptor === undefined) delete metadata.set;
+        else Object.defineProperty(metadata, 'set', priorDescriptor);
+      }
+      return {
+        controller,
+        members,
+        instrumentationRestored: priorDescriptor === undefined
+          ? !Object.hasOwn(metadata, 'set') && metadata.set === set
+          : Object.getOwnPropertyDescriptor(metadata, 'set').value
+            === priorDescriptor.value,
+      };
+    };
+    const execute = async (controller, capturedMembers) => {
       const events = [];
+      const memberControllers = new Map(
+        capturedMembers.map((member, index) => [member, index]),
+      );
       const listener = (event) => {
+        const aggregate = event.detail.controller === controller;
+        const memberIndex = aggregate
+          ? null
+          : memberIndexByOwner.get(event.target.id);
+        if (!aggregate && memberIndex !== undefined) {
+          memberControllers.set(event.detail.controller, memberIndex);
+        }
         events.push({
           type: event.type,
-          scope: event.detail.controller === controller ? 'group' : 'member',
+          scope: aggregate ? 'group' : 'member',
+          memberIndex: memberIndex ?? null,
           target: event.target.id,
           index: event.detail.index ?? null,
           state: event.detail.state ?? null,
@@ -1529,9 +1846,11 @@ test('Group round trip preserves every member source form, generated seeds, plug
       controller.hide();
       const cancellation = {
         state: controller.state,
-        aggregate: events.filter(
-          (event) => event.scope === 'group' && event.type === 'hana:cancel',
-        ),
+        events: [...events],
+        cancelEvents: events.filter((event) => event.type === 'hana:cancel'),
+        memberStates: [...memberControllers]
+          .map(([member, index]) => ({ index, state: member.state }))
+          .sort((left, right) => left.index - right.index),
       };
       for (const type of ['hana:start', 'hana:complete', 'hana:cancel']) {
         document.body.removeEventListener(type, listener);
@@ -1539,7 +1858,10 @@ test('Group round trip preserves every member source form, generated seeds, plug
       return { states, successfulEvents, paths, cancellation };
     };
 
-    const original = group(members, { trigger: 'manual', motion: 'never' });
+    const originalCapture = captureMemberControllers(
+      () => group(members, { trigger: 'manual', motion: 'never' }),
+    );
+    const original = originalCapture.controller;
     const originalKeyCalls = [];
     const definition = serialize(original, {
       keyForTarget(target, context) {
@@ -1552,7 +1874,7 @@ test('Group round trip preserves every member source form, generated seeds, plug
       },
     });
     const bytes = JSON.stringify(definition);
-    const originalRun = await execute(original);
+    const originalRun = await execute(original, originalCapture.members);
     original.destroy();
     unregister();
 
@@ -1586,7 +1908,7 @@ test('Group round trip preserves every member source form, generated seeds, plug
 
     unregister = registerMark('group-proof', pluginFactory);
     const resolverCalls = [];
-    const restored = restore(definition, {
+    const restoredCapture = captureMemberControllers(() => restore(definition, {
       root: document,
       resolveTarget(key, context) {
         resolverCalls.push({
@@ -1599,7 +1921,8 @@ test('Group round trip preserves every member source form, generated seeds, plug
         });
         return targetByKey.get(key);
       },
-    });
+    }));
+    const restored = restoredCapture.controller;
     const restoredKeyCalls = [];
     const restoredBytes = JSON.stringify(serialize(restored, {
       keyForTarget(target, context) {
@@ -1611,7 +1934,7 @@ test('Group round trip preserves every member source form, generated seeds, plug
         return keyForTarget(target, context);
       },
     }));
-    const restoredRun = await execute(restored);
+    const restoredRun = await execute(restored, restoredCapture.members);
     restored.destroy();
     unregister();
 
@@ -1636,16 +1959,18 @@ test('Group round trip preserves every member source form, generated seeds, plug
       missingPlugin,
       missingResidue,
       cleanup,
+      instrumentation: {
+        originalCount: originalCapture.members.length,
+        originalRestored: originalCapture.instrumentationRestored,
+        restoredCount: restoredCapture.members.length,
+        restoredRestored: restoredCapture.instrumentationRestored,
+      },
     };
   });
 
   expect(result.restoredBytes).toBe(result.bytes);
   expect(Object.keys(result.definition)).toEqual(['schema', 'kind', 'options', 'members']);
-  expect(result.definition).toMatchObject({
-    schema: 'hanamaru/v1',
-    kind: 'group',
-    options: { trigger: 'manual', motion: 'never' },
-  });
+  expect(Object.keys(result.definition.options)).toEqual(['trigger', 'motion']);
   expect(result.definition.members).toHaveLength(5);
   expect(result.definition.members.every(
     (member) => Object.keys(member).join(',') === 'target,options',
@@ -1654,43 +1979,118 @@ test('Group round trip preserves every member source form, generated seeds, plug
     ({ options }) => Object.keys(options).join(',')
       === 'mark,note,placement,accessible,seed,duration',
   )).toBe(true);
-  expect(result.definition.members.map(({ target }) => target)).toEqual([
-    { type: 'selector', selector: '#group-first' },
-    { type: 'key', key: 'group-target-1', targetKind: 'element' },
-    { type: 'key', key: 'group-target-2', targetKind: 'range' },
-    {
-      type: 'locator',
-      within: { type: 'selector', selector: '#group-selector-scope' },
-      text: 'selector exact phrase',
-      occurrence: 1,
-    },
-    {
-      type: 'locator',
-      within: { type: 'key', key: 'group-within-4', targetKind: 'element' },
-      text: 'element scoped exact phrase',
-    },
-  ]);
   expect(result.definition.members.every(
     ({ options }) => /^hana-\d+$/.test(options.seed),
   )).toBe(true);
-  expect(new Set(result.definition.members.map(({ options }) => options.seed)).size).toBe(5);
-  expect(result.definition.members[4].options.mark).toBe('group-proof');
+  const seeds = result.definition.members.map(({ options }) => options.seed);
+  expect(new Set(seeds).size).toBe(5);
+  const memberOptions = (mark, seed) => ({
+    mark,
+    note: null,
+    placement: 'auto',
+    accessible: false,
+    seed,
+    duration: 0,
+  });
+  const expected = {
+    schema: 'hanamaru/v1',
+    kind: 'group',
+    options: { trigger: 'manual', motion: 'never' },
+    members: [
+      {
+        target: { type: 'selector', selector: '#group-first' },
+        options: memberOptions('underline', seeds[0]),
+      },
+      {
+        target: { type: 'key', key: 'group-target-1', targetKind: 'element' },
+        options: memberOptions('box', seeds[1]),
+      },
+      {
+        target: { type: 'key', key: 'group-target-2', targetKind: 'range' },
+        options: memberOptions('highlight', seeds[2]),
+      },
+      {
+        target: {
+          type: 'locator',
+          within: { type: 'selector', selector: '#group-selector-scope' },
+          text: 'selector exact phrase',
+          occurrence: 1,
+        },
+        options: memberOptions('circle', seeds[3]),
+      },
+      {
+        target: {
+          type: 'locator',
+          within: { type: 'key', key: 'group-within-4', targetKind: 'element' },
+          text: 'element scoped exact phrase',
+        },
+        options: memberOptions('group-proof', seeds[4]),
+      },
+    ],
+  };
+  expect(result.definition).toEqual(expected);
+  expect(result.bytes).toBe(JSON.stringify(expected));
   expect(result.originalRun).toEqual(result.restoredRun);
   expect(result.restoredRun.states).toEqual(['idle', 'showing', 'visible']);
   expect(result.restoredRun.paths).toHaveLength(5);
-  expect(result.restoredRun.paths[4]).toEqual(['M 4 5 Q 14 7 24 15']);
+  expect(result.restoredRun.paths.map(({ index, mark }) => ({ index, mark }))).toEqual([
+    { index: 0, mark: 'underline' },
+    { index: 1, mark: 'box' },
+    { index: 2, mark: 'highlight' },
+    { index: 3, mark: 'circle' },
+    { index: 4, mark: 'group-proof' },
+  ]);
+  for (const member of result.restoredRun.paths) {
+    expect(member.valid).toBe(true);
+    expect(member.paths.length).toBeGreaterThan(0);
+    expect(member.paths.every(
+      (path) => typeof path === 'string' && path.length > 0,
+    )).toBe(true);
+  }
+  for (const member of result.originalRun.paths) {
+    expect(member.valid).toBe(true);
+    expect(member.paths.length).toBeGreaterThan(0);
+    expect(member.paths.every(
+      (path) => typeof path === 'string' && path.length > 0,
+    )).toBe(true);
+  }
+  expect(result.restoredRun.paths[4].paths).toEqual(['M 4 5 Q 14 7 24 15']);
   expect(result.restoredRun.successfulEvents
     .filter(({ scope }) => scope === 'group')
     .map(({ type }) => type)).toEqual(['hana:start', 'hana:complete']);
-  expect(result.restoredRun.cancellation).toEqual({
+  expect({
+    state: result.restoredRun.cancellation.state,
+    cancelEvents: result.restoredRun.cancellation.cancelEvents,
+    memberStates: result.restoredRun.cancellation.memberStates,
+  }).toEqual({
     state: 'hidden',
-    aggregate: [{
-      type: 'hana:cancel',
-      scope: 'group',
-      target: 'group-first',
-      index: null,
-      state: null,
-    }],
+    cancelEvents: [
+      {
+        type: 'hana:cancel', scope: 'group', memberIndex: null,
+        target: 'group-first', index: null, state: null,
+      },
+    ],
+    memberStates: [
+      { index: 0, state: 'hidden' },
+      { index: 1, state: 'hidden' },
+      { index: 2, state: 'hidden' },
+      { index: 3, state: 'hidden' },
+      { index: 4, state: 'hidden' },
+    ],
+  });
+  expect(result.restoredRun.cancellation.events.map(
+    ({ type, scope, memberIndex }) => ({ type, scope, memberIndex }),
+  )).toEqual([
+    { type: 'hana:cancel', scope: 'group', memberIndex: null },
+  ]);
+  expect(result.restoredRun.cancellation.events.filter(
+    ({ scope }) => scope === 'member',
+  )).toHaveLength(0);
+  expect(result.instrumentation).toEqual({
+    originalCount: 5,
+    originalRestored: true,
+    restoredCount: 5,
+    restoredRestored: true,
   });
   expect(result.originalKeyCalls).toEqual([
     {
@@ -1766,6 +2166,7 @@ test('Group round trip preserves every member source form, generated seeds, plug
 test('atomic Story and Group restore failures leave no controller, DOM, event, or resolver residue', async ({ page }) => {
   const pageErrors = await openFixture(page, '/tests/fixtures/group.html');
   const result = await page.evaluate(async () => {
+    const { runtimeState } = await import('/src/runtime-state.js');
     const { restore } = await import('/src/serialize.js');
     const first = document.querySelector('#group-first');
     const second = document.querySelector('#group-second');
@@ -1821,20 +2222,32 @@ test('atomic Story and Group restore failures leave no controller, DOM, event, o
         },
       },
       {
-        name: 'Story plugin preflight',
-        definition: aggregate('story', [{
-          target: { type: 'key', key: 'first', targetKind: 'element' },
-          options: annotationOptions('story-plugin', 'not-registered'),
-        }]),
-        resolve() { return first; },
+        name: 'Story later plugin preflight',
+        definition: aggregate('story', [
+          {
+            target: { type: 'key', key: 'first', targetKind: 'element' },
+            options: annotationOptions('story-plugin-first'),
+          },
+          {
+            target: { type: 'key', key: 'second', targetKind: 'element' },
+            options: annotationOptions('story-plugin-late', 'not-registered'),
+          },
+        ]),
+        resolve(key) { return key === 'first' ? first : second; },
       },
       {
-        name: 'Group options preflight',
-        definition: aggregate('group', [{
-          target: { type: 'key', key: 'second', targetKind: 'element' },
-          options: annotationOptions('group-options', 'underline', -1),
-        }]),
-        resolve() { return second; },
+        name: 'Group later options preflight',
+        definition: aggregate('group', [
+          {
+            target: { type: 'key', key: 'first', targetKind: 'element' },
+            options: annotationOptions('group-options-first'),
+          },
+          {
+            target: { type: 'key', key: 'second', targetKind: 'element' },
+            options: annotationOptions('group-options-late', 'underline', -1),
+          },
+        ]),
+        resolve(key) { return key === 'first' ? first : second; },
       },
     ];
     const output = [];
@@ -1849,20 +2262,35 @@ test('atomic Story and Group restore failures leave no controller, DOM, event, o
         document.body.addEventListener(type, listener);
       }
       let failure;
+      const originalMetadata = runtimeState.metadata;
+      class TrackingMetadata extends WeakMap {
+        setCalls = 0;
+
+        set(key, value) {
+          this.setCalls += 1;
+          return super.set(key, value);
+        }
+      }
+      const trackingMetadata = new TrackingMetadata();
+      runtimeState.metadata = trackingMetadata;
       try {
-        restore(item.definition, {
-          root: document,
-          resolveTarget(key, context) {
-            resolverCalls += 1;
-            return item.resolve(key, context);
-          },
-        });
-      } catch (error) {
-        failure = {
-          name: error.name,
-          code: error.code,
-          cause: error.details?.cause?.message ?? null,
-        };
+        try {
+          restore(item.definition, {
+            root: document,
+            resolveTarget(key, context) {
+              resolverCalls += 1;
+              return item.resolve(key, context);
+            },
+          });
+        } catch (error) {
+          failure = {
+            name: error.name,
+            code: error.code,
+            cause: error.details?.cause?.message ?? null,
+          };
+        }
+      } finally {
+        runtimeState.metadata = originalMetadata;
       }
       for (const type of [
         'hana:start', 'hana:step', 'hana:complete', 'hana:cancel', 'hana:error',
@@ -1873,6 +2301,11 @@ test('atomic Story and Group restore failures leave no controller, DOM, event, o
         name: item.name,
         failure,
         resolverCalls,
+        metadataSetCalls: trackingMetadata.setCalls,
+        metadataRestored: runtimeState.metadata === originalMetadata,
+        memberCount: item.definition[
+          item.definition.kind === 'story' ? 'steps' : 'members'
+        ].length,
         events,
         owned: document.querySelectorAll('[data-hana-id]').length,
         overlays: document.querySelectorAll('[data-hana-overlay]').length,
@@ -1892,6 +2325,9 @@ test('atomic Story and Group restore failures leave no controller, DOM, event, o
         cause: 'late story resolver failure',
       },
       resolverCalls: 2,
+      metadataSetCalls: 0,
+      metadataRestored: true,
+      memberCount: 2,
       events: [],
       owned: 0,
       overlays: 0,
@@ -1906,6 +2342,9 @@ test('atomic Story and Group restore failures leave no controller, DOM, event, o
         cause: 'late group resolver failure',
       },
       resolverCalls: 2,
+      metadataSetCalls: 0,
+      metadataRestored: true,
+      memberCount: 2,
       events: [],
       owned: 0,
       overlays: 0,
@@ -1913,13 +2352,16 @@ test('atomic Story and Group restore failures leave no controller, DOM, event, o
       notes: 0,
     },
     {
-      name: 'Story plugin preflight',
+      name: 'Story later plugin preflight',
       failure: {
         name: 'HanamaruConfigError',
         code: 'HANA_CONFIG_INVALID',
         cause: null,
       },
       resolverCalls: 0,
+      metadataSetCalls: 0,
+      metadataRestored: true,
+      memberCount: 2,
       events: [],
       owned: 0,
       overlays: 0,
@@ -1927,13 +2369,16 @@ test('atomic Story and Group restore failures leave no controller, DOM, event, o
       notes: 0,
     },
     {
-      name: 'Group options preflight',
+      name: 'Group later options preflight',
       failure: {
         name: 'HanamaruConfigError',
         code: 'HANA_CONFIG_SERIALIZED_DEFINITION',
         cause: null,
       },
       resolverCalls: 0,
+      metadataSetCalls: 0,
+      metadataRestored: true,
+      memberCount: 2,
       events: [],
       owned: 0,
       overlays: 0,
