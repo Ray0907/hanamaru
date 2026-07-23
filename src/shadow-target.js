@@ -168,6 +168,26 @@ function rangeOwnerElement(range, context) {
   }
 }
 
+function inspectTarget(target, context) {
+  try {
+    if (target instanceof context.realm.Element) {
+      return { kind: 'element' };
+    }
+    if (target instanceof context.realm.Range) {
+      return { kind: 'range' };
+    }
+    const config = readLocatorConfig(target, context.realm);
+    return config === null
+      ? { kind: 'invalid' }
+      : { kind: 'locator', config };
+  } catch (cause) {
+    throw targetError(
+      'Shadow target inspection failed',
+      { target, root: context.root, cause },
+    );
+  }
+}
+
 export function resolveShadowTarget(target, root) {
   const context = shadowContext(root);
   const findElement = (selector) => queryUniqueTarget(
@@ -178,14 +198,15 @@ export function resolveShadowTarget(target, root) {
   if (typeof target === 'string') {
     return createSelectorTargetRecord(target, findElement);
   }
-  if (target instanceof context.realm.Element) {
+  const inspected = inspectTarget(target, context);
+  if (inspected.kind === 'element') {
     assertExactElement(target, context);
     return createElementTargetRecord(
       target,
       (value) => assertExactElement(value, context),
     );
   }
-  if (target instanceof context.realm.Range) {
+  if (inspected.kind === 'range') {
     return createRangeTargetRecord(target, {
       assertRange: (range) => assertExactRange(range, context),
       cloneRange: (range) => context.rangeReaders.cloneRange(range),
@@ -206,9 +227,8 @@ export function resolveShadowTarget(target, root) {
       },
     });
   }
-  const config = readLocatorConfig(target, context.realm);
-  if (config !== null) {
-    return createLocatorTargetRecord(config, {
+  if (inspected.kind === 'locator') {
+    return createLocatorTargetRecord(inspected.config, {
       resolveWithin(within) {
         if (typeof within === 'string') return findElement(within);
         if (within instanceof context.realm.Element) {

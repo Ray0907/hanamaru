@@ -8,11 +8,13 @@ async function evaluateShadow(page, expression) {
       assertShadowRoot,
       resolveShadowTarget,
     } = await import('/src/shadow-target.js');
+    const { HanamaruTargetError } = await import('/src/errors.js');
     return Function(
       'assertShadowRoot',
       'resolveShadowTarget',
+      'HanamaruTargetError',
       `return (${source});`,
-    )(assertShadowRoot, resolveShadowTarget);
+    )(assertShadowRoot, resolveShadowTarget, HanamaruTargetError);
   }, expression);
 }
 
@@ -230,6 +232,66 @@ test('root rejects disconnected, non-ShadowRoot, foreign, and forged objects wit
   expect(result).toEqual({
     outcomes: Array(6).fill(['HanamaruTargetError', 'HANA_TARGET_INVALID', true]),
     calls: 0,
+  });
+});
+
+test('direct target classification contains raw and typed Proxy prototype traps', async ({ page }) => {
+  const result = await evaluateShadow(page, `(() => {
+    const root = window.__shadowFixture.openRoot;
+    const rawCause = new Error('raw prototype trap');
+    const typedCause = new HanamaruTargetError(
+      'HANA_TARGET_MISSING',
+      'typed prototype trap',
+      { forged: false },
+    );
+    let calls = 0;
+    const cases = [rawCause, typedCause].map((cause) => {
+      const target = new Proxy({}, {
+        getPrototypeOf() {
+          calls += 1;
+          throw cause;
+        },
+      });
+      try {
+        resolveShadowTarget(target, root);
+        return 'ok';
+      } catch (error) {
+        const details = error !== null && typeof error.details === 'object'
+          ? error.details
+          : {};
+        return {
+          typed: error instanceof HanamaruTargetError,
+          code: error.code,
+          target: details.target === target,
+          root: details.root === root,
+          cause: details.cause === cause,
+          wrapped: error !== cause,
+        };
+      }
+    });
+    return { cases, calls };
+  })()`);
+
+  expect(result).toEqual({
+    cases: [
+      {
+        typed: true,
+        code: 'HANA_TARGET_INVALID',
+        target: true,
+        root: true,
+        cause: true,
+        wrapped: true,
+      },
+      {
+        typed: true,
+        code: 'HANA_TARGET_INVALID',
+        target: true,
+        root: true,
+        cause: true,
+        wrapped: true,
+      },
+    ],
+    calls: 2,
   });
 });
 
