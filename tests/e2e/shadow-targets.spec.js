@@ -986,6 +986,43 @@ test('sheet mode verifies marker, shares exact identity, and retains author pre-
   });
 });
 
+test('sheet release removes at most one Hanamaru adoption when the author adds a duplicate', async ({ page }) => {
+  const result = await evaluateStyles(page, `(async () => {
+    const root = window.__shadowFixture.openRoot;
+    const css = await (await fetch('/src/hanamaru-shadow.css')).text();
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(css);
+    const initial = [...root.adoptedStyleSheets];
+    const lease = acquireShadowStyles(root, { mode: 'sheet', sheet });
+    const afterAcquire = root.adoptedStyleSheets
+      .filter((candidate) => candidate === sheet).length;
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+    const afterAuthorDuplicate = root.adoptedStyleSheets
+      .filter((candidate) => candidate === sheet).length;
+    lease.release();
+    const afterRelease = root.adoptedStyleSheets
+      .filter((candidate) => candidate === sheet).length;
+    const retained = root.adoptedStyleSheets.includes(sheet);
+    const state = runtimeState.shadows.has(root);
+    root.adoptedStyleSheets = initial;
+    return {
+      afterAcquire,
+      afterAuthorDuplicate,
+      afterRelease,
+      retained,
+      state,
+    };
+  })()`);
+
+  expect(result).toEqual({
+    afterAcquire: 1,
+    afterAuthorDuplicate: 2,
+    afterRelease: 1,
+    retained: true,
+    state: false,
+  });
+});
+
 test('empty and unrelated sheets fail marker verification and roll back only Hanamaru adoption', async ({ page }) => {
   const result = await evaluateStyles(page, `(() => {
     const root = window.__shadowFixture.openRoot;
@@ -1052,6 +1089,197 @@ test('empty and unrelated sheets fail marker verification and roll back only Han
     authorRetained: true,
     state: false,
     probes: 0,
+  });
+});
+
+test('sheet marker verification isolates each candidate from compatible root CSS', async ({ page }) => {
+  const result = await evaluateStyles(page, `(async () => {
+    const root = window.__shadowFixture.openRoot;
+    const css = await (await fetch('/src/hanamaru-shadow.css')).text();
+    const authorSheet = new CSSStyleSheet();
+    authorSheet.replaceSync(css);
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, authorSheet];
+    const empty = new CSSStyleSheet();
+    const unrelated = new CSSStyleSheet();
+    unrelated.replaceSync('.unrelated { --hana-shadow-style: 1 }');
+    const valid = new CSSStyleSheet();
+    valid.replaceSync(css);
+    const attempt = (sheet) => {
+      try {
+        const lease = acquireShadowStyles(root, { mode: 'sheet', sheet });
+        lease.release();
+        return 'ok';
+      } catch (error) {
+        return {
+          typed: error instanceof HanamaruStateError,
+          code: error.code,
+        };
+      }
+    };
+    const outcomes = {
+      empty: attempt(empty),
+      unrelated: attempt(unrelated),
+      valid: attempt(valid),
+    };
+    const retainedOnlyAuthor = root.adoptedStyleSheets.length === 1
+      && root.adoptedStyleSheets[0] === authorSheet;
+    const cleanup = {
+      temporaryHosts: document.querySelectorAll('[data-hana-shadow-probe-host]').length,
+      probes: root.querySelectorAll('.hana-shadow-mirror').length,
+      states: runtimeState.shadows.has(root),
+    };
+    root.adoptedStyleSheets = [];
+    return { outcomes, retainedOnlyAuthor, cleanup };
+  })()`);
+
+  expect(result).toEqual({
+    outcomes: {
+      empty: {
+        typed: true,
+        code: 'HANA_STATE_SHADOW_STYLES',
+      },
+      unrelated: {
+        typed: true,
+        code: 'HANA_STATE_SHADOW_STYLES',
+      },
+      valid: 'ok',
+    },
+    retainedOnlyAuthor: true,
+    cleanup: {
+      temporaryHosts: 0,
+      probes: 0,
+      states: false,
+    },
+  });
+});
+
+test('preinstalled marker verification rejects inherited host marker but accepts root mirror CSS', async ({ page }) => {
+  const result = await evaluateStyles(page, `(async () => {
+    const root = window.__shadowFixture.openRoot;
+    const host = root.host;
+    host.style.setProperty('--hana-shadow-style', '1');
+    let inherited;
+    try {
+      const lease = acquireShadowStyles(root, { mode: 'preinstalled' });
+      lease.release();
+      inherited = 'ok';
+    } catch (error) {
+      inherited = {
+        typed: error instanceof HanamaruStateError,
+        code: error.code,
+      };
+    }
+
+    const css = await (await fetch('/src/hanamaru-shadow.css')).text();
+    const authorSheet = new CSSStyleSheet();
+    authorSheet.replaceSync(css);
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, authorSheet];
+    const validLease = acquireShadowStyles(root, { mode: 'preinstalled' });
+    const valid = {
+      owned: validLease.owned,
+      marker: (() => {
+        const probe = document.createElement('span');
+        probe.className = 'hana-shadow-mirror';
+        root.append(probe);
+        const marker = getComputedStyle(probe)
+          .getPropertyValue('--hana-shadow-style')
+          .trim();
+        probe.remove();
+        return marker;
+      })(),
+    };
+    validLease.release();
+    const cleanup = {
+      temporaryHosts: document.querySelectorAll('[data-hana-shadow-probe-host]').length,
+      probes: root.querySelectorAll('.hana-shadow-mirror').length,
+      state: runtimeState.shadows.has(root),
+      authorRetained: root.adoptedStyleSheets.includes(authorSheet),
+    };
+    root.adoptedStyleSheets = [];
+    host.style.removeProperty('--hana-shadow-style');
+    return { inherited, valid, cleanup };
+  })()`);
+
+  expect(result).toEqual({
+    inherited: {
+      typed: true,
+      code: 'HANA_STATE_SHADOW_STYLES',
+    },
+    valid: {
+      owned: false,
+      marker: '1',
+    },
+    cleanup: {
+      temporaryHosts: 0,
+      probes: 0,
+      state: false,
+      authorRetained: true,
+    },
+  });
+});
+
+test('sheet configuration rejects forged and wrong-realm identities before adoption', async ({ page }) => {
+  const result = await evaluateStyles(page, `(() => {
+    const fixture = window.__shadowFixture;
+    const root = fixture.openRoot;
+    let accessorCalls = 0;
+    const forged = Object.create(CSSStyleSheet.prototype);
+    Object.defineProperty(forged, 'cssRules', {
+      configurable: true,
+      get() {
+        accessorCalls += 1;
+        throw new Error('forged accessor invoked');
+      },
+    });
+    const parentSheet = new CSSStyleSheet();
+    const beforeMain = [...root.adoptedStyleSheets];
+    const beforeFrame = [...fixture.frameRoot.adoptedStyleSheets];
+    const attempt = (candidate, targetRoot) => {
+      try {
+        acquireShadowStyles(targetRoot, {
+          mode: 'sheet',
+          sheet: candidate,
+        });
+        return { outcome: 'ok' };
+      } catch (error) {
+        return {
+          typed: error instanceof HanamaruConfigError,
+          code: error.code,
+          cause: error.details.cause instanceof TypeError,
+        };
+      }
+    };
+    return {
+      forged: attempt(forged, root),
+      wrongRealm: attempt(parentSheet, fixture.frameRoot),
+      accessorCalls,
+      mainUnchanged: root.adoptedStyleSheets.length === beforeMain.length
+        && root.adoptedStyleSheets.every((sheet, index) => sheet === beforeMain[index]),
+      frameUnchanged: fixture.frameRoot.adoptedStyleSheets.length === beforeFrame.length
+        && fixture.frameRoot.adoptedStyleSheets
+          .every((sheet, index) => sheet === beforeFrame[index]),
+      states: [
+        runtimeState.shadows.has(root),
+        runtimeState.shadows.has(fixture.frameRoot),
+      ],
+    };
+  })()`);
+
+  expect(result).toEqual({
+    forged: {
+      typed: true,
+      code: 'HANA_CONFIG_SHADOW_STYLES',
+      cause: true,
+    },
+    wrongRealm: {
+      typed: true,
+      code: 'HANA_CONFIG_SHADOW_STYLES',
+      cause: true,
+    },
+    accessorCalls: 0,
+    mainUnchanged: true,
+    frameUnchanged: true,
+    states: [false, false],
   });
 });
 

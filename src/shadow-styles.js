@@ -23,6 +23,7 @@ const SHADOW_CSS = `.hana-shadow-mirror {
 }
 `;
 const INTERNAL_CONFIG_ERRORS = new WeakSet();
+const INSTALL_DETAILS = new WeakMap();
 
 function configError(message, details) {
   const error = new HanamaruConfigError(
@@ -81,8 +82,7 @@ export function normalizeShadowStyles(value = undefined) {
   if (mode === 'auto') {
     if (!exactKeys(keys, ['mode', 'nonce'])) invalid('configuration', value);
     const nonce = descriptors.nonce?.value;
-    if (nonce !== undefined
-      && (typeof nonce !== 'string' || nonce.length === 0)) {
+    if (nonce !== undefined && typeof nonce !== 'string') {
       invalid('nonce', nonce);
     }
     return { mode: 'auto', nonce };
@@ -113,12 +113,29 @@ function compatible(current, incoming) {
   return true;
 }
 
+function sheetRulesGetter(Sheet) {
+  let prototype = Sheet.prototype;
+  while (prototype !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'cssRules');
+    if (typeof descriptor?.get === 'function') return descriptor.get;
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  return null;
+}
+
 function assertBrowserSheet(root, config) {
   if (config.mode !== 'sheet') return;
   const Sheet = root?.ownerDocument?.defaultView?.CSSStyleSheet;
   try {
     if (typeof Sheet === 'function' && !(config.sheet instanceof Sheet)) {
       throw new TypeError('sheet is not a CSSStyleSheet from the ShadowRoot realm');
+    }
+    if (typeof Sheet === 'function') {
+      const getRules = sheetRulesGetter(Sheet);
+      if (getRules === null) {
+        throw new TypeError('CSSStyleSheet cssRules getter is unavailable');
+      }
+      Reflect.apply(getRules, config.sheet, []);
     }
   } catch (cause) {
     throw configError(
@@ -154,8 +171,87 @@ function adoptedSheets(root) {
 
 function removeAdoption(root, sheet) {
   const current = adoptedSheets(root);
-  if (!current.includes(sheet)) return;
-  root.adoptedStyleSheets = current.filter((candidate) => candidate !== sheet);
+  const index = current.indexOf(sheet);
+  if (index === -1) return;
+  root.adoptedStyleSheets = [
+    ...current.slice(0, index),
+    ...current.slice(index + 1),
+  ];
+}
+
+function mirrorSignature(style) {
+  return style.position === 'absolute'
+    && style.width === '1px'
+    && style.height === '1px'
+    && style.overflow === 'hidden';
+}
+
+function verifyRootMarker(root) {
+  const document = root.ownerDocument;
+  const wrapper = document.createElement('span');
+  const sentinel = document.createElement('span');
+  const probe = document.createElement('span');
+  wrapper.setAttribute('data-hana-shadow-probe', '');
+  sentinel.setAttribute('data-hana-shadow-sentinel', '');
+  probe.className = 'hana-shadow-mirror';
+  probe.setAttribute('aria-hidden', 'true');
+  wrapper.append(sentinel, probe);
+  try {
+    root.append(wrapper);
+    const view = realmFor(root);
+    const probeStyle = view.getComputedStyle(probe);
+    const sentinelStyle = view.getComputedStyle(sentinel);
+    const marker = probeStyle
+      .getPropertyValue('--hana-shadow-style')
+      .trim();
+    if (marker !== '1'
+      || !mirrorSignature(probeStyle)
+      || mirrorSignature(sentinelStyle)) {
+      throw new TypeError('Hanamaru Shadow style marker is missing');
+    }
+  } finally {
+    wrapper.remove();
+  }
+}
+
+function withIsolatedRoot(root, verify) {
+  const document = root.ownerDocument;
+  const parent = document.body ?? document.documentElement;
+  if (parent === null) {
+    throw new TypeError('Shadow style verification requires a connected document');
+  }
+  const host = document.createElement('div');
+  host.setAttribute('data-hana-shadow-probe-host', '');
+  let isolatedRoot;
+  try {
+    parent.append(host);
+    isolatedRoot = host.attachShadow({ mode: 'open' });
+    return verify(isolatedRoot);
+  } finally {
+    if (isolatedRoot !== undefined) {
+      isolatedRoot.adoptedStyleSheets = [];
+      isolatedRoot.replaceChildren();
+    }
+    host.remove();
+  }
+}
+
+function verifyIsolatedSheet(root, sheet) {
+  return withIsolatedRoot(root, (isolatedRoot) => {
+    isolatedRoot.adoptedStyleSheets = [sheet];
+    verifyRootMarker(isolatedRoot);
+  });
+}
+
+function verifyIsolatedStyle(root, detail) {
+  return withIsolatedRoot(root, (isolatedRoot) => {
+    const style = isolatedRoot.ownerDocument.createElement('style');
+    style.setAttribute('data-hana-shadow-style', '');
+    style.textContent = detail.css;
+    if (detail.nonce !== undefined) style.setAttribute('nonce', detail.nonce);
+    isolatedRoot.append(style);
+    verifyRootMarker(isolatedRoot);
+  });
 }
 
 function browserAdapter() {
@@ -169,7 +265,7 @@ function browserAdapter() {
         sheet.replaceSync(css);
         root.adoptedStyleSheets = [...adoptedSheets(root), sheet];
         let released = false;
-        return {
+        const install = {
           owned: true,
           release() {
             if (released) return;
@@ -177,6 +273,8 @@ function browserAdapter() {
             removeAdoption(root, sheet);
           },
         };
+        INSTALL_DETAILS.set(install, { kind: 'sheet', sheet });
+        return install;
       }
 
       const style = root.ownerDocument.createElement('style');
@@ -185,7 +283,7 @@ function browserAdapter() {
       if (config.nonce !== undefined) style.setAttribute('nonce', config.nonce);
       root.append(style);
       let released = false;
-      return {
+      const install = {
         owned: true,
         release() {
           if (released) return;
@@ -193,6 +291,12 @@ function browserAdapter() {
           style.remove();
         },
       };
+      INSTALL_DETAILS.set(install, {
+        kind: 'style',
+        css,
+        nonce: config.nonce,
+      });
+      return install;
     },
 
     adoptSheet(root, config) {
@@ -216,22 +320,24 @@ function browserAdapter() {
       };
     },
 
-    verifyMarker(root) {
-      const probe = root.ownerDocument.createElement('span');
-      probe.className = 'hana-shadow-mirror';
-      probe.setAttribute('aria-hidden', 'true');
-      try {
-        root.append(probe);
-        const marker = realmFor(root)
-          .getComputedStyle(probe)
-          .getPropertyValue('--hana-shadow-style')
-          .trim();
-        if (marker !== '1') {
-          throw new TypeError('Hanamaru Shadow style marker is missing');
-        }
-      } finally {
-        probe.remove();
+    verifyMarker(root, config, install) {
+      if (config.mode === 'sheet') {
+        verifyIsolatedSheet(root, config.sheet);
+        return;
       }
+      if (config.mode === 'auto') {
+        const detail = INSTALL_DETAILS.get(install);
+        if (detail?.kind === 'sheet') {
+          verifyIsolatedSheet(root, detail.sheet);
+          return;
+        }
+        if (detail?.kind === 'style') {
+          verifyIsolatedStyle(root, detail);
+          return;
+        }
+        throw new TypeError('Shadow style installation details are missing');
+      }
+      verifyRootMarker(root);
     },
 
     rollback(root, install) {

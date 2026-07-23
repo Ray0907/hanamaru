@@ -90,6 +90,10 @@ test('normalizeShadowStyles returns canonical auto, sheet, and preinstalled reco
     mode: 'auto',
     nonce: 'request-42',
   });
+  assert.deepEqual(normalizeShadowStyles({ mode: 'auto', nonce: '' }), {
+    mode: 'auto',
+    nonce: '',
+  });
   assert.deepEqual(normalizeShadowStyles({ mode: 'sheet', sheet }), {
     mode: 'sheet',
     sheet,
@@ -122,7 +126,6 @@ test('normalizeShadowStyles rejects behavior-bearing, unknown, and invalid input
     { unknown: true },
     { mode: undefined },
     { mode: 'nope' },
-    { mode: 'auto', nonce: '' },
     { mode: 'auto', nonce: 42 },
     { mode: 'auto', sheet: new FakeSheet() },
     { mode: 'sheet' },
@@ -194,6 +197,29 @@ test('compatible auto leases share one exact fallback installation until final r
   assert.equal(adapter.installs[0].releases, 0);
   second.release();
   assert.equal(adapter.installs[0].releases, 1);
+  assert.equal(runtimeState.shadows.has(root), false);
+});
+
+test('empty nonce is propagated exactly and compatible only with the same empty nonce', () => {
+  const root = {};
+  const adapter = fakeAdapter();
+  const first = acquireShadowStyles(root, { mode: 'auto', nonce: '' }, adapter);
+  const second = acquireShadowStyles(root, { nonce: '' }, adapter);
+
+  assert.equal(adapter.installs.length, 1);
+  assert.equal(adapter.installs[0].node.nonce, '');
+  assert.equal(adapter.installs[0].node.textContent, shadowCss);
+  assert.equal(getShadowRootState(root).styles.count, 2);
+  expectConfigError(() => acquireShadowStyles(root, undefined, adapter));
+  expectConfigError(() => acquireShadowStyles(
+    root,
+    { mode: 'auto', nonce: 'nonempty' },
+    adapter,
+  ));
+  assert.equal(getShadowRootState(root).styles.count, 2);
+
+  first.release();
+  second.release();
   assert.equal(runtimeState.shadows.has(root), false);
 });
 
