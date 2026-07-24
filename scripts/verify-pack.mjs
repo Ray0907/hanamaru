@@ -56,6 +56,7 @@ function normalizePackedPath(file) {
   if (
     normalized.length === 0
     || normalized.startsWith('/')
+    || /^[A-Za-z]:\//u.test(normalized)
     || normalized === '..'
     || normalized.startsWith('../')
     || normalized.includes('/../')
@@ -105,16 +106,65 @@ export function validatePackFileList(files, distFiles) {
 
 export function npmInvocation(
   args,
-  platform = process.platform,
-  environment = process.env,
+  npmCliPath,
+  nodePath = process.execPath,
 ) {
-  if (platform === 'win32') {
-    return {
-      file: environment.ComSpec || 'cmd.exe',
-      args: ['/d', '/s', '/c', 'npm.cmd', ...args],
-    };
+  if (typeof npmCliPath !== 'string' || !path.isAbsolute(npmCliPath)) {
+    throw new Error('pack-verify: npm CLI path must be absolute');
   }
-  return { file: 'npm', args: [...args] };
+  if (typeof nodePath !== 'string' || !path.isAbsolute(nodePath)) {
+    throw new Error('pack-verify: Node executable path must be absolute');
+  }
+  return { file: nodePath, args: [npmCliPath, ...args] };
+}
+
+async function usableNpmCli(candidate, dependencies) {
+  if (typeof candidate !== 'string' || !path.isAbsolute(candidate)) return;
+  try {
+    const resolved = await dependencies.realpathImpl(candidate);
+    const stats = await dependencies.lstatImpl(resolved);
+    if (stats.isFile() && path.basename(resolved) === 'npm-cli.js') return resolved;
+  } catch {
+    // Try the next deterministic candidate.
+  }
+}
+
+export async function resolveNpmCli(options = {}) {
+  const dependencies = {
+    lstatImpl: options.lstatImpl ?? lstat,
+    realpathImpl: options.realpathImpl ?? realpath,
+  };
+  if (options.npmCliPath !== undefined) {
+    const explicit = await usableNpmCli(options.npmCliPath, dependencies);
+    if (!explicit) throw new Error('pack-verify: configured npm CLI could not be resolved');
+    return explicit;
+  }
+
+  const environment = options.env ?? process.env;
+  const fromEnvironment = await usableNpmCli(environment.npm_execpath, dependencies);
+  if (fromEnvironment) return fromEnvironment;
+
+  const nodePath = path.resolve(options.execPath ?? process.execPath);
+  const nodeDirectory = path.dirname(nodePath);
+  const candidates = [
+    path.resolve(nodeDirectory, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.resolve(nodeDirectory, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.resolve(nodeDirectory, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+  for (const directory of (environment.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    candidates.push(
+      path.resolve(directory, 'npm'),
+      path.resolve(directory, 'npm-cli.js'),
+      path.resolve(directory, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+      path.resolve(directory, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+      path.resolve(directory, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    );
+  }
+  for (const candidate of new Set(candidates)) {
+    const resolved = await usableNpmCli(candidate, dependencies);
+    if (resolved) return resolved;
+  }
+  throw new Error('pack-verify: npm CLI could not be resolved');
 }
 
 function execute(invocation, cwd, execFileImpl) {
@@ -156,6 +206,54 @@ async function canonicalDirectory(directory, label) {
   return resolved;
 }
 
+async function captureOutputDirectory(directory) {
+  if (typeof directory !== 'string' || directory.length === 0) {
+    throw new Error('pack-verify: output directory is required');
+  }
+  const requested = path.resolve(directory);
+  let requestedStats;
+  let resolved;
+  let resolvedStats;
+  try {
+    requestedStats = await lstat(requested);
+    resolved = await realpath(requested);
+    resolvedStats = await lstat(resolved);
+  } catch {
+    throw new Error('pack-verify: output directory does not exist');
+  }
+  if (requestedStats.isSymbolicLink()) {
+    throw new Error('pack-verify: output directory must not be a symbolic link');
+  }
+  if (!requestedStats.isDirectory() || !resolvedStats.isDirectory()) {
+    throw new Error('pack-verify: output directory is not a directory');
+  }
+  return Object.freeze({
+    dev: resolvedStats.dev,
+    ino: resolvedStats.ino,
+    path: resolved,
+  });
+}
+
+export async function assertOutputDirectoryIdentity(identity) {
+  try {
+    const [resolved, stats] = await Promise.all([
+      realpath(identity.path),
+      lstat(identity.path),
+    ]);
+    if (
+      resolved !== identity.path
+      || stats.isSymbolicLink()
+      || !stats.isDirectory()
+      || stats.dev !== identity.dev
+      || stats.ino !== identity.ino
+    ) {
+      throw new Error('changed');
+    }
+  } catch {
+    throw new Error('pack-verify: output directory identity changed');
+  }
+}
+
 function isInside(parent, candidate) {
   const relative = path.relative(parent, candidate);
   return relative === ''
@@ -175,19 +273,62 @@ function parseOctal(buffer) {
   return Number.parseInt(value, 8);
 }
 
-function parsePaxPath(contents) {
+function assertSafeTarPath(value, label, options = {}) {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
+    throw new Error(`pack-verify: tarball ${label} is unsafe`);
+  }
+  if (value.includes('\\')) {
+    throw new Error(`pack-verify: tarball ${label} is unsafe`);
+  }
+  const candidate = options.directory && value.endsWith('/')
+    ? value.slice(0, -1)
+    : value;
+  if (
+    candidate.length === 0
+    || candidate.startsWith('/')
+    || /^[A-Za-z]:\//u.test(candidate)
+    || candidate.split('/').some((segment) => (
+      segment === '' || segment === '.' || segment === '..'
+    ))
+  ) {
+    throw new Error(`pack-verify: tarball ${label} is unsafe`);
+  }
+  return value;
+}
+
+function tarText(buffer, label) {
+  const nul = buffer.indexOf(0);
+  if (nul === -1) return buffer.toString('utf8');
+  if (buffer.subarray(nul + 1).some((byte) => byte !== 0)) {
+    throw new Error(`pack-verify: tarball ${label} is unsafe`);
+  }
+  return buffer.subarray(0, nul).toString('utf8');
+}
+
+function parsePaxMetadata(contents) {
   let offset = 0;
-  let result;
+  const result = {};
   while (offset < contents.length) {
     const space = contents.indexOf(0x20, offset);
-    if (space === -1) break;
+    if (space === -1) {
+      throw new Error('pack-verify: tarball has invalid extended metadata');
+    }
     const length = Number.parseInt(contents.subarray(offset, space).toString('ascii'), 10);
     if (!Number.isSafeInteger(length) || length <= 0 || offset + length > contents.length) {
       throw new Error('pack-verify: tarball has invalid extended metadata');
     }
+    if (contents[offset + length - 1] !== 0x0a) {
+      throw new Error('pack-verify: tarball has invalid extended metadata');
+    }
     const record = contents.subarray(space + 1, offset + length - 1).toString('utf8');
     const equals = record.indexOf('=');
-    if (equals > 0 && record.slice(0, equals) === 'path') result = record.slice(equals + 1);
+    if (equals <= 0) {
+      throw new Error('pack-verify: tarball has invalid extended metadata');
+    }
+    const key = record.slice(0, equals);
+    const value = record.slice(equals + 1);
+    if (key === 'path') result.path = assertSafeTarPath(value, 'entry path');
+    if (key === 'linkpath') result.linkpath = assertSafeTarPath(value, 'link target');
     offset += length;
   }
   return result;
@@ -203,11 +344,19 @@ export function inspectTarball(buffer) {
   const files = [];
   let offset = 0;
   let pendingPath;
+  let pendingLink;
+  let terminated = false;
   while (offset + 512 <= archive.length) {
     const header = archive.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) break;
-    const rawName = header.subarray(0, 100).toString('utf8').replace(/\0.*$/u, '');
-    const prefix = header.subarray(345, 500).toString('utf8').replace(/\0.*$/u, '');
+    if (header.every((byte) => byte === 0)) {
+      if (archive.subarray(offset).some((byte) => byte !== 0)) {
+        throw new Error('pack-verify: tarball has trailing data');
+      }
+      terminated = true;
+      break;
+    }
+    const rawName = tarText(header.subarray(0, 100), 'entry path');
+    const prefix = tarText(header.subarray(345, 500), 'entry path');
     const name = prefix ? `${prefix}/${rawName}` : rawName;
     const size = parseOctal(header.subarray(124, 136));
     const dataStart = offset + 512;
@@ -217,18 +366,35 @@ export function inspectTarball(buffer) {
     }
     const type = String.fromCharCode(header[156] || 0);
     const contents = archive.subarray(dataStart, dataEnd);
-    if (type === 'x') {
-      pendingPath = parsePaxPath(contents) ?? pendingPath;
+    if (type === 'x' || type === 'g') {
+      const metadata = parsePaxMetadata(contents);
+      pendingPath = metadata.path ?? pendingPath;
+      pendingLink = metadata.linkpath ?? pendingLink;
     } else if (type === 'L') {
-      pendingPath = contents.toString('utf8').replace(/\0.*$/u, '');
+      pendingPath = assertSafeTarPath(tarText(contents, 'entry path'), 'entry path');
+    } else if (type === 'K') {
+      pendingLink = assertSafeTarPath(tarText(contents, 'link target'), 'link target');
     } else if (type === '\0' || type === '0') {
-      files.push(pendingPath ?? name);
+      files.push(assertSafeTarPath(pendingPath ?? name, 'entry path'));
       pendingPath = undefined;
-    } else if (type !== 'g') {
+      pendingLink = undefined;
+    } else if (type === '5') {
+      assertSafeTarPath(pendingPath ?? name, 'entry path', { directory: true });
       pendingPath = undefined;
+      pendingLink = undefined;
+    } else if (type === '1' || type === '2') {
+      assertSafeTarPath(pendingPath ?? name, 'entry path');
+      assertSafeTarPath(
+        pendingLink ?? tarText(header.subarray(157, 257), 'link target'),
+        'link target',
+      );
+      throw new Error(`pack-verify: tarball contains unsupported entry type ${type}`);
+    } else {
+      throw new Error(`pack-verify: tarball contains unsupported entry type ${type}`);
     }
     offset = dataStart + Math.ceil(size / 512) * 512;
   }
+  if (!terminated) throw new Error('pack-verify: tarball is truncated');
   return sortedUniqueFiles(files);
 }
 
@@ -269,7 +435,7 @@ function cleanFilename(name, version) {
 
 async function runInstalledVerification(artifact, installRoot, options = {}) {
   const execFileImpl = options.execFileImpl ?? execFile;
-  const invocationOptions = [options.platform, options.env];
+  const invocationOptions = [options.npmCliPath, options.execPath ?? process.execPath];
   await writeFile(path.join(installRoot, 'package.json'), JSON.stringify({
     name: 'hanamaru-pack-verification',
     private: true,
@@ -296,6 +462,27 @@ async function runInstalledVerification(artifact, installRoot, options = {}) {
     throw new Error('pack-verify: clean-room install failed');
   }
 
+  let installedPackageManifest;
+  try {
+    installedPackageManifest = JSON.parse(await readFile(
+      path.join(
+        installRoot,
+        'node_modules',
+        'hanamaru-annotations',
+        'package.json',
+      ),
+      'utf8',
+    ));
+  } catch {
+    throw new Error('pack-verify: installed package manifest could not be read');
+  }
+  if (
+    Object.hasOwn(installedPackageManifest, 'dependencies')
+    || Object.keys(installedPackageManifest.dependencies ?? {}).length > 0
+  ) {
+    throw new Error('pack-verify: installed package declares production dependencies');
+  }
+
   const verificationScript = `
     import assert from 'node:assert/strict';
     import { readFile } from 'node:fs/promises';
@@ -313,6 +500,8 @@ async function runInstalledVerification(artifact, installRoot, options = {}) {
     const manifest = JSON.parse(await readFile(packagePath, 'utf8'));
     assert.equal(manifest.name, 'hanamaru-annotations');
     assert.equal(typeof manifest.version, 'string');
+    assert.equal(Object.hasOwn(manifest, 'dependencies'), false);
+    assert.deepEqual(Object.keys(manifest.dependencies ?? {}), []);
   `;
   const verificationPath = path.join(installRoot, 'verify-imports.mjs');
   await writeFile(verificationPath, verificationScript);
@@ -358,7 +547,10 @@ async function runInstalledVerification(artifact, installRoot, options = {}) {
 
 export async function verifyPack(root, outputDirectory, options = {}) {
   const projectRoot = await canonicalDirectory(root, 'project');
-  const artifactDirectory = await canonicalDirectory(outputDirectory, 'output');
+  const outputIdentity = await captureOutputDirectory(outputDirectory);
+  const artifactDirectory = outputIdentity.path;
+  const assertOutputIdentityImpl = options.assertOutputIdentityImpl
+    ?? assertOutputDirectoryIdentity;
   if (isInside(projectRoot, artifactDirectory)) {
     throw new Error('pack-verify: output directory must be outside the project root');
   }
@@ -369,11 +561,17 @@ export async function verifyPack(root, outputDirectory, options = {}) {
   const manifest = await readManifest(projectRoot);
   const expectedFilename = cleanFilename(manifest.name, manifest.version);
   const built = await (options.checkBuiltExportsImpl ?? checkBuiltExports)(projectRoot);
+  const npmCliPath = await (options.resolveNpmCliImpl ?? resolveNpmCli)({
+    env: options.env,
+    execPath: options.execPath ?? process.execPath,
+    npmCliPath: options.npmCliPath,
+  });
   const invocation = npmInvocation(
     ['pack', '--json', '--pack-destination', artifactDirectory],
-    options.platform,
-    options.env,
+    npmCliPath,
+    options.execPath ?? process.execPath,
   );
+  await assertOutputIdentityImpl(outputIdentity, 'before-pack');
   let stdout;
   try {
     stdout = await execute(
@@ -384,6 +582,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
   } catch {
     throw new Error('pack-verify: npm pack failed');
   }
+  await assertOutputIdentityImpl(outputIdentity, 'after-pack');
 
   const result = parsePackResult(stdout);
   if (result.filename !== expectedFilename) {
@@ -394,6 +593,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
     built.distFiles,
   );
   const artifact = path.join(artifactDirectory, expectedFilename);
+  await assertOutputIdentityImpl(outputIdentity, 'before-artifact-read');
   let artifactStats;
   try {
     artifactStats = await lstat(artifact);
@@ -419,6 +619,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
 
   const digestText = `${digestBuffer.toString('hex')}  ${expectedFilename}\n`;
   const digestPath = path.join(artifactDirectory, 'sha512.txt');
+  await assertOutputIdentityImpl(outputIdentity, 'before-digest-write');
   await writeFile(digestPath, digestText, { flag: 'wx' });
   if (await readFile(digestPath, 'utf8') !== digestText) {
     throw new Error('pack-verify: generated SHA-512 digest could not be verified');
@@ -435,12 +636,14 @@ export async function verifyPack(root, outputDirectory, options = {}) {
       {
         env: options.env,
         execFileImpl: options.execFileImpl ?? execFile,
-        platform: options.platform,
+        execPath: options.execPath ?? process.execPath,
+        npmCliPath,
       },
     );
   } finally {
     await rmImpl(installRoot, { recursive: true, force: true });
   }
+  await assertOutputIdentityImpl(outputIdentity, 'before-return');
 
   return {
     artifact,

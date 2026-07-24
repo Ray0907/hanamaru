@@ -1,25 +1,42 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   access,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
+  rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { gzipSync } from 'node:zlib';
+import { buildDistribution } from '../../scripts/build.mjs';
 import {
   expectedPackFiles,
+  inspectTarball,
   npmInvocation,
+  resolveNpmCli,
   validatePackFileList,
   verifyPack,
 } from '../../scripts/verify-pack.mjs';
 
+const execFileAsync = promisify(execFile);
+const PROJECT_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+);
 const DIST_FILES = Object.freeze([
   '_chunks/runtime-ABC123.js',
   'hanamaru.css',
@@ -38,6 +55,48 @@ const ARTIFACT_BYTES = Buffer.from('fixture tarball bytes');
 const ARTIFACT_INTEGRITY = `sha512-${
   createHash('sha512').update(ARTIFACT_BYTES).digest('base64')
 }`;
+
+function tarString(header, offset, length, value) {
+  Buffer.from(value).copy(header, offset, 0, length);
+}
+
+function tarOctal(header, offset, length, value) {
+  tarString(header, offset, length, `${value.toString(8).padStart(length - 1, '0')}\0`);
+}
+
+function tarArchive(entries, { trailingZeroBlocks = true } = {}) {
+  const blocks = [];
+  for (const entry of entries) {
+    const body = Buffer.from(entry.body ?? '');
+    const header = Buffer.alloc(512);
+    tarString(header, 0, 100, entry.name);
+    tarOctal(header, 100, 8, 0o644);
+    tarOctal(header, 108, 8, 0);
+    tarOctal(header, 116, 8, 0);
+    tarOctal(header, 124, 12, entry.size ?? body.length);
+    header[156] = (entry.type ?? '0').charCodeAt(0);
+    if (entry.linkname) tarString(header, 157, 100, entry.linkname);
+    tarString(header, 257, 6, 'ustar\0');
+    tarString(header, 263, 2, '00');
+    blocks.push(header);
+    if (body.length > 0) {
+      blocks.push(body);
+      const padding = (512 - (body.length % 512)) % 512;
+      if (padding > 0) blocks.push(Buffer.alloc(padding));
+    }
+  }
+  if (trailingZeroBlocks) blocks.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(blocks));
+}
+
+function paxRecord(key, value) {
+  const payload = `${key}=${value}\n`;
+  let length = Buffer.byteLength(payload) + 2;
+  while (Buffer.byteLength(`${length} ${payload}`) !== length) {
+    length = Buffer.byteLength(`${length} ${payload}`);
+  }
+  return `${length} ${payload}`;
+}
 
 async function fixture(t) {
   const container = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-pack-test-'));
@@ -78,6 +137,7 @@ function successfulOptions(output, calls, overrides = {}) {
       );
     },
     inspectTarballImpl: async () => [...PACK_FILES],
+    resolveNpmCliImpl: async () => path.resolve('/verified/npm-cli.js'),
     verifyInstallImpl: async (_artifact, installRoot) => {
       assert.equal(path.dirname(installRoot), os.tmpdir());
       await access(installRoot);
@@ -122,31 +182,212 @@ test('pack allowlist rejects missing mandatory files and every root extra class'
 
 test('npm invocation keeps commands and output paths as separate arguments', () => {
   const output = path.resolve('/tmp/hanamaru pack & artifacts');
+  const npmCli = path.resolve('/opt/node/lib/node_modules/npm/bin/npm-cli.js');
+  const node = path.resolve('/opt/node/bin/node');
   assert.deepEqual(npmInvocation(
-    ['pack', '--json', '--pack-destination', output],
-    'linux',
-    {},
-  ), {
-    args: ['pack', '--json', '--pack-destination', output],
-    file: 'npm',
-  });
-  assert.deepEqual(npmInvocation(
-    ['pack', '--json', '--pack-destination', output],
-    'win32',
-    { ComSpec: 'C:\\Windows\\System32\\cmd.exe' },
+    ['pack', '--json', '--pack-destination', output, '%NAME%', '&', '^', '花丸'],
+    npmCli,
+    node,
   ), {
     args: [
-      '/d',
-      '/s',
-      '/c',
-      'npm.cmd',
+      npmCli,
       'pack',
       '--json',
       '--pack-destination',
       output,
+      '%NAME%',
+      '&',
+      '^',
+      '花丸',
     ],
-    file: 'C:\\Windows\\System32\\cmd.exe',
+    file: node,
   });
+});
+
+test('npm CLI resolution prefers valid environment and Node-install candidates', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-npm-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const environmentCli = path.join(root, 'environment', 'npm-cli.js');
+  await mkdir(path.dirname(environmentCli), { recursive: true });
+  await writeFile(environmentCli, '# fixture');
+  assert.equal(
+    await resolveNpmCli({
+      env: { npm_execpath: environmentCli, PATH: '' },
+      execPath: path.join(root, 'node', 'bin', 'node'),
+    }),
+    await realpath(environmentCli),
+  );
+
+  const nodePath = path.join(root, 'runtime', 'bin', 'node');
+  const installedCli = path.join(
+    root,
+    'runtime',
+    'lib',
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
+  await mkdir(path.dirname(installedCli), { recursive: true });
+  await writeFile(installedCli, '# fixture');
+  assert.equal(
+    await resolveNpmCli({ env: { PATH: '' }, execPath: nodePath }),
+    await realpath(installedCli),
+  );
+});
+
+test('npm CLI resolution follows PATH aliases and rejects unresolved configuration', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-npm-path-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cli = path.join(root, 'npm-runtime', 'npm-cli.js');
+  const bin = path.join(root, 'bin');
+  await mkdir(path.dirname(cli), { recursive: true });
+  await mkdir(bin);
+  await writeFile(cli, '# fixture');
+  await symlink(cli, path.join(bin, 'npm'));
+  assert.equal(
+    await resolveNpmCli({
+      env: { PATH: bin },
+      execPath: path.join(root, 'missing-runtime', 'node'),
+    }),
+    await realpath(cli),
+  );
+  await assert.rejects(
+    resolveNpmCli({
+      env: { PATH: '' },
+      execPath: path.join(root, 'missing-runtime', 'node'),
+      realpathImpl: async () => {
+        throw new Error('missing');
+      },
+    }),
+    /pack-verify: npm CLI could not be resolved/u,
+  );
+});
+
+test('tar inspection accepts only the exact regular file list', () => {
+  const tarball = tarArchive(PACK_FILES.map((file) => ({
+    body: file,
+    name: `package/${file}`,
+  })));
+  assert.deepEqual(inspectTarball(tarball), PACK_FILES);
+});
+
+test('tar inspection accepts safe directories and path metadata for regular files', () => {
+  const tarball = tarArchive([
+    { name: 'package/', type: '5' },
+    {
+      name: 'package/pax',
+      type: 'x',
+      body: paxRecord('path', 'package/LICENSE'),
+    },
+    { name: 'package/placeholder', body: 'license' },
+    { name: 'package/long', type: 'L', body: 'package/README.md\0' },
+    { name: 'package/placeholder', body: 'readme' },
+  ]);
+  assert.deepEqual(inspectTarball(tarball), ['LICENSE', 'README.md']);
+});
+
+test('tar inspection rejects links even when their entry names look safe', () => {
+  for (const entry of [
+    { name: 'package/link', type: '2', linkname: '../../etc/passwd' },
+    { name: 'package/hard', type: '1', linkname: '/etc/passwd' },
+    { name: 'package/link', type: '2', linkname: 'package/LICENSE' },
+    { name: 'package/hard', type: '1', linkname: 'package/LICENSE' },
+  ]) {
+    assert.throws(
+      () => inspectTarball(tarArchive([entry])),
+      /pack-verify: tarball (?:link target is unsafe|contains unsupported entry type [12])/u,
+    );
+  }
+});
+
+test('tar inspection rejects unsafe direct, PAX, and GNU paths', () => {
+  const attacks = [
+    tarArchive([{ name: '/etc/passwd', body: 'x' }]),
+    tarArchive([{ name: 'package/../../secret', body: 'x' }]),
+    tarArchive([
+      {
+        name: 'package/pax',
+        type: 'x',
+        body: paxRecord('path', 'package/../../secret'),
+      },
+      { name: 'package/safe', body: 'x' },
+    ]),
+    tarArchive([
+      { name: 'package/long', type: 'L', body: 'package/../../secret\0' },
+      { name: 'package/safe', body: 'x' },
+    ]),
+    tarArchive([
+      {
+        name: 'package/pax-link',
+        type: 'x',
+        body: paxRecord('linkpath', '/etc/passwd'),
+      },
+      { name: 'package/safe', type: '2', linkname: 'package/LICENSE' },
+    ]),
+  ];
+  for (const tarball of attacks) {
+    assert.throws(
+      () => inspectTarball(tarball),
+      /pack-verify: tarball (?:entry path|link target) is unsafe/u,
+    );
+  }
+});
+
+test('tar inspection rejects NUL-smuggled header and extended paths', () => {
+  for (const tarball of [
+    tarArchive([{ name: 'package/safe\0../secret', body: 'x' }]),
+    tarArchive([
+      {
+        name: 'package/pax',
+        type: 'x',
+        body: paxRecord('path', 'package/safe\0../secret'),
+      },
+      { name: 'package/safe', body: 'x' },
+    ]),
+    tarArchive([
+      { name: 'package/long', type: 'L', body: 'package/safe\0../secret' },
+      { name: 'package/safe', body: 'x' },
+    ]),
+  ]) {
+    assert.throws(
+      () => inspectTarball(tarball),
+      /pack-verify: tarball entry path is unsafe/u,
+    );
+  }
+});
+
+test('tar inspection rejects devices, FIFO, sparse, and unknown entries', () => {
+  for (const type of ['3', '4', '6', 'S', '9']) {
+    assert.throws(
+      () => inspectTarball(tarArchive([{ name: 'package/unsafe', type }])),
+      new RegExp(`pack-verify: tarball contains unsupported entry type ${type}`, 'u'),
+    );
+  }
+});
+
+test('tar inspection rejects duplicate files and truncated bodies', () => {
+  assert.throws(
+    () => inspectTarball(tarArchive([
+      { name: 'package/LICENSE', body: 'first' },
+      { name: 'package/LICENSE', body: 'second' },
+    ])),
+    /duplicate LICENSE/u,
+  );
+  assert.throws(
+    () => inspectTarball(tarArchive(
+      [{ name: 'package/LICENSE', size: 10 }],
+      { trailingZeroBlocks: false },
+    )),
+    /pack-verify: tarball is truncated/u,
+  );
+  assert.throws(
+    () => inspectTarball(tarArchive(
+      [{ name: 'package/LICENSE', body: 'complete' }],
+      { trailingZeroBlocks: false },
+    )),
+    /pack-verify: tarball is truncated/u,
+  );
 });
 
 test('verifyPack packs exactly once to the canonical external directory', async (t) => {
@@ -155,13 +396,14 @@ test('verifyPack packs exactly once to the canonical external directory', async 
   const result = await verifyPack(root, output, successfulOptions(output, calls));
   const canonicalOutput = await import('node:fs/promises').then(({ realpath }) => realpath(output));
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].args, [
+  assert.equal(calls[0].file, process.execPath);
+  assert.equal(path.basename(calls[0].args[0]), 'npm-cli.js');
+  assert.deepEqual(calls[0].args.slice(1), [
     'pack',
     '--json',
     '--pack-destination',
     canonicalOutput,
   ]);
-  assert.equal(calls[0].file, 'npm');
   assert.equal(calls[0].options.cwd, await import('node:fs/promises').then(
     ({ realpath }) => realpath(root),
   ));
@@ -190,9 +432,13 @@ test('verifyPack rejects unsafe output paths before invoking npm', async (t) => 
   await symlink(child, alias, 'dir');
   const missing = path.join(container, 'missing');
   const file = path.join(container, 'not-a-directory');
+  const safeExternal = path.join(container, 'safe-external');
+  const safeAlias = path.join(container, 'safe-alias');
+  await mkdir(safeExternal);
+  await symlink(safeExternal, safeAlias, 'dir');
   await writeFile(file, 'fixture');
 
-  for (const output of [undefined, root, child, alias, missing, file]) {
+  for (const output of [undefined, root, child, alias, safeAlias, missing, file]) {
     await assert.rejects(
       verifyPack(root, output, options),
       /pack-verify: output directory/u,
@@ -200,6 +446,89 @@ test('verifyPack rejects unsafe output paths before invoking npm', async (t) => 
     );
   }
   assert.equal(calls.length, 0);
+});
+
+test('verifyPack detects an output directory swapped during npm pack', async (t) => {
+  const { output, root } = await fixture(t);
+  const trap = path.join(root, 'trap');
+  const preserved = `${output}-preserved`;
+  await mkdir(trap);
+  const calls = [];
+  const options = successfulOptions(output, calls, {
+    execFileImpl(file, args, execOptions, callback) {
+      calls.push({ args, file, options: execOptions });
+      void (async () => {
+        await rename(output, preserved);
+        await symlink(trap, output, 'dir');
+        await writeFile(
+          path.join(preserved, 'hanamaru-annotations-0.1.0.tgz'),
+          ARTIFACT_BYTES,
+        );
+        callback(null, packJson(), '');
+      })().catch(callback);
+    },
+  });
+
+  await assert.rejects(
+    verifyPack(root, output, options),
+    /pack-verify: output directory identity changed/u,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(await stat(output).then((value) => value.isDirectory()), true);
+  assert.equal(
+    await access(path.join(trap, 'sha512.txt')).then(() => true, () => false),
+    false,
+  );
+  assert.equal(
+    await access(path.join(preserved, 'hanamaru-annotations-0.1.0.tgz')).then(
+      () => true,
+      () => false,
+    ),
+    true,
+  );
+});
+
+test('verifyPack detects an output swap between validation stages', async (t) => {
+  const { output, root } = await fixture(t);
+  const trap = path.join(root, 'trap');
+  const preserved = `${output}-preserved`;
+  await mkdir(trap);
+  const calls = [];
+  let swapped = false;
+  const assertOutputIdentityImpl = async (identity, phase) => {
+    const currentPath = await realpath(identity.path);
+    const current = await stat(identity.path);
+    if (
+      currentPath !== identity.path
+      || current.dev !== identity.dev
+      || current.ino !== identity.ino
+    ) {
+      throw new Error('pack-verify: output directory identity changed');
+    }
+    if (phase === 'after-pack' && !swapped) {
+      swapped = true;
+      await rename(output, preserved);
+      await symlink(trap, output, 'dir');
+    }
+  };
+  const options = successfulOptions(output, calls, { assertOutputIdentityImpl });
+
+  await assert.rejects(
+    verifyPack(root, output, options),
+    /pack-verify: output directory identity changed/u,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(
+    await access(path.join(trap, 'sha512.txt')).then(() => true, () => false),
+    false,
+  );
+  assert.equal(
+    await access(path.join(preserved, 'hanamaru-annotations-0.1.0.tgz')).then(
+      () => true,
+      () => false,
+    ),
+    true,
+  );
 });
 
 test('verifyPack rejects non-empty output directories before invoking npm', async (t) => {
@@ -329,4 +658,86 @@ test('pack verification leaves the fixed verify stages and production tree uncha
     'npm run test:unit && npm run test:types && npm run build && npm run check:dist && npm run test:e2e:chromium && npm run test:e2e:smoke && npm run test:adapters',
   );
   assert.equal(Object.hasOwn(packageJson, 'dependencies'), false);
+});
+
+test('real pack integration builds, packs, installs, resolves, and verifies externally', {
+  timeout: 120_000,
+}, async () => {
+  const testRoot = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-real-pack-test-'));
+  const fixtureRoot = path.join(testRoot, 'project');
+  const output = path.join(testRoot, 'artifacts');
+  const statusBefore = (await execFileAsync('git', ['status', '--porcelain'], {
+    cwd: PROJECT_ROOT,
+  })).stdout;
+  const residueBefore = (await readdir(PROJECT_ROOT))
+    .filter((file) => file.endsWith('.tgz') || file === 'sha512.txt')
+    .sort();
+  try {
+    await mkdir(fixtureRoot);
+    await mkdir(output);
+    for (const file of ['package.json', 'README.md', 'LICENSE']) {
+      await cp(path.join(PROJECT_ROOT, file), path.join(fixtureRoot, file));
+    }
+    for (const directory of ['src', 'types']) {
+      await cp(
+        path.join(PROJECT_ROOT, directory),
+        path.join(fixtureRoot, directory),
+        { recursive: true },
+      );
+    }
+    await symlink(path.join(PROJECT_ROOT, 'node_modules'), path.join(fixtureRoot, 'node_modules'));
+    await buildDistribution(fixtureRoot);
+
+    const result = await verifyPack(fixtureRoot, output);
+    assert.equal(path.basename(result.artifact), 'hanamaru-annotations-0.1.0.tgz');
+    assert.equal(result.fileCount, 33);
+    assert.deepEqual(result.verification, {
+      css: 2,
+      entries: 9,
+      productionDependencies: 0,
+    });
+    assert.equal(
+      result.integrity,
+      `sha512-${createHash('sha512').update(await readFile(result.artifact)).digest('base64')}`,
+    );
+    const digestText = await readFile(path.join(output, 'sha512.txt'), 'utf8');
+    assert.equal(
+      digestText,
+      `${createHash('sha512').update(await readFile(result.artifact)).digest('hex')}  ${
+        path.basename(result.artifact)
+      }\n`,
+    );
+    if (process.platform === 'darwin') {
+      await execFileAsync('shasum', ['-a', '512', '-c', 'sha512.txt'], { cwd: output });
+    } else if (process.platform !== 'win32') {
+      await execFileAsync('sha512sum', ['-c', 'sha512.txt'], { cwd: output });
+    }
+
+    const unsafeOutput = path.join(testRoot, 'unsafe-artifacts');
+    const unsafeManifest = JSON.parse(
+      await readFile(path.join(fixtureRoot, 'package.json'), 'utf8'),
+    );
+    unsafeManifest.dependencies = { react: '19.2.8' };
+    await writeFile(
+      path.join(fixtureRoot, 'package.json'),
+      `${JSON.stringify(unsafeManifest, null, 2)}\n`,
+    );
+    await mkdir(unsafeOutput);
+    await assert.rejects(
+      verifyPack(fixtureRoot, unsafeOutput),
+      /pack-verify: installed package declares production dependencies/u,
+    );
+  } finally {
+    await rm(testRoot, { recursive: true, force: true });
+  }
+  assert.equal(
+    (await execFileAsync('git', ['status', '--porcelain'], { cwd: PROJECT_ROOT })).stdout,
+    statusBefore,
+  );
+  assert.deepEqual(
+    (await readdir(PROJECT_ROOT))
+      .filter((file) => file.endsWith('.tgz') || file === 'sha512.txt')
+      .sort(),
+    residueBefore,
+  );
 });
