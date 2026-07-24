@@ -28,6 +28,7 @@ import {
   npmInvocation,
   resolveNpmCli,
   validatePackFileList,
+  verifyInstalledPackage,
   verifyPack,
 } from '../../scripts/verify-pack.mjs';
 
@@ -648,6 +649,44 @@ test('verifyPack always cleans internal install roots and retains caller artifac
   }
 });
 
+test('installed verifier rejects a dependency key before importing the package', async (t) => {
+  const installRoot = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-install-check-'));
+  t.after(() => rm(installRoot, { recursive: true, force: true }));
+  const calls = [];
+  await assert.rejects(
+    verifyInstalledPackage('/artifacts/hanamaru-annotations-0.1.0.tgz', installRoot, {
+      execFileImpl(file, args, options, callback) {
+        calls.push({ args, file, options });
+        void (async () => {
+          const packageDirectory = path.join(
+            installRoot,
+            'node_modules',
+            'hanamaru-annotations',
+          );
+          await mkdir(packageDirectory, { recursive: true });
+          await writeFile(path.join(packageDirectory, 'package.json'), JSON.stringify({
+            name: 'hanamaru-annotations',
+            version: '0.1.0',
+            dependencies: {},
+          }));
+          callback(null, '', '');
+        })().catch(callback);
+      },
+      execPath: process.execPath,
+      npmCliPath: '/verified/npm-cli.js',
+    }),
+    /pack-verify: installed package declares production dependencies/u,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].file, process.execPath);
+  assert.deepEqual(calls[0].args.slice(0, 4), [
+    '/verified/npm-cli.js',
+    'install',
+    '--save-dev',
+    '--ignore-scripts',
+  ]);
+});
+
 test('pack verification leaves the fixed verify stages and production tree unchanged', async () => {
   const packageJson = JSON.parse(await readFile(
     new URL('../../package.json', import.meta.url),
@@ -713,20 +752,6 @@ test('real pack integration builds, packs, installs, resolves, and verifies exte
       await execFileAsync('sha512sum', ['-c', 'sha512.txt'], { cwd: output });
     }
 
-    const unsafeOutput = path.join(testRoot, 'unsafe-artifacts');
-    const unsafeManifest = JSON.parse(
-      await readFile(path.join(fixtureRoot, 'package.json'), 'utf8'),
-    );
-    unsafeManifest.dependencies = { react: '19.2.8' };
-    await writeFile(
-      path.join(fixtureRoot, 'package.json'),
-      `${JSON.stringify(unsafeManifest, null, 2)}\n`,
-    );
-    await mkdir(unsafeOutput);
-    await assert.rejects(
-      verifyPack(fixtureRoot, unsafeOutput),
-      /pack-verify: installed package declares production dependencies/u,
-    );
   } finally {
     await rm(testRoot, { recursive: true, force: true });
   }

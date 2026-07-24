@@ -433,7 +433,7 @@ function cleanFilename(name, version) {
   return `${name.replace(/^@/u, '').replaceAll('/', '-')}-${version}.tgz`;
 }
 
-async function runInstalledVerification(artifact, installRoot, options = {}) {
+export async function verifyInstalledPackage(artifact, installRoot, options = {}) {
   const execFileImpl = options.execFileImpl ?? execFile;
   const invocationOptions = [options.npmCliPath, options.execPath ?? process.execPath];
   await writeFile(path.join(installRoot, 'package.json'), JSON.stringify({
@@ -630,7 +630,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
   const installRoot = await mkdtempImpl(path.join(os.tmpdir(), 'hanamaru-pack-install-'));
   let verification;
   try {
-    verification = await (options.verifyInstallImpl ?? runInstalledVerification)(
+    verification = await (options.verifyInstallImpl ?? verifyInstalledPackage)(
       artifact,
       installRoot,
       {
