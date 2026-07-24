@@ -90,6 +90,15 @@ for (const [relativePath, names] of Object.entries(sourceContracts)) {
 
 test('metadata declares the normative release identity and export targets', async () => {
   const manifest = await packageJson();
+  assert.equal(manifest.name, 'hanamaru-annotations');
+  assert.equal(manifest.version, '0.1.0');
+  assert.equal(
+    manifest.description,
+    'A reliable, human annotation runtime for the DOM',
+  );
+  assert.equal(manifest.author, 'Ray Tien');
+  assert.equal(manifest.license, 'MIT');
+  assert.equal(manifest.type, 'module');
   assert.deepEqual(manifest.repository, {
     type: 'git',
     url: 'https://github.com/Ray0907/hanamaru.git',

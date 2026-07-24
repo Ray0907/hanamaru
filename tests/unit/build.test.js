@@ -110,3 +110,28 @@ test('size report survives two consecutive injected-root builds', async (t) => {
     'ESM gzip must include each reachable shared chunk',
   );
 });
+
+test('package exports route the four public ESM entry points to built artifacts', async () => {
+  const pkg = JSON.parse(await readFile(
+    new URL('../../package.json', import.meta.url),
+    'utf8',
+  ));
+
+  assert.deepEqual(pkg.exports['.'], {
+    types: './dist/index.d.ts',
+    import: './dist/hanamaru.esm.js',
+  });
+  assert.deepEqual(pkg.exports['./selection'], {
+    types: './dist/selection/index.d.ts',
+    import: './dist/selection/index.js',
+  });
+  assert.deepEqual(pkg.exports['./serialize'], {
+    types: './dist/serialize/index.d.ts',
+    import: './dist/serialize/index.js',
+  });
+  assert.deepEqual(pkg.exports['./plugins'], {
+    types: './dist/plugins/index.d.ts',
+    import: './dist/plugins/index.js',
+  });
+  assert.equal(JSON.stringify(pkg.exports).includes('/src/'), false);
+});

@@ -4,6 +4,7 @@
   "description": "A reliable, human annotation runtime for the DOM",
   "type": "module",
   "license": "MIT",
+  "author": "Ray Tien",
   "repository": {
     "type": "git",
     "url": "https://github.com/Ray0907/hanamaru.git"
