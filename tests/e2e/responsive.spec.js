@@ -70,9 +70,12 @@ test('390px interaction states stay stacked, reachable, internally scrollable, a
   }
 
   const markButtons = ['underline', 'highlight', 'circle', 'box', 'strike', 'bracket'];
+  const ledgerTarget = page.locator('[data-demo-ledger-target]');
   for (const name of markButtons) {
     await page.getByRole('button', { name, exact: true }).click();
     await expect(page.locator('[data-demo-mark-state]')).toHaveText(`Selected · ${name}`);
+    await ledgerTarget.scrollIntoViewIfNeeded();
+    await expect(ledgerTarget).toBeInViewport();
     await expect.poll(() => page.locator(
       `.hana-annotation[data-hana-mark="${name}"]:not([hidden])`,
     ).count()).toBeGreaterThan(0);
