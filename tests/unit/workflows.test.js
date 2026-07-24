@@ -68,7 +68,9 @@ const EXPECTED = Object.freeze({
   'ci.yml': map([
     ['name', 'CI'],
     ['on', map([
-      ['push', null],
+      ['push', map([
+        ['branches', ['**']],
+      ])],
       ['pull_request', null],
     ])],
     ['permissions', map([['contents', 'read']])],
@@ -272,6 +274,43 @@ for (const name of EXPECTED_WORKFLOWS) {
     validateWorkflowContract(name, await workflow(name));
   });
 }
+
+test('CI includes every branch push while release alone consumes v-prefixed tags', async () => {
+  const ciSource = await workflow('ci.yml');
+  const releaseSource = await workflow('release.yml');
+  const ci = validateWorkflowContract('ci.yml', ciSource);
+  const release = validateWorkflowContract('release.yml', releaseSource);
+  const ciPush = ci.get('on').get('push');
+  const releasePush = release.get('on').get('push');
+
+  assert.deepEqual(ciPush.get('branches'), ['**']);
+  assert.equal(ciPush.has('tags'), false);
+  assert.equal(ciPush.has('tags-ignore'), false);
+  assert.equal(ci.get('on').has('pull_request'), true);
+  assert.deepEqual(releasePush.get('tags'), ['v*']);
+  assert.equal(releasePush.has('branches'), false);
+
+  assert.throws(
+    () => validateWorkflowContract(
+      'ci.yml',
+      replaceOnce(ciSource, "      - '**'", "      - 'main'"),
+    ),
+    /must match exactly/u,
+    'a narrowed CI branch pattern must fail',
+  );
+  assert.throws(
+    () => validateWorkflowContract(
+      'ci.yml',
+      replaceOnce(
+        ciSource,
+        "    branches:\n      - '**'",
+        "    branches:\n      - '**'\n    tags:\n      - 'v*'",
+      ),
+    ),
+    /keys must match/u,
+    'CI must not consume tag pushes',
+  );
+});
 
 test('workflow parser rejects syntax errors, duplicate keys, and on coercion', async () => {
   const source = await workflow('ci.yml');
