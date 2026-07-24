@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { build as esbuildBuild } from 'esbuild';
 import {
   mkdtemp,
   mkdir,
@@ -13,10 +14,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { constants, gzipSync } from 'node:zlib';
-import {
-  buildDistribution,
-  transformSchedulerPrivateSyntax,
-} from '../../scripts/build.mjs';
+import { buildDistribution } from '../../scripts/build.mjs';
 import { checkBuiltExports } from '../../scripts/check-exports.mjs';
 
 const ENTRY_EXPORTS = Object.freeze({
@@ -55,7 +53,8 @@ const TYPE_PATHS = Object.freeze([
 const SOURCE_BY_ENTRY = Object.freeze({
   'index.js': `
     import { state } from './runtime-state.js';
-    export const VERSION = 'fixture';
+    const reflected = { $token: 'fixture' };
+    export const VERSION = reflected['$token'];
     export class HanamaruError extends Error {}
     export class HanamaruConfigError extends HanamaruError {}
     export class HanamaruStateError extends HanamaruError {}
@@ -107,16 +106,11 @@ const SOURCE_BY_ENTRY = Object.freeze({
   `,
 });
 
-test('scheduler build transform only converts private identifiers to allowlisted internals', () => {
-  assert.equal(
-    transformSchedulerPrivateSyntax(
-      'class Queue { #alive = true; #flush() { return this.#alive; } }',
-    ),
-    'class Queue { $alive = true; $flush() { return this.$alive; } }',
-  );
-  assert.equal(
-    transformSchedulerPrivateSyntax('const selector = "#alive"; // #flush'),
-    'const selector = "#alive"; // #flush',
+test('build uses semantics-preserving minification without property or private-syntax rewriting', async () => {
+  const source = await readFile(new URL('../../scripts/build.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(
+    source,
+    /transformSchedulerPrivateSyntax|schedulerPrivatePlugin|mangleProps/u,
   );
 });
 
@@ -225,8 +219,10 @@ test('buildDistribution emits the exact modular distribution tree and public nam
   await buildDistribution(root);
 
   const files = await listFiles(path.join(root, 'dist'));
-  const chunks = files.filter((file) => /^_chunks\/.+\.js$/u.test(file));
+  const chunkArtifacts = files.filter((file) => file.startsWith('_chunks/'));
+  const chunks = files.filter((file) => /^_chunks\/[^/]+\.js$/u.test(file));
   assert.ok(chunks.length >= 1, 'the shared graph must emit deterministic chunks');
+  assert.deepEqual(chunkArtifacts, chunks, '_chunks may contain only single-level JavaScript');
   assert.deepEqual(
     files.filter((file) => !file.startsWith('_chunks/')),
     [
@@ -259,6 +255,7 @@ test('buildDistribution emits the exact modular distribution tree and public nam
   for (const [entry, names] of Object.entries(ENTRY_EXPORTS)) {
     const module = await import(`${pathToFileURL(path.join(root, 'dist', entry)).href}?build-test`);
     assert.deepEqual(Object.keys(module).sort(), [...names].sort(), entry);
+    if (entry === 'hanamaru.esm.js') assert.equal(module.VERSION, 'fixture');
     await assertRelativeGraphResolves(entry, path.join(root, 'dist'));
   }
 
@@ -336,6 +333,62 @@ test('a JavaScript compression failure removes the incomplete distribution', asy
     readFile(path.join(root, 'dist', 'hanamaru.esm.js')),
     { code: 'ENOENT' },
   );
+});
+
+test('a parallel-stage failure awaits delayed peers, preserves its cause, and leaves no dist', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-build-parallel-failure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFixture(root);
+  const failure = new Error('fixture parallel stage failed');
+  let delayedPeerFinished = false;
+
+  await assert.rejects(
+    buildDistribution(root, {
+      async buildImpl(configuration) {
+        if (configuration.outdir !== undefined) return esbuildBuild(configuration);
+        if (path.basename(configuration.outfile) === 'hanamaru.iife.js') throw failure;
+        if (path.basename(configuration.outfile) === 'hanamaru.css') {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          await mkdir(path.dirname(configuration.outfile), { recursive: true });
+          await writeFile(configuration.outfile, '.late-peer{}');
+          delayedPeerFinished = true;
+          return {};
+        }
+        return esbuildBuild(configuration);
+      },
+    }),
+    (error) => error === failure,
+  );
+
+  assert.equal(delayedPeerFinished, true, 'rejection must wait for every started peer');
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  await assert.rejects(readFile(path.join(root, 'dist', 'hanamaru.css')), { code: 'ENOENT' });
+});
+
+test('checkBuiltExports rejects every non-single-level JavaScript chunk artifact', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-chunk-tree-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFixture(root);
+  await buildDistribution(root);
+
+  for (const unexpected of [
+    '_chunks/nested/extra.js',
+    '_chunks/extra.js.map',
+    '_chunks/README',
+  ]) {
+    const target = path.join(root, 'dist', unexpected);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, 'unexpected');
+    await assert.rejects(
+      checkBuiltExports(root),
+      /dist-check: invalid _chunks artifact/u,
+      unexpected,
+    );
+    await rm(
+      unexpected.includes('/nested/') ? path.dirname(target) : target,
+      { recursive: unexpected.includes('/nested/'), force: true },
+    );
+  }
 });
 
 test('package exports route every public entry and stylesheet to the normative tree', async () => {

@@ -1,4 +1,4 @@
-import { access, readFile } from 'node:fs/promises';
+import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -117,6 +117,15 @@ async function assertPackageTargets(projectRoot) {
   }
 }
 
+async function assertChunkTree(distributionDirectory) {
+  const chunkDirectory = path.join(distributionDirectory, '_chunks');
+  for (const entry of await readdir(chunkDirectory, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^[^/\\]+\.js$/u.test(entry.name)) {
+      throw new Error(`dist-check: invalid _chunks artifact _chunks/${entry.name}`);
+    }
+  }
+}
+
 async function assertSharedSingleton(distributionDirectory, graphs) {
   const graphList = [...graphs.values()];
   const commonChunks = [...graphList[0]].filter((file) => (
@@ -159,6 +168,7 @@ export async function checkBuiltExports(root = process.cwd()) {
   const distributionDirectory = path.join(projectRoot, 'dist');
   const graphs = new Map();
 
+  await assertChunkTree(distributionDirectory);
   for (const [entry, expectedNames] of Object.entries(PUBLIC_ENTRIES)) {
     const entryPath = path.join(distributionDirectory, entry);
     const graph = await validateGraph(entryPath, distributionDirectory);

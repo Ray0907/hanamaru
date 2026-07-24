@@ -12,67 +12,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { minify } from 'terser';
 import { measureDistribution, writeSizeReport } from './check-size.mjs';
 
-const PRIVATE_IDENTIFIER = /^#[A-Za-z_$][\w$]*/u;
-
-export function transformSchedulerPrivateSyntax(source) {
-  let output = '';
-  let index = 0;
-  while (index < source.length) {
-    const character = source[index];
-    const next = source[index + 1];
-    if (character === '"' || character === "'" || character === '`') {
-      const quote = character;
-      output += character;
-      index += 1;
-      let escaped = false;
-      while (index < source.length) {
-        const current = source[index];
-        output += current;
-        index += 1;
-        if (escaped) escaped = false;
-        else if (current === '\\') escaped = true;
-        else if (current === quote) break;
-      }
-      continue;
-    }
-    if (character === '/' && next === '/') {
-      const end = source.indexOf('\n', index);
-      if (end === -1) return output + source.slice(index);
-      output += source.slice(index, end);
-      index = end;
-      continue;
-    }
-    if (character === '/' && next === '*') {
-      const end = source.indexOf('*/', index + 2);
-      if (end === -1) return output + source.slice(index);
-      output += source.slice(index, end + 2);
-      index = end + 2;
-      continue;
-    }
-    if (character === '#') {
-      const match = PRIVATE_IDENTIFIER.exec(source.slice(index));
-      if (match !== null) {
-        output += `$${match[0].slice(1)}`;
-        index += match[0].length;
-        continue;
-      }
-    }
-    output += character;
-    index += 1;
-  }
-  return output;
-}
-
-const schedulerPrivatePlugin = {
-  name: 'hanamaru-internal-scheduler-properties',
-  setup(buildApi) {
-    buildApi.onLoad({ filter: /[/\\]scheduler\.js$/ }, async ({ path: filePath }) => ({
-      contents: transformSchedulerPrivateSyntax(await readFile(filePath, 'utf8')),
-      loader: 'js',
-    }));
-  },
-};
-
 async function javascriptFiles(directory) {
   const output = [];
   async function visit(current) {
@@ -84,6 +23,37 @@ async function javascriptFiles(directory) {
   }
   await visit(directory);
   return output.sort();
+}
+
+async function settleStartedTasks(taskFactories) {
+  let firstFailure;
+  let failed = false;
+  const tasks = taskFactories.map((start) => {
+    let task;
+    try {
+      task = start();
+    } catch (error) {
+      task = Promise.reject(error);
+    }
+    return Promise.resolve(task).catch((error) => {
+      if (!failed) {
+        failed = true;
+        firstFailure = error;
+      }
+      throw error;
+    });
+  });
+  await Promise.allSettled(tasks);
+  if (failed) throw firstFailure;
+}
+
+function removeDistribution(distributionDirectory) {
+  return rm(distributionDirectory, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+    retryDelay: 25,
+  });
 }
 
 export async function compressJavaScript(filePath, source) {
@@ -112,6 +82,7 @@ export async function buildDistribution(root = process.cwd(), options = {}) {
   const sourceDirectory = path.join(projectRoot, 'src');
   const typesDirectory = path.join(projectRoot, 'types');
   const distributionDirectory = path.join(projectRoot, 'dist');
+  const buildImpl = options.buildImpl ?? build;
   const entryPoint = path.join(sourceDirectory, 'index.js');
   const esmEntryPoints = [
     { in: entryPoint, out: 'hanamaru.esm' },
@@ -125,11 +96,11 @@ export async function buildDistribution(root = process.cwd(), options = {}) {
     { in: path.join(sourceDirectory, 'entries', 'svelte.js'), out: 'svelte/index' },
   ];
 
-  await rm(distributionDirectory, { recursive: true, force: true });
+  await removeDistribution(distributionDirectory);
   await mkdir(distributionDirectory, { recursive: true });
 
   try {
-    await build({
+    await buildImpl({
       entryPoints: esmEntryPoints,
       outdir: distributionDirectory,
       bundle: true,
@@ -138,41 +109,37 @@ export async function buildDistribution(root = process.cwd(), options = {}) {
       external: ['react', 'svelte', 'vue'],
       format: 'esm',
       legalComments: 'none',
-      mangleProps: /^\$/,
       minify: true,
-      plugins: [schedulerPrivatePlugin],
       splitting: true,
       target: 'es2020',
     });
 
-    await Promise.all([
-      build({
+    await settleStartedTasks([
+      () => buildImpl({
         entryPoints: [entryPoint],
         outfile: path.join(distributionDirectory, 'hanamaru.iife.js'),
         bundle: true,
         format: 'iife',
         globalName: 'Hanamaru',
         legalComments: 'none',
-        mangleProps: /^\$/,
         minify: true,
-        plugins: [schedulerPrivatePlugin],
         target: 'es2020',
       }),
-      build({
+      () => buildImpl({
         entryPoints: [path.join(sourceDirectory, 'hanamaru.css')],
         outfile: path.join(distributionDirectory, 'hanamaru.css'),
         bundle: true,
         legalComments: 'none',
         minify: true,
       }),
-      build({
+      () => buildImpl({
         entryPoints: [path.join(sourceDirectory, 'hanamaru-shadow.css')],
         outfile: path.join(distributionDirectory, 'shadow', 'hanamaru-shadow.css'),
         bundle: true,
         legalComments: 'none',
         minify: true,
       }),
-      cp(typesDirectory, distributionDirectory, { recursive: true }),
+      () => cp(typesDirectory, distributionDirectory, { recursive: true }),
     ]);
 
     const transformJavaScript = options.transformJavaScript ?? compressJavaScript;
@@ -184,7 +151,11 @@ export async function buildDistribution(root = process.cwd(), options = {}) {
     const metrics = await measureDistribution(projectRoot);
     await writeSizeReport(projectRoot, metrics);
   } catch (error) {
-    await rm(distributionDirectory, { recursive: true, force: true });
+    try {
+      await removeDistribution(distributionDirectory);
+    } catch {
+      // Preserve the causative build failure after every writer has settled.
+    }
     throw error;
   }
 }
