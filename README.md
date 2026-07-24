@@ -1,5 +1,7 @@
 # Hanamaru
 
+![Hanamaru Annotation Inspector](docs/assets/hanamaru-inspector.png)
+
 [![Hanamaru promo: annotations that stay attached](docs/assets/hanamaru-promo-preview.gif)](docs/assets/hanamaru-promo.mp4)
 
 [Watch the full 1920×1080 promo with sound](docs/assets/hanamaru-promo.mp4)
