@@ -1192,6 +1192,7 @@ test('pinch-zoom visual viewport sizes the wrapping note before finished without
             top: visualViewport.offsetTop,
             width: visualViewport.width,
             height: visualViewport.height,
+            scale: visualViewport.scale,
           },
         };
       };
@@ -1216,8 +1217,13 @@ test('pinch-zoom visual viewport sizes the wrapping note before finished without
         expect(rect[field]).toBeCloseTo(settled.rect[field], 1);
       }
     };
-    expect(result.atFinished.viewport.width).toBeCloseTo(266.67, 1);
-    expect(result.atFinished.viewport.height).toBeCloseTo(200, 1);
+    expect(result.atFinished.viewport.scale).toBeGreaterThan(1);
+    expect(
+      result.atFinished.viewport.width * result.atFinished.viewport.scale,
+    ).toBeCloseTo(800, 1);
+    expect(
+      result.atFinished.viewport.height * result.atFinished.viewport.scale,
+    ).toBeCloseTo(600, 1);
     expectBoundedAndStable(result.atFinished, result.afterFrames);
 
     await page.evaluate(() => {
@@ -1239,6 +1245,9 @@ test('pinch-zoom visual viewport sizes the wrapping note before finished without
         ));
       });
     }));
+    expect(firstResizeFrame.viewport.scale).toBeLessThan(
+      result.atFinished.viewport.scale,
+    );
     expect(firstResizeFrame.viewport.width).toBeGreaterThan(result.atFinished.viewport.width);
     expect(firstResizeFrame.viewport.height).toBeGreaterThan(result.atFinished.viewport.height);
     expectBoundedAndStable(firstResizeFrame, settledResize);

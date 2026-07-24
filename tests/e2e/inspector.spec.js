@@ -1029,6 +1029,10 @@ test('far-right Range makes the desktop output rail choose the opposite side', a
   const selected = await selectFarthestInspectorCharacter(page);
   await expect(inspector).toHaveAttribute('data-inspector-state', 'selected');
   expect(selected.right).toBeGreaterThan(640);
+  await page.evaluate(() => {
+    const range = getSelection().getRangeAt(0).getBoundingClientRect();
+    window.scrollBy({ behavior: 'instant', top: range.top - 100 });
+  });
 
   await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
   const output = inspector.locator('[data-inspector-output]');

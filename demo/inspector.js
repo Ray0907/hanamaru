@@ -353,22 +353,31 @@ export function createAnnotationInspector(root = document) {
     syncInspectorLayout();
   }
 
-  function ensureActiveRangeVisible() {
+  function ensureActiveRangeVisible(viewport = visualViewportSnapshot()) {
     if (
-      inspector.dataset.inspectorCompact !== 'true'
-      || activeRange === null
+      activeRange === null
       || toolbar.hidden
     ) return;
     const selection = activeRange.getBoundingClientRect();
     const header = inspector.querySelector(':scope > header').getBoundingClientRect();
     const statusRect = status.getBoundingClientRect();
+    const overlapsHorizontally = (layer) => (
+      layer.left < selection.right && layer.right > selection.left
+    );
+    const upperLayers = [header, statusRect].filter(overlapsHorizontally);
     const lowerLayers = [
       toolbar.getBoundingClientRect(),
       ...(output.hidden ? [] : [output.getBoundingClientRect()]),
       ...(noteEditor.hidden ? [] : [noteEditor.getBoundingClientRect()]),
-    ];
-    const upper = Math.max(header.bottom, statusRect.bottom) + 12;
-    const lower = Math.min(...lowerLayers.map((layer) => layer.top)) - 12;
+    ].filter(overlapsHorizontally);
+    const upper = Math.max(
+      viewport.top + 12,
+      ...upperLayers.map((layer) => layer.bottom + 12),
+    );
+    const lower = Math.min(
+      viewport.bottom - 12,
+      ...lowerLayers.map((layer) => layer.top - 12),
+    );
     if (selection.bottom > lower) {
       window.scrollBy({ behavior: 'instant', top: selection.bottom - lower });
     } else if (selection.top < upper) {
@@ -467,10 +476,11 @@ export function createAnnotationInspector(root = document) {
         '--inspector-output-height',
         output.hidden ? '0px' : `${Math.ceil(output.getBoundingClientRect().height)}px`,
       );
-      ensureActiveRangeVisible();
+      ensureActiveRangeVisible(viewport);
       settleChangedVisualViewport(viewportChanged);
       return;
     }
+    ensureActiveRangeVisible(viewport);
     inspector.style.setProperty('--inspector-toolbar-height', '0px');
     inspector.style.setProperty('--inspector-output-height', '0px');
     const margin = 12;
