@@ -86,7 +86,8 @@ function tarArchive(entries, { trailingZeroBlocks = true } = {}) {
       if (padding > 0) blocks.push(Buffer.alloc(padding));
     }
   }
-  if (trailingZeroBlocks) blocks.push(Buffer.alloc(1024));
+  const zeroBlockCount = trailingZeroBlocks === true ? 2 : (trailingZeroBlocks || 0);
+  if (zeroBlockCount > 0) blocks.push(Buffer.alloc(512 * zeroBlockCount));
   return gzipSync(Buffer.concat(blocks));
 }
 
@@ -97,6 +98,15 @@ function paxRecord(key, value) {
     length = Buffer.byteLength(`${length} ${payload}`);
   }
   return `${length} ${payload}`;
+}
+
+function malformedPaxLengthRecord(key, value) {
+  const payload = `${key}=${value}\n`;
+  let length = Buffer.byteLength(payload) + 3;
+  while (Buffer.byteLength(`${length}x ${payload}`) !== length) {
+    length = Buffer.byteLength(`${length}x ${payload}`);
+  }
+  return `${length}x ${payload}`;
 }
 
 async function fixture(t) {
@@ -124,13 +134,13 @@ function packJson(overrides = {}) {
   ]);
 }
 
-function successfulOptions(output, calls, overrides = {}) {
+function successfulOptions(_output, calls, overrides = {}) {
   return {
     checkBuiltExportsImpl: async () => ({ distFiles: [...DIST_FILES] }),
     execFileImpl(file, args, options, callback) {
       calls.push({ args, file, options });
       void writeFile(
-        path.join(output, 'hanamaru-annotations-0.1.0.tgz'),
+        path.join(args.at(-1), 'hanamaru-annotations-0.1.0.tgz'),
         ARTIFACT_BYTES,
       ).then(
         () => callback(null, overrides.stdout ?? packJson(), ''),
@@ -358,6 +368,32 @@ test('tar inspection rejects NUL-smuggled header and extended paths', () => {
   }
 });
 
+test('tar inspection rejects malformed PAX lengths and global headers', () => {
+  for (const tarball of [
+    tarArchive([
+      {
+        name: 'package/pax',
+        type: 'x',
+        body: malformedPaxLengthRecord('path', 'package/LICENSE'),
+      },
+      { name: 'package/placeholder', body: 'license' },
+    ]),
+    tarArchive([
+      {
+        name: 'package/global',
+        type: 'g',
+        body: paxRecord('path', 'package/LICENSE'),
+      },
+      { name: 'package/placeholder', body: 'license' },
+    ]),
+  ]) {
+    assert.throws(
+      () => inspectTarball(tarball),
+      /pack-verify: tarball (?:has invalid extended metadata|contains unsupported entry type g)/u,
+    );
+  }
+});
+
 test('tar inspection rejects devices, FIFO, sparse, and unknown entries', () => {
   for (const type of ['3', '4', '6', 'S', '9']) {
     assert.throws(
@@ -389,6 +425,13 @@ test('tar inspection rejects duplicate files and truncated bodies', () => {
     )),
     /pack-verify: tarball is truncated/u,
   );
+  assert.throws(
+    () => inspectTarball(tarArchive(
+      [{ name: 'package/LICENSE', body: 'complete' }],
+      { trailingZeroBlocks: 1 },
+    )),
+    /pack-verify: tarball is truncated/u,
+  );
 });
 
 test('verifyPack packs exactly once to the canonical external directory', async (t) => {
@@ -399,12 +442,18 @@ test('verifyPack packs exactly once to the canonical external directory', async 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].file, process.execPath);
   assert.equal(path.basename(calls[0].args[0]), 'npm-cli.js');
-  assert.deepEqual(calls[0].args.slice(1), [
+  assert.deepEqual(calls[0].args.slice(1, -1), [
     'pack',
     '--json',
     '--pack-destination',
-    canonicalOutput,
   ]);
+  const pinnedOutput = calls[0].args.at(-1);
+  assert.equal(path.dirname(pinnedOutput), path.dirname(canonicalOutput));
+  assert.match(
+    path.basename(pinnedOutput),
+    /^\.artifacts\.hanamaru-[A-Za-z0-9-]+$/u,
+  );
+  assert.notEqual(pinnedOutput, canonicalOutput);
   assert.equal(calls[0].options.cwd, await import('node:fs/promises').then(
     ({ realpath }) => realpath(root),
   ));
@@ -452,15 +501,17 @@ test('verifyPack rejects unsafe output paths before invoking npm', async (t) => 
 test('verifyPack detects an output directory swapped during npm pack', async (t) => {
   const { output, root } = await fixture(t);
   const trap = path.join(root, 'trap');
-  const preserved = `${output}-preserved`;
+  let preserved;
   await mkdir(trap);
   const calls = [];
   const options = successfulOptions(output, calls, {
     execFileImpl(file, args, execOptions, callback) {
       calls.push({ args, file, options: execOptions });
       void (async () => {
-        await rename(output, preserved);
-        await symlink(trap, output, 'dir');
+        const pinnedOutput = args.at(-1);
+        preserved = `${pinnedOutput}-preserved`;
+        await rename(pinnedOutput, preserved);
+        await symlink(trap, pinnedOutput, 'dir');
         await writeFile(
           path.join(preserved, 'hanamaru-annotations-0.1.0.tgz'),
           ARTIFACT_BYTES,
@@ -475,7 +526,7 @@ test('verifyPack detects an output directory swapped during npm pack', async (t)
     /pack-verify: output directory identity changed/u,
   );
   assert.equal(calls.length, 1);
-  assert.equal(await stat(output).then((value) => value.isDirectory()), true);
+  assert.equal(await access(output).then(() => true, () => false), false);
   assert.equal(
     await access(path.join(trap, 'sha512.txt')).then(() => true, () => false),
     false,
@@ -492,7 +543,7 @@ test('verifyPack detects an output directory swapped during npm pack', async (t)
 test('verifyPack detects an output swap between validation stages', async (t) => {
   const { output, root } = await fixture(t);
   const trap = path.join(root, 'trap');
-  const preserved = `${output}-preserved`;
+  let preserved;
   await mkdir(trap);
   const calls = [];
   let swapped = false;
@@ -508,8 +559,9 @@ test('verifyPack detects an output swap between validation stages', async (t) =>
     }
     if (phase === 'after-pack' && !swapped) {
       swapped = true;
-      await rename(output, preserved);
-      await symlink(trap, output, 'dir');
+      preserved = `${identity.path}-preserved`;
+      await rename(identity.path, preserved);
+      await symlink(trap, identity.path, 'dir');
     }
   };
   const options = successfulOptions(output, calls, { assertOutputIdentityImpl });
@@ -529,6 +581,151 @@ test('verifyPack detects an output swap between validation stages', async (t) =>
       () => false,
     ),
     true,
+  );
+});
+
+test('verifyPack never reads a trap artifact swapped in after parent validation', async (t) => {
+  const { output, root } = await fixture(t);
+  const trap = path.join(root, 'trap');
+  let preserved;
+  await mkdir(trap);
+  const calls = [];
+  let inspectCalls = 0;
+  let swapped = false;
+  const assertOutputIdentityImpl = async (identity, phase) => {
+    const currentPath = await realpath(identity.path);
+    const current = await stat(identity.path);
+    if (
+      currentPath !== identity.path
+      || current.dev !== identity.dev
+      || current.ino !== identity.ino
+    ) {
+      throw new Error('pack-verify: output directory identity changed');
+    }
+    if (phase === 'before-artifact-read' && !swapped) {
+      swapped = true;
+      preserved = `${identity.path}-preserved`;
+      await rename(identity.path, preserved);
+      await symlink(trap, identity.path, 'dir');
+      await writeFile(
+        path.join(trap, 'hanamaru-annotations-0.1.0.tgz'),
+        ARTIFACT_BYTES,
+      );
+    }
+  };
+  const options = successfulOptions(output, calls, {
+    assertOutputIdentityImpl,
+    inspectTarballImpl: async () => {
+      inspectCalls += 1;
+      return [...PACK_FILES];
+    },
+  });
+
+  await assert.rejects(
+    verifyPack(root, output, options),
+    /pack-verify: output directory identity changed/u,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(inspectCalls, 0);
+  assert.equal(
+    await access(path.join(trap, 'sha512.txt')).then(() => true, () => false),
+    false,
+  );
+  assert.equal(
+    await access(path.join(preserved, 'sha512.txt')).then(() => true, () => false),
+    true,
+  );
+});
+
+test('verifyPack writes digest content only through its identity-bound handle', async (t) => {
+  const { output, root } = await fixture(t);
+  const trap = path.join(root, 'trap');
+  let preserved;
+  await mkdir(trap);
+  const calls = [];
+  let swapped = false;
+  const assertOutputIdentityImpl = async (identity, phase) => {
+    const currentPath = await realpath(identity.path);
+    const current = await stat(identity.path);
+    if (
+      currentPath !== identity.path
+      || current.dev !== identity.dev
+      || current.ino !== identity.ino
+    ) {
+      throw new Error('pack-verify: output directory identity changed');
+    }
+    if (phase === 'before-digest-write' && !swapped) {
+      swapped = true;
+      preserved = `${identity.path}-preserved`;
+      await rename(identity.path, preserved);
+      await symlink(trap, identity.path, 'dir');
+    }
+  };
+
+  await assert.rejects(
+    verifyPack(
+      root,
+      output,
+      successfulOptions(output, calls, { assertOutputIdentityImpl }),
+    ),
+    /pack-verify: output directory identity changed/u,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(
+    await access(path.join(trap, 'sha512.txt')).then(() => true, () => false),
+    false,
+  );
+  assert.match(
+    await readFile(path.join(preserved, 'sha512.txt'), 'utf8'),
+    /^[a-f0-9]{128} {2}hanamaru-annotations-0\.1\.0\.tgz\n$/u,
+  );
+});
+
+test('verifyPack never overwrites an occupied caller path while restoring', async (t) => {
+  const { output, root } = await fixture(t);
+  const calls = [];
+  let occupied = false;
+  const assertOutputIdentityImpl = async (identity, phase) => {
+    const currentPath = await realpath(identity.path);
+    const current = await stat(identity.path);
+    if (
+      currentPath !== identity.path
+      || current.dev !== identity.dev
+      || current.ino !== identity.ino
+    ) {
+      throw new Error('pack-verify: output directory identity changed');
+    }
+    if (phase === 'before-return' && !occupied) {
+      occupied = true;
+      await mkdir(identity.finalPath);
+      await writeFile(path.join(identity.finalPath, 'attacker.txt'), 'do not overwrite');
+    }
+  };
+
+  await assert.rejects(
+    verifyPack(
+      root,
+      output,
+      successfulOptions(output, calls, { assertOutputIdentityImpl }),
+    ),
+    /pack-verify: output directory could not be restored safely/u,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(
+    await readFile(path.join(output, 'attacker.txt'), 'utf8'),
+    'do not overwrite',
+  );
+  const pinnedOutput = calls[0].args.at(-1);
+  assert.equal(
+    await access(path.join(pinnedOutput, 'hanamaru-annotations-0.1.0.tgz')).then(
+      () => true,
+      () => false,
+    ),
+    true,
+  );
+  assert.match(
+    await readFile(path.join(pinnedOutput, 'sha512.txt'), 'utf8'),
+    /^[a-f0-9]{128} {2}hanamaru-annotations-0\.1\.0\.tgz\n$/u,
   );
 });
 

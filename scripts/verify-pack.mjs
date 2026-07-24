@@ -1,11 +1,14 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
 import {
   lstat,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -229,6 +232,7 @@ async function captureOutputDirectory(directory) {
   }
   return Object.freeze({
     dev: resolvedStats.dev,
+    finalPath: resolved,
     ino: resolvedStats.ino,
     path: resolved,
   });
@@ -251,6 +255,63 @@ export async function assertOutputDirectoryIdentity(identity) {
     }
   } catch {
     throw new Error('pack-verify: output directory identity changed');
+  }
+}
+
+async function pathExists(candidate) {
+  try {
+    await lstat(candidate);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function pinOutputDirectory(identity, randomUUIDImpl = randomUUID) {
+  const token = randomUUIDImpl();
+  if (typeof token !== 'string' || !/^[A-Za-z0-9-]+$/u.test(token)) {
+    throw new Error('pack-verify: could not reserve a pinned output directory');
+  }
+  const pinnedPath = path.join(
+    path.dirname(identity.finalPath),
+    `.${path.basename(identity.finalPath)}.hanamaru-${token}`,
+  );
+  if (await pathExists(pinnedPath)) {
+    throw new Error('pack-verify: could not reserve a pinned output directory');
+  }
+  await assertOutputDirectoryIdentity(identity);
+  try {
+    await rename(identity.finalPath, pinnedPath);
+  } catch {
+    throw new Error('pack-verify: output directory identity changed');
+  }
+  const pinnedIdentity = Object.freeze({
+    dev: identity.dev,
+    finalPath: identity.finalPath,
+    ino: identity.ino,
+    path: pinnedPath,
+  });
+  return pinnedIdentity;
+}
+
+async function restoreOutputDirectory(identity) {
+  try {
+    await assertOutputDirectoryIdentity(identity);
+    if (await pathExists(identity.finalPath)) {
+      throw new Error('original path is occupied');
+    }
+    await rename(identity.path, identity.finalPath);
+    await assertOutputDirectoryIdentity({
+      ...identity,
+      path: identity.finalPath,
+    });
+  } catch (cause) {
+    throw new Error(
+      `pack-verify: output directory could not be restored safely; `
+      + `verified artifacts may remain at ${identity.path}`,
+      { cause },
+    );
   }
 }
 
@@ -313,7 +374,11 @@ function parsePaxMetadata(contents) {
     if (space === -1) {
       throw new Error('pack-verify: tarball has invalid extended metadata');
     }
-    const length = Number.parseInt(contents.subarray(offset, space).toString('ascii'), 10);
+    const lengthToken = contents.subarray(offset, space).toString('ascii');
+    if (!/^[1-9]\d*$/u.test(lengthToken)) {
+      throw new Error('pack-verify: tarball has invalid extended metadata');
+    }
+    const length = Number(lengthToken);
     if (!Number.isSafeInteger(length) || length <= 0 || offset + length > contents.length) {
       throw new Error('pack-verify: tarball has invalid extended metadata');
     }
@@ -349,7 +414,13 @@ export function inspectTarball(buffer) {
   while (offset + 512 <= archive.length) {
     const header = archive.subarray(offset, offset + 512);
     if (header.every((byte) => byte === 0)) {
-      if (archive.subarray(offset).some((byte) => byte !== 0)) {
+      if (offset + 1024 > archive.length) {
+        throw new Error('pack-verify: tarball is truncated');
+      }
+      if (archive.subarray(offset, offset + 1024).some((byte) => byte !== 0)) {
+        throw new Error('pack-verify: tarball has trailing data');
+      }
+      if (archive.subarray(offset + 1024).some((byte) => byte !== 0)) {
         throw new Error('pack-verify: tarball has trailing data');
       }
       terminated = true;
@@ -366,10 +437,12 @@ export function inspectTarball(buffer) {
     }
     const type = String.fromCharCode(header[156] || 0);
     const contents = archive.subarray(dataStart, dataEnd);
-    if (type === 'x' || type === 'g') {
+    if (type === 'x') {
       const metadata = parsePaxMetadata(contents);
       pendingPath = metadata.path ?? pendingPath;
       pendingLink = metadata.linkpath ?? pendingLink;
+    } else if (type === 'g') {
+      throw new Error('pack-verify: tarball contains unsupported entry type g');
     } else if (type === 'L') {
       pendingPath = assertSafeTarPath(tarText(contents, 'entry path'), 'entry path');
     } else if (type === 'K') {
@@ -547,16 +620,17 @@ export async function verifyInstalledPackage(artifact, installRoot, options = {}
 
 export async function verifyPack(root, outputDirectory, options = {}) {
   const projectRoot = await canonicalDirectory(root, 'project');
-  const outputIdentity = await captureOutputDirectory(outputDirectory);
-  const artifactDirectory = outputIdentity.path;
+  const initialOutputIdentity = await captureOutputDirectory(outputDirectory);
   const assertOutputIdentityImpl = options.assertOutputIdentityImpl
     ?? assertOutputDirectoryIdentity;
-  if (isInside(projectRoot, artifactDirectory)) {
+  if (isInside(projectRoot, initialOutputIdentity.path)) {
     throw new Error('pack-verify: output directory must be outside the project root');
   }
-  if ((await readdir(artifactDirectory)).length > 0) {
+  await assertOutputDirectoryIdentity(initialOutputIdentity);
+  if ((await readdir(initialOutputIdentity.path)).length > 0) {
     throw new Error('pack-verify: output directory must be empty');
   }
+  await assertOutputDirectoryIdentity(initialOutputIdentity);
 
   const manifest = await readManifest(projectRoot);
   const expectedFilename = cleanFilename(manifest.name, manifest.version);
@@ -566,93 +640,177 @@ export async function verifyPack(root, outputDirectory, options = {}) {
     execPath: options.execPath ?? process.execPath,
     npmCliPath: options.npmCliPath,
   });
-  const invocation = npmInvocation(
-    ['pack', '--json', '--pack-destination', artifactDirectory],
-    npmCliPath,
-    options.execPath ?? process.execPath,
-  );
-  await assertOutputIdentityImpl(outputIdentity, 'before-pack');
-  let stdout;
+  let outputIdentity;
+  let digestHandle;
+  let operationError;
+  let restorationError;
+  let completed;
   try {
-    stdout = await execute(
-      invocation,
-      projectRoot,
-      options.execFileImpl ?? execFile,
+    outputIdentity = await pinOutputDirectory(
+      initialOutputIdentity,
+      options.randomUUIDImpl ?? randomUUID,
     );
-  } catch {
-    throw new Error('pack-verify: npm pack failed');
-  }
-  await assertOutputIdentityImpl(outputIdentity, 'after-pack');
-
-  const result = parsePackResult(stdout);
-  if (result.filename !== expectedFilename) {
-    throw new Error(`pack-verify: unexpected tarball filename ${String(result.filename)}`);
-  }
-  const metadataFiles = validatePackFileList(
-    result.files?.map(({ path: file }) => file),
-    built.distFiles,
-  );
-  const artifact = path.join(artifactDirectory, expectedFilename);
-  await assertOutputIdentityImpl(outputIdentity, 'before-artifact-read');
-  let artifactStats;
-  try {
-    artifactStats = await lstat(artifact);
-  } catch {
-    throw new Error('pack-verify: npm pack did not create the reported tarball');
-  }
-  if (!artifactStats.isFile() || artifactStats.isSymbolicLink()) {
-    throw new Error('pack-verify: reported tarball is not a regular file');
-  }
-  const artifactBytes = await readFile(artifact);
-  const digestBuffer = createHash('sha512').update(artifactBytes).digest();
-  const integrity = `sha512-${digestBuffer.toString('base64')}`;
-  if (result.integrity !== integrity) {
-    throw new Error('pack-verify: tarball integrity mismatch');
-  }
-
-  const inspectTarballImpl = options.inspectTarballImpl ?? inspectTarball;
-  const actualFiles = sortedUniqueFiles(await inspectTarballImpl(artifactBytes));
-  if (JSON.stringify(actualFiles) !== JSON.stringify(metadataFiles)) {
-    throw new Error('pack-verify: tarball contents differ from npm pack metadata');
-  }
-  validatePackFileList(actualFiles, built.distFiles);
-
-  const digestText = `${digestBuffer.toString('hex')}  ${expectedFilename}\n`;
-  const digestPath = path.join(artifactDirectory, 'sha512.txt');
-  await assertOutputIdentityImpl(outputIdentity, 'before-digest-write');
-  await writeFile(digestPath, digestText, { flag: 'wx' });
-  if (await readFile(digestPath, 'utf8') !== digestText) {
-    throw new Error('pack-verify: generated SHA-512 digest could not be verified');
-  }
-
-  const mkdtempImpl = options.mkdtempImpl ?? mkdtemp;
-  const rmImpl = options.rmImpl ?? rm;
-  const installRoot = await mkdtempImpl(path.join(os.tmpdir(), 'hanamaru-pack-install-'));
-  let verification;
-  try {
-    verification = await (options.verifyInstallImpl ?? verifyInstalledPackage)(
-      artifact,
-      installRoot,
-      {
-        env: options.env,
-        execFileImpl: options.execFileImpl ?? execFile,
-        execPath: options.execPath ?? process.execPath,
-        npmCliPath,
-      },
+    await assertOutputIdentityImpl(outputIdentity, 'after-pin');
+    const artifactDirectory = outputIdentity.path;
+    const pinnedDigestPath = path.join(artifactDirectory, 'sha512.txt');
+    digestHandle = await open(
+      pinnedDigestPath,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL,
+      0o600,
     );
+    const digestStats = await digestHandle.stat();
+    if (!digestStats.isFile()) {
+      throw new Error('pack-verify: SHA-512 digest target is not a regular file');
+    }
+    await assertOutputIdentityImpl(outputIdentity, 'after-digest-open');
+
+    const invocation = npmInvocation(
+      ['pack', '--json', '--pack-destination', artifactDirectory],
+      npmCliPath,
+      options.execPath ?? process.execPath,
+    );
+    await assertOutputIdentityImpl(outputIdentity, 'before-pack');
+    let stdout;
+    try {
+      stdout = await execute(
+        invocation,
+        projectRoot,
+        options.execFileImpl ?? execFile,
+      );
+    } catch {
+      throw new Error('pack-verify: npm pack failed');
+    }
+    await assertOutputIdentityImpl(outputIdentity, 'after-pack');
+
+    const result = parsePackResult(stdout);
+    if (result.filename !== expectedFilename) {
+      throw new Error(`pack-verify: unexpected tarball filename ${String(result.filename)}`);
+    }
+    const metadataFiles = validatePackFileList(
+      result.files?.map(({ path: file }) => file),
+      built.distFiles,
+    );
+    const artifact = path.join(artifactDirectory, expectedFilename);
+    await assertOutputIdentityImpl(outputIdentity, 'before-artifact-read');
+    let artifactHandle;
+    let artifactBytes;
+    try {
+      let artifactStats;
+      try {
+        artifactStats = await lstat(artifact);
+        artifactHandle = await open(
+          artifact,
+          constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+        );
+      } catch {
+        throw new Error('pack-verify: npm pack did not create a safe reported tarball');
+      }
+      const openedStats = await artifactHandle.stat();
+      if (
+        !artifactStats.isFile()
+        || artifactStats.isSymbolicLink()
+        || !openedStats.isFile()
+        || openedStats.dev !== artifactStats.dev
+        || openedStats.ino !== artifactStats.ino
+      ) {
+        throw new Error('pack-verify: reported tarball is not a regular file');
+      }
+      await assertOutputIdentityImpl(outputIdentity, 'after-artifact-open');
+      artifactBytes = await artifactHandle.readFile();
+      await assertOutputIdentityImpl(outputIdentity, 'after-artifact-read');
+    } finally {
+      await artifactHandle?.close();
+    }
+
+    const digestBuffer = createHash('sha512').update(artifactBytes).digest();
+    const integrity = `sha512-${digestBuffer.toString('base64')}`;
+    if (result.integrity !== integrity) {
+      throw new Error('pack-verify: tarball integrity mismatch');
+    }
+
+    const inspectTarballImpl = options.inspectTarballImpl ?? inspectTarball;
+    const actualFiles = sortedUniqueFiles(await inspectTarballImpl(artifactBytes));
+    if (JSON.stringify(actualFiles) !== JSON.stringify(metadataFiles)) {
+      throw new Error('pack-verify: tarball contents differ from npm pack metadata');
+    }
+    validatePackFileList(actualFiles, built.distFiles);
+
+    const digestText = `${digestBuffer.toString('hex')}  ${expectedFilename}\n`;
+    await assertOutputIdentityImpl(outputIdentity, 'before-digest-write');
+    await digestHandle.writeFile(digestText, 'utf8');
+    await digestHandle.sync();
+    const verifiedDigest = Buffer.alloc(Buffer.byteLength(digestText));
+    const { bytesRead } = await digestHandle.read(
+      verifiedDigest,
+      0,
+      verifiedDigest.length,
+      0,
+    );
+    if (
+      bytesRead !== verifiedDigest.length
+      || (await digestHandle.stat()).size !== verifiedDigest.length
+      || verifiedDigest.toString('utf8') !== digestText
+    ) {
+      throw new Error('pack-verify: generated SHA-512 digest could not be verified');
+    }
+    await assertOutputIdentityImpl(outputIdentity, 'after-digest-write');
+
+    const mkdtempImpl = options.mkdtempImpl ?? mkdtemp;
+    const rmImpl = options.rmImpl ?? rm;
+    const installRoot = await mkdtempImpl(path.join(os.tmpdir(), 'hanamaru-pack-install-'));
+    let verification;
+    try {
+      await assertOutputIdentityImpl(outputIdentity, 'before-install');
+      verification = await (options.verifyInstallImpl ?? verifyInstalledPackage)(
+        artifact,
+        installRoot,
+        {
+          env: options.env,
+          execFileImpl: options.execFileImpl ?? execFile,
+          execPath: options.execPath ?? process.execPath,
+          npmCliPath,
+        },
+      );
+      await assertOutputIdentityImpl(outputIdentity, 'after-install');
+    } finally {
+      await rmImpl(installRoot, { recursive: true, force: true });
+    }
+    await assertOutputIdentityImpl(outputIdentity, 'before-return');
+
+    completed = {
+      artifact: path.join(initialOutputIdentity.finalPath, expectedFilename),
+      digest: digestBuffer.toString('hex'),
+      digestPath: path.join(initialOutputIdentity.finalPath, 'sha512.txt'),
+      fileCount: metadataFiles.length,
+      integrity,
+      verification,
+    };
+  } catch (error) {
+    operationError = error;
   } finally {
-    await rmImpl(installRoot, { recursive: true, force: true });
+    try {
+      await digestHandle?.close();
+    } catch (error) {
+      operationError ??= error;
+    }
+    if (outputIdentity) {
+      try {
+        await restoreOutputDirectory(outputIdentity);
+      } catch (error) {
+        restorationError = error;
+      }
+    }
   }
-  await assertOutputIdentityImpl(outputIdentity, 'before-return');
 
-  return {
-    artifact,
-    digest: digestBuffer.toString('hex'),
-    digestPath,
-    fileCount: metadataFiles.length,
-    integrity,
-    verification,
-  };
+  if (operationError && restorationError) {
+    throw new AggregateError(
+      [operationError, restorationError],
+      `${operationError.message}; ${restorationError.message}`,
+    );
+  }
+  if (operationError) throw operationError;
+  if (restorationError) throw restorationError;
+  return completed;
 }
 
 const modulePath = fileURLToPath(import.meta.url);
