@@ -1,7 +1,7 @@
 import type {
   AnnotationController,
   AnnotationOptions,
-} from 'hanamaru-annotations'
+} from '../index.d.ts'
 
 export type SvelteAnnotationOptions = Omit<AnnotationOptions, 'trigger'>
 

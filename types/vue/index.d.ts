@@ -1,7 +1,7 @@
 import type {
   AnnotationController,
   AnnotationOptions,
-} from 'hanamaru-annotations'
+} from '../index.d.ts'
 import type {
   Ref,
   ShallowRef,

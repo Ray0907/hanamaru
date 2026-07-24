@@ -4,32 +4,115 @@
   "description": "A reliable, human annotation runtime for the DOM",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ray0907/hanamaru.git"
+  },
+  "homepage": "https://github.com/Ray0907/hanamaru#readme",
+  "bugs": {
+    "url": "https://github.com/Ray0907/hanamaru/issues"
+  },
+  "keywords": [
+    "annotation",
+    "svg",
+    "accessibility",
+    "hand-drawn",
+    "highlight",
+    "dom",
+    "javascript"
+  ],
   "engines": {
     "node": ">=24.13.0 <25"
   },
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./dist/hanamaru.esm.js",
-    "./plugins": "./dist/hanamaru.plugins.esm.js",
-    "./selection": "./dist/hanamaru.selection.esm.js",
-    "./serialize": "./dist/hanamaru.serialize.esm.js",
-    "./style.css": "./dist/hanamaru.css"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/hanamaru.esm.js"
+    },
+    "./style.css": "./dist/hanamaru.css",
+    "./selection": {
+      "types": "./dist/selection/index.d.ts",
+      "import": "./dist/selection/index.js"
+    },
+    "./serialize": {
+      "types": "./dist/serialize/index.d.ts",
+      "import": "./dist/serialize/index.js"
+    },
+    "./group": {
+      "types": "./dist/group/index.d.ts",
+      "import": "./dist/group/index.js"
+    },
+    "./plugins": {
+      "types": "./dist/plugins/index.d.ts",
+      "import": "./dist/plugins/index.js"
+    },
+    "./shadow": {
+      "types": "./dist/shadow/index.d.ts",
+      "import": "./dist/shadow/index.js"
+    },
+    "./shadow/style.css": "./dist/shadow/hanamaru-shadow.css",
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    },
+    "./vue": {
+      "types": "./dist/vue/index.d.ts",
+      "import": "./dist/vue/index.js"
+    },
+    "./svelte": {
+      "types": "./dist/svelte/index.d.ts",
+      "import": "./dist/svelte/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "README.md",
     "LICENSE"
   ],
+  "sideEffects": [
+    "./dist/hanamaru.css",
+    "./dist/shadow/hanamaru-shadow.css"
+  ],
   "scripts": {
     "dev": "node scripts/serve.mjs",
     "build": "node scripts/build.mjs",
-    "check:dist": "node scripts/check-size.mjs",
+    "check:dist": "node scripts/check-dist.mjs",
     "test:unit": "node scripts/test-unit.mjs",
+    "test:types": "node tests/types/check.mjs",
     "test:e2e": "playwright test",
-    "verify": "npm run test:unit && npm run build && npm run check:dist && npm run test:e2e"
+    "test:e2e:chromium": "playwright test --project=chromium",
+    "test:e2e:smoke": "playwright test tests/e2e/smoke.spec.js tests/e2e/shadow-smoke.spec.js --project=firefox --project=webkit",
+    "test:adapters": "node tests/framework/run-endpoints.mjs all",
+    "verify": "npm run test:unit && npm run test:types && npm run build && npm run check:dist && npm run test:e2e:chromium && npm run test:e2e:smoke && npm run test:adapters"
+  },
+  "peerDependencies": {
+    "react": ">=18.2.0 <20",
+    "svelte": ">=5.0.0 <6",
+    "vue": ">=3.5.0 <4"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "svelte": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.10.2",
     "@playwright/test": "^1.55.0",
-    "esbuild": "^0.25.0"
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "esbuild": "^0.25.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "svelte": "5.56.7",
+    "typescript": "5.9.2",
+    "vue": "3.5.40"
   }
 }

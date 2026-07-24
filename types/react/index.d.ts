@@ -1,7 +1,7 @@
 import type {
   AnnotationController,
   AnnotationOptions,
-} from 'hanamaru-annotations'
+} from '../index.d.ts'
 import type { RefObject } from 'react'
 
 export type ReactAnnotationOptions = Omit<AnnotationOptions, 'trigger'>
