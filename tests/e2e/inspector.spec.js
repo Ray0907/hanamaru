@@ -1412,8 +1412,13 @@ test('new selection after Apply destroys the old preview and authors against the
   page,
 }) => {
   await page.goto('/');
-  const initialAnnotations = await page.locator('.hana-annotation').count();
   const inspector = await beginUnderlinePreview(page);
+  const preview = page.locator(
+    '.hana-annotation[data-hana-mark="underline"]:not([hidden])',
+  );
+  await expect(preview).toHaveCount(1);
+  const previewId = await preview.getAttribute('data-hana-id');
+  expect(previewId).not.toBeNull();
   await inspector.getByRole('button', { name: 'Apply annotation' }).click();
   await expect(inspector).toHaveAttribute('data-inspector-state', 'applied');
 
@@ -1428,7 +1433,8 @@ test('new selection after Apply destroys the old preview and authors against the
     document.dispatchEvent(new Event('selectionchange'));
   });
   await expect(inspector).toHaveAttribute('data-inspector-state', 'selected');
-  await expect.poll(() => page.locator('.hana-annotation').count()).toBe(initialAnnotations);
+  await expect(page.locator(`.hana-annotation[data-hana-id="${previewId}"]`))
+    .toHaveCount(0);
   expect(await page.evaluate(() => getSelection().toString())).toBe('A');
 
   await inspector.getByRole('button', { name: 'Circle', exact: true }).click();
