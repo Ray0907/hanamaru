@@ -881,7 +881,8 @@ export function createAnnotationInspector(root = document) {
     const count = [...note.value].length;
     const valid = count <= 280;
     noteError.hidden = valid;
-    note.toggleAttribute('aria-invalid', !valid);
+    if (valid) note.removeAttribute('aria-invalid');
+    else note.setAttribute('aria-invalid', 'true');
     if (!valid || model.state !== 'editing' || controller === null) return;
     draft.note = note.value.length === 0 ? null : note.value;
     controller.update({ note: draft.note });
@@ -907,7 +908,8 @@ export function createAnnotationInspector(root = document) {
     if (name === 'duration') {
       const valid = value !== null;
       durationError.hidden = valid;
-      duration.toggleAttribute('aria-invalid', !valid);
+      if (valid) duration.removeAttribute('aria-invalid');
+      else duration.setAttribute('aria-invalid', 'true');
       if (!valid) return;
     }
     if (model.state !== 'applied' && model.state !== 'editing') return;

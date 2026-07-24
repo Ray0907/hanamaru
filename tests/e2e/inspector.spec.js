@@ -348,12 +348,33 @@ test('note editor validation enforces 280 Unicode code points and Escape restore
   );
 
   await note.fill('a'.repeat(281));
+  await expect(note).toHaveAttribute('aria-invalid', 'true');
   await expect(page.locator('#inspector-note-error')).toBeVisible();
   await expect(page.locator('#inspector-note-error')).toContainText('280 Unicode code points');
+  const errorTreatment = await note.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      borders: [
+        style.borderTopColor,
+        style.borderRightColor,
+        style.borderBottomColor,
+        style.borderLeftColor,
+      ],
+      boxShadow: style.boxShadow,
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth,
+    };
+  });
+  expect(new Set(errorTreatment.borders).size).toBe(1);
+  expect(errorTreatment.borders[0]).toBe('rgb(201, 47, 42)');
+  expect(errorTreatment.boxShadow).toMatch(/0px 0px 0px 2px inset/u);
+  expect(errorTreatment.outlineStyle).toBe('solid');
+  expect(errorTreatment.outlineWidth).toBe('3px');
   await expect(page.locator('.hana-note:not(.hana-is-hidden)')).toHaveCount(0);
   await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
 
   await note.fill('Meaningful note');
+  await expect(note).not.toHaveAttribute('aria-invalid');
   await expect(page.locator('#inspector-note-error')).toBeHidden();
   await expect(page.locator('.hana-note:not(.hana-is-hidden)', { hasText: 'Meaningful note' }))
     .toHaveCount(1);
@@ -390,6 +411,7 @@ test('advanced options reject invalid input and serialize the exact public domai
   await expect(inspector.getByText('Trigger: manual', { exact: true })).toBeVisible();
 
   await duration.fill('-1');
+  await expect(duration).toHaveAttribute('aria-invalid', 'true');
   await expect(page.locator('#inspector-duration-error')).toBeVisible();
   await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
   await expect(page.locator('[data-inspector-output-value="javascript"]'))
@@ -400,6 +422,7 @@ test('advanced options reject invalid input and serialize the exact public domai
   await duration.fill('0');
   await motion.selectOption('never');
   await seed.fill('option-seed');
+  await expect(duration).not.toHaveAttribute('aria-invalid');
   await expect(page.locator('#inspector-duration-error')).toBeHidden();
 
   await inspector.getByRole('tab', { name: 'HTML' }).click();
