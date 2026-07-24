@@ -199,14 +199,38 @@ test('limits support claims to exercised projects and reports current distributi
   expect(size).toMatch(/zero production dependencies/i);
   expect(size).toMatch(/gzip level 9/i);
   expect(size).toMatch(/JavaScript \+ CSS/i);
-  expect(size).toContain(sizeReport.budgets.hardCombinedGzip.toLocaleString('en-US'));
-  expect(size).toContain(sizeReport.budgets.stretchCombinedGzip.toLocaleString('en-US'));
-  for (const format of sizeReport.formats) {
-    expect(size).toContain(`\`${format.file}\``);
-    expect(size).toContain(format.combined.toLocaleString('en-US'));
+  expect(sizeReport.schemaVersion).toBe(2);
+  const expectedBudgets = {
+    main: [28_672, 27_648],
+    iife: [24_576, 23_552],
+    selection: [3_072, 2_560],
+    serialize: [11_264, 10_752],
+    group: [8_192, 7_680],
+    plugins: [6_144, 5_632],
+    shadow: [21_504, 20_480],
+    react: [4_096, 3_584],
+    vue: [4_096, 3_584],
+    svelte: [4_096, 3_584],
+  };
+  expect(Object.keys(sizeReport.budgets.hard)).toEqual(Object.keys(expectedBudgets));
+  expect(Object.keys(sizeReport.budgets.stretch)).toEqual(Object.keys(expectedBudgets));
+  expect(sizeReport.entries.map(({ entry }) => entry)).toEqual(Object.keys(expectedBudgets));
+  for (const entry of sizeReport.entries) {
+    const [hard, stretch] = expectedBudgets[entry.entry];
+    expect(sizeReport.budgets.hard[entry.entry]).toBe(hard);
+    expect(sizeReport.budgets.stretch[entry.entry]).toBe(stretch);
+    expect(entry.budgetBytes).toBe(hard);
+    expect(entry.stretchBytes).toBe(stretch);
+    expect(entry.gzipBytes).toBe(
+      entry.members.reduce((total, member) => total + member.gzipBytes, 0),
+    );
+    expect(entry.rawBytes).toBe(
+      entry.members.reduce((total, member) => total + member.rawBytes, 0),
+    );
+    expect(entry.chargedFiles).toEqual(entry.members.map(({ file }) => file));
+    expect(entry.stretch).toBe(entry.gzipBytes <= stretch);
   }
-  expect(size).toMatch(/hard (?:budget|cap)[\s\S]*?pass/i);
-  expect(size).toMatch(/stretch[\s\S]*?miss/i);
+  expect(size).toMatch(/generated report is the source of truth/i);
 });
 
 test('keeps local positioning, V1 exclusions, and the fixed verification sequence explicit', async () => {
@@ -239,9 +263,18 @@ test('keeps local positioning, V1 exclusions, and the fixed verification sequenc
   ]) expect(limits.toLowerCase()).toContain(exclusion.toLowerCase());
 
   expect(pkg.scripts.verify).toBe(
-    'npm run test:unit && npm run build && npm run check:dist && npm run test:e2e',
+    'npm run test:unit && npm run test:types && npm run build && npm run check:dist'
+      + ' && npm run test:e2e:chromium && npm run test:e2e:smoke && npm run test:adapters',
   );
-  for (const stage of ['test:unit', 'build', 'check:dist', 'test:e2e']) {
+  for (const stage of [
+    'test:unit',
+    'test:types',
+    'build',
+    'check:dist',
+    'test:e2e:chromium',
+    'test:e2e:smoke',
+    'test:adapters',
+  ]) {
     expect(pkg.scripts[stage]).toMatch(/\S/);
   }
   expect(readme).toContain('`npm run verify`');

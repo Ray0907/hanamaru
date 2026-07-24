@@ -160,20 +160,26 @@ test('HTML, Story, and JSON tabs apply distinct runnable definitions to a real p
   expect(failures).toEqual([]);
 });
 
-test('reliability docket renders the deterministic local size report and explicit V1 truth', async ({ page, request }) => {
+test('reliability docket renders the deterministic local size report and explicit V2 truth', async ({ page, request }) => {
   const failures = capturePageFailures(page);
   const report = await (await request.get('/dist/size-report.json')).json();
   await page.goto('/');
   const docket = page.getByRole('region', { name: 'Reliability docket' });
   await docket.scrollIntoViewIfNeeded();
 
-  for (const format of report.formats) {
-    const name = format.file.includes('.esm.') ? 'ESM' : 'IIFE';
-    await expect(docket.getByTestId(`size-${name.toLowerCase()}`))
-      .toHaveText(`${format.combined.toLocaleString('en-US')} B gzip incl. CSS`);
+  expect(report.schemaVersion).toBe(2);
+  for (const name of ['main', 'iife']) {
+    const entry = report.entries.find((candidate) => candidate.entry === name);
+    expect(entry.budgetBytes).toBe(report.budgets.hard[name]);
+    expect(entry.stretchBytes).toBe(report.budgets.stretch[name]);
+    await expect(docket.getByTestId(`size-${name === 'main' ? 'esm' : 'iife'}`))
+      .toHaveText(`${entry.gzipBytes.toLocaleString('en-US')} B gzip incl. CSS`);
   }
+  const css = report.entries
+    .find(({ entry }) => entry === 'main')
+    .members.find(({ file }) => file === 'hanamaru.css');
   await expect(docket.getByTestId('size-css'))
-    .toHaveText(`${report.css.gzip.toLocaleString('en-US')} B gzip`);
+    .toHaveText(`${css.gzipBytes.toLocaleString('en-US')} B gzip`);
 
   const copy = (await docket.innerText()).replace(/\s+/g, ' ');
   for (const claim of [
@@ -587,34 +593,55 @@ for (const viewport of [
 }
 
 const validSizeReport = {
-  budgets: { hardCombinedGzip: 20_480, stretchCombinedGzip: 18_432 },
-  css: { file: 'hanamaru.css', gzip: 851 },
-  formats: [
+  budgets: {
+    hard: { main: 28_672, iife: 24_576 },
+    stretch: { main: 27_648, iife: 23_552 },
+  },
+  entries: [
     {
-      combined: 18_128,
-      cssGzip: 851,
-      file: 'hanamaru.esm.js',
-      gzip: 17_277,
-      raw: 54_114,
+      entry: 'main',
+      entryFile: 'hanamaru.esm.js',
+      chargedFiles: ['hanamaru.esm.js', '_chunks/chunk-A.js', 'hanamaru.css'],
+      members: [
+        { file: 'hanamaru.esm.js', rawBytes: 1_000, gzipBytes: 400 },
+        { file: '_chunks/chunk-A.js', rawBytes: 4_000, gzipBytes: 1_000 },
+        { file: 'hanamaru.css', rawBytes: 2_575, gzipBytes: 881 },
+      ],
+      rawBytes: 7_575,
+      gzipBytes: 2_281,
+      budgetBytes: 28_672,
+      stretchBytes: 27_648,
       stretch: true,
     },
     {
-      combined: 18_322,
-      cssGzip: 851,
-      file: 'hanamaru.iife.js',
-      gzip: 17_471,
-      raw: 54_597,
+      entry: 'iife',
+      entryFile: 'hanamaru.iife.js',
+      chargedFiles: ['hanamaru.iife.js', 'hanamaru.css'],
+      members: [
+        { file: 'hanamaru.iife.js', rawBytes: 5_000, gzipBytes: 1_500 },
+        { file: 'hanamaru.css', rawBytes: 2_575, gzipBytes: 881 },
+      ],
+      rawBytes: 7_575,
+      gzipBytes: 2_381,
+      budgetBytes: 24_576,
+      stretchBytes: 23_552,
       stretch: true,
     },
   ],
-  schemaVersion: 1,
+  schemaVersion: 2,
 };
 
 for (const { name, mutate } of [
-  { name: 'future schema', mutate: (report) => { report.schemaVersion = 2; } },
-  { name: 'negative combined bytes', mutate: (report) => { report.formats[0].combined = -1; } },
-  { name: 'fractional CSS bytes', mutate: (report) => { report.css.gzip = 850.5; } },
-  { name: 'malformed format metric', mutate: (report) => { report.formats[1].gzip = null; } },
+  { name: 'future schema', mutate: (report) => { report.schemaVersion = 3; } },
+  { name: 'negative closure bytes', mutate: (report) => { report.entries[0].gzipBytes = -1; } },
+  {
+    name: 'fractional CSS bytes',
+    mutate: (report) => {
+      report.entries[0].members.find(({ file }) => file === 'hanamaru.css').gzipBytes = 880.5;
+    },
+  },
+  { name: 'malformed entry metric', mutate: (report) => { report.entries[1].budgetBytes = null; } },
+  { name: 'missing closure budget', mutate: (report) => { delete report.budgets.hard.main; } },
 ]) {
   test(`size docket rejects ${name} with the exact local fallback`, async ({ page }) => {
     const failures = capturePageFailures(page);

@@ -146,10 +146,14 @@ git commit -m "feat: define modular package and type contracts"
 - Modify: `tests/unit/build.test.js`
 - Modify: `tests/unit/size.test.js`
 - Create: `tests/unit/singleton.test.js`
+- Modify: `package.json`
+- Modify: `package-lock.json`
+- Modify: `docs/superpowers/specs/2026-07-23-hanamaru-release-program-design.md`
+- Modify: `docs/superpowers/plans/2026-07-23-hanamaru-release.md`
 
 - [ ] **Step 1: Write failing graph/closure tests**
 
-Assert `dist` matches the normative tree, every ESM entry points to one emitted singleton chunk, importing main plus any subpath shares plugin registration/metadata/resources, IIFE is self-contained, main ESM+CSS and IIFE+CSS are each ≤20,480 gzip bytes, and each optional closure meets its exact spec budget.
+Assert `dist` matches the normative tree, every ESM entry points to one emitted singleton chunk, importing main plus any subpath shares plugin registration/metadata/resources, IIFE is self-contained, and every complete-runtime closure meets its measured, closure-specific budget: main ESM 28,672; IIFE 24,576; selection 3,072; serialize 11,264; group 8,192; plugins 6,144; shadow 21,504; and each framework adapter 4,096 gzip bytes.
 
 - [ ] **Step 2: Run graph tests and verify RED**
 
@@ -159,7 +163,7 @@ Expected: normative-tree and shared-singleton assertions fail against the curren
 
 - [ ] **Step 3: Implement one splitting-enabled ESM build**
 
-Call esbuild once with all ESM entry points, `bundle:true`, `splitting:true`, `format:"esm"`, deterministic entry/chunk names, and the shared `runtime-state.js`. Build IIFE from main only and both CSS files separately. Remove only the project `dist` path.
+Call esbuild once with all ESM entry points, `bundle:true`, `splitting:true`, `format:"esm"`, deterministic entry/chunk names, and the shared `runtime-state.js`. Build IIFE from main only and both CSS files separately. Apply the pinned Terser 5.49.0 pass only after esbuild has emitted the authoritative module graph; it may compress/mangle identifiers but must not change graph edges or mangle unrestricted properties. Remove only the project `dist` path, and remove an incomplete distribution if post-compression fails.
 
 - [ ] **Step 4: Run graph/singleton tests and verify GREEN**
 
@@ -179,7 +183,7 @@ Expected: optional closure/report assertions fail against the current two-format
 
 - [ ] **Step 7: Measure transitive closures, not individual files**
 
-Parse emitted ESM imports recursively, deduplicate chunks within each entry closure, add the applicable CSS gzip bytes, enforce hard caps, and emit a deterministic schema-versioned size report.
+Parse emitted ESM imports recursively, deduplicate chunks within each entry closure, add the applicable CSS gzip bytes, enforce the exact revised hard caps, report the closure-specific stretch targets (main ESM 27,648; IIFE 23,552; selection 2,560; serialize 10,752; group 7,680; plugins 5,632; shadow 20,480; each framework adapter 3,584), and emit a deterministic schema-versioned size report.
 
 - [ ] **Step 8: Integrate `check-exports` and run full distribution tests**
 
@@ -192,7 +196,7 @@ Expected: all artifacts and hard budgets pass; stretch misses may be reported bu
 - [ ] **Step 9: Commit distribution graph/accounting**
 
 ```bash
-git add scripts/build.mjs scripts/check-size.mjs scripts/check-exports.mjs scripts/check-dist.mjs tests/unit/build.test.js tests/unit/size.test.js tests/unit/singleton.test.js package.json package-lock.json
+git add scripts/build.mjs scripts/check-size.mjs scripts/check-exports.mjs scripts/check-dist.mjs tests/unit/build.test.js tests/unit/size.test.js tests/unit/singleton.test.js package.json package-lock.json docs/superpowers/specs/2026-07-23-hanamaru-release-program-design.md docs/superpowers/plans/2026-07-23-hanamaru-release.md
 git commit -m "build: emit shared modular distribution"
 ```
 

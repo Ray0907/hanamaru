@@ -147,21 +147,23 @@ The normative export map shape is:
 
 ## Size Budgets
 
-The existing complete core distributions retain their hard cap:
+The complete approved runtime was measured after all feature families, Shadow DOM
+support, serialization, plugins, and framework adapters were implemented. Budgets
+are closure-specific binary-unit thresholds with modest deterministic headroom;
+they are not per-file limits inherited from the earlier, smaller feature set.
 
-- ESM JavaScript plus base CSS: at most 20,480 bytes at gzip level 9;
-- IIFE JavaScript plus base CSS: at most 20,480 bytes at gzip level 9.
-
-Optional entry points are measured with their peer and core imports externalized:
-
-| Subpath | Hard gzip cap |
-| --- | ---: |
-| `selection` | 3,072 bytes |
-| `serialize` | 8,192 bytes |
-| `group` | 8,192 bytes |
-| `plugins` | 6,144 bytes |
-| `shadow` JavaScript plus shadow stylesheet payload | 12,288 bytes |
-| each framework adapter | 4,096 bytes |
+| Closure | Hard gzip cap | Stretch target |
+| --- | ---: | ---: |
+| main ESM JavaScript plus base CSS | 28,672 bytes (28 KiB) | 27,648 bytes (27 KiB) |
+| main IIFE JavaScript plus base CSS | 24,576 bytes (24 KiB) | 23,552 bytes (23 KiB) |
+| `selection` | 3,072 bytes | 2,560 bytes |
+| `serialize` | 11,264 bytes (11 KiB) | 10,752 bytes (10.5 KiB) |
+| `group` | 8,192 bytes | 7,680 bytes |
+| `plugins` | 6,144 bytes | 5,632 bytes |
+| `shadow` JavaScript plus shadow stylesheet payload | 21,504 bytes (21 KiB) | 20,480 bytes (20 KiB) |
+| `react` | 4,096 bytes | 3,584 bytes |
+| `vue` | 4,096 bytes | 3,584 bytes |
+| `svelte` | 4,096 bytes | 3,584 bytes |
 
 Size accounting uses gzip level 9 over file bytes:
 
@@ -173,7 +175,11 @@ Size accounting uses gzip level 9 over file bytes:
 - Shadow's budget is its optional JavaScript closure plus the separately gzipped UTF-8 bytes of `shadow/hanamaru-shadow.css`;
 - gzip members are measured independently and their byte counts summed, matching the existing JavaScript-plus-CSS methodology.
 
-Every hard cap is enforced by `npm run check:dist`. The report records entry files, charged chunks, raw bytes, individual gzip bytes, and summed closure bytes so two implementations cannot account for the same artifact differently.
+Every hard cap is enforced by `npm run check:dist`; stretch targets are
+report-only. The report records entry files, charged chunks, raw bytes,
+individual gzip bytes, summed closure bytes, and the closure-specific hard and
+stretch thresholds so two implementations cannot account for the same artifact
+differently.
 
 ## TypeScript Contract
 

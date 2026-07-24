@@ -631,28 +631,58 @@ async function loadSizeReport() {
     if (!response.ok) throw new Error('Size report unavailable');
     const report = await response.json();
     const isByteMetric = (value) => Number.isInteger(value) && value >= 0;
-    const hasValidBudgets = isByteMetric(report.budgets?.hardCombinedGzip)
-      && isByteMetric(report.budgets?.stretchCombinedGzip);
-    const hasValidCss = report.css?.file === 'hanamaru.css'
-      && isByteMetric(report.css.gzip);
-    if (report.schemaVersion !== 1 || !hasValidBudgets || !hasValidCss
-      || !Array.isArray(report.formats) || report.formats.length !== 2) {
+    if (report.schemaVersion !== 2 || !Array.isArray(report.entries)) {
       throw new Error('Size report invalid');
     }
-    const esm = report.formats.find(({ file }) => file === 'hanamaru.esm.js');
-    const iife = report.formats.find(({ file }) => file === 'hanamaru.iife.js');
-    const validFormat = (entry) => entry !== undefined
-      && ['combined', 'cssGzip', 'gzip', 'raw'].every((key) => isByteMetric(entry[key]))
-      && typeof entry.stretch === 'boolean'
-      && entry.cssGzip === report.css.gzip
-      && entry.combined === entry.gzip + entry.cssGzip;
-    if (!validFormat(esm) || !validFormat(iife)) {
+    const validEntry = (entry, name, entryFile) => {
+      if (entry?.entry !== name || entry.entryFile !== entryFile
+        || !Array.isArray(entry.chargedFiles) || !Array.isArray(entry.members)
+        || !['rawBytes', 'gzipBytes', 'budgetBytes', 'stretchBytes']
+          .every((key) => isByteMetric(entry[key]))
+        || !isByteMetric(report.budgets?.hard?.[name])
+        || !isByteMetric(report.budgets?.stretch?.[name])
+        || entry.budgetBytes !== report.budgets.hard[name]
+        || entry.stretchBytes !== report.budgets.stretch[name]
+        || typeof entry.stretch !== 'boolean'
+        || entry.stretch !== (entry.gzipBytes <= entry.stretchBytes)
+        || entry.chargedFiles.length !== entry.members.length) {
+        return false;
+      }
+      if (!entry.members.every((member, index) => typeof member?.file === 'string'
+        && member.file === entry.chargedFiles[index]
+        && isByteMetric(member.rawBytes)
+        && isByteMetric(member.gzipBytes))) {
+        return false;
+      }
+      return entry.rawBytes === entry.members.reduce(
+        (total, member) => total + member.rawBytes,
+        0,
+      ) && entry.gzipBytes === entry.members.reduce(
+        (total, member) => total + member.gzipBytes,
+        0,
+      );
+    };
+    const uniqueEntry = (name) => {
+      const matches = report.entries.filter((entry) => entry?.entry === name);
+      return matches.length === 1 ? matches[0] : undefined;
+    };
+    const esm = uniqueEntry('main');
+    const iife = uniqueEntry('iife');
+    if (!validEntry(esm, 'main', 'hanamaru.esm.js')
+      || !validEntry(iife, 'iife', 'hanamaru.iife.js')) {
+      throw new Error('Size report invalid');
+    }
+    const esmCss = esm.members.filter(({ file }) => file === 'hanamaru.css');
+    const iifeCss = iife.members.filter(({ file }) => file === 'hanamaru.css');
+    if (esmCss.length !== 1 || iifeCss.length !== 1
+      || esmCss[0].rawBytes !== iifeCss[0].rawBytes
+      || esmCss[0].gzipBytes !== iifeCss[0].gzipBytes) {
       throw new Error('Size report invalid');
     }
     const format = (value) => value.toLocaleString('en-US');
-    sizeFields.esm.textContent = `${format(esm.combined)} B gzip incl. CSS`;
-    sizeFields.iife.textContent = `${format(iife.combined)} B gzip incl. CSS`;
-    sizeFields.css.textContent = `${format(report.css.gzip)} B gzip`;
+    sizeFields.esm.textContent = `${format(esm.gzipBytes)} B gzip incl. CSS`;
+    sizeFields.iife.textContent = `${format(iife.gzipBytes)} B gzip incl. CSS`;
+    sizeFields.css.textContent = `${format(esmCss[0].gzipBytes)} B gzip`;
     sizeState.textContent = 'Measured from dist/size-report.json.';
   } catch {
     showUnavailableSize();
