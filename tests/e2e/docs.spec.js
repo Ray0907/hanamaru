@@ -239,6 +239,13 @@ test('states accessibility, Inspector keyboard, reduced-motion, and CSP behavior
   expect(safety).toMatch(/nonce/);
   expect(safety).toMatch(/preinstalled/);
   expect(safety).not.toMatch(/injects? inline script/i);
+  expect(safety).toMatch(/Hanamaru injects no scripts/i);
+  expect(safety).toMatch(
+    /Shadow `auto`[\s\S]*?constructed stylesheet[\s\S]*?owned `<style>`[\s\S]*?nonce/i,
+  );
+  expect(safety).toMatch(/validated same-realm sheet/i);
+  expect(safety).toMatch(/`preinstalled`[\s\S]*?no-dynamic-style mode/i);
+  expect(safety).not.toMatch(/CSP prevents Hanamaru[\s\S]*?injecting script\/style/i);
   expect(safety).toMatch(/custom mark factories are trusted executable JavaScript/i);
   expect(safety).toMatch(/validates and bounds only[\s\S]*?returned SVG path data/i);
   expect(safety).toMatch(/does not sandbox/i);
@@ -353,6 +360,31 @@ test('records the exact real-Chrome release capture without unsupported publicat
   expect(releaseNotes).toMatch(/no (?:debug UI|personal data)/i);
   expect(releaseNotes).toMatch(/local prepared\/verified evidence/i);
   expect(releaseNotes).not.toMatch(/(?:npm|GitHub release) is (?:live|public|published)/i);
+});
+
+test('keeps GitHub release notes exact about Shadow CSP style installation', () => {
+  expect(releaseNotes).toMatch(/Hanamaru injects no scripts/i);
+  expect(releaseNotes).toMatch(
+    /Shadow `auto`[\s\S]*?constructed stylesheet[\s\S]*?owned `<style>`/i,
+  );
+  expect(releaseNotes).toMatch(/nonce/);
+  expect(releaseNotes).toMatch(/caller-provided sheet/i);
+  expect(releaseNotes).toMatch(/`preinstalled`[\s\S]*?no-dynamic-style mode/i);
+  expect(releaseNotes).not.toMatch(
+    /CSP (?:prevents|constrains) Hanamaru(?:'s)? injection behavior/i,
+  );
+});
+
+test('keeps the changelog exact about Shadow CSP style installation', () => {
+  expect(changelog).toMatch(/Hanamaru injects no scripts/i);
+  expect(changelog).toMatch(
+    /Shadow `auto`[\s\S]*?constructed stylesheet[\s\S]*?owned `<style>`[\s\S]*?nonce/i,
+  );
+  expect(changelog).toMatch(/caller-provided sheet/i);
+  expect(changelog).toMatch(/`preinstalled`[\s\S]*?no-dynamic-style mode/i);
+  expect(changelog).not.toMatch(
+    /CSP (?:prevents|constrains) Hanamaru(?:'s)? injection behavior/i,
+  );
 });
 
 test('resolves every local Markdown link used by public release documents', async () => {

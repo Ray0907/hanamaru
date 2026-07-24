@@ -22,7 +22,7 @@ All notable changes to Hanamaru are recorded here. This project follows Semantic
 - Preserved host DOM content while remeasuring after resize, scroll, visual-viewport, and scoped mutation signals.
 - Added reduced-motion behavior that skips interpolation without changing states, promises, events, or final output.
 - Added decorative-by-default notes and owned `aria-describedby` tokens for meaningful notes.
-- Added CSP-safe Hanamaru path rendering plus Shadow style nonce, caller-sheet, and preinstalled modes; CSP does not sandbox trusted plugin factories.
+- Hanamaru injects no scripts; Shadow `auto` may adopt a constructed stylesheet or append an owned `<style>` fallback with an optional nonce. A caller-provided sheet is supported, while `preinstalled` is the no-dynamic-style mode. CSP does not sandbox trusted plugin factories.
 - Added exact-root Shadow ownership, no implicit deep traversal, and deterministic reverse teardown.
 - Added shared ESM singleton state, declarations for every public entry, optional peer adapters, and zero production dependencies.
 

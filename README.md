@@ -413,13 +413,13 @@ Meaningful notes supplement rather than replace essential visible text. Long acc
 
 The demo Annotation Inspector uses an Exit control, a labeled status region, a mark toolbar with a roving tab stop, Arrow-key navigation, Enter or Space activation, and Escape to close the topmost note editor/palette before leaving Inspector mode. Focus returns to the connected opener. Readonly HTML/JavaScript/JSON outputs stay selectable, and copy failure exposes a selected fallback.
 
-Hanamaru's core rendering uses DOM/SVG APIs and does not inject scripts or call `eval`. With strict CSP:
+Hanamaru injects no scripts and does not call `eval`. Shadow style installation is separate: Shadow `auto` may adopt a constructed stylesheet or append an owned `<style>` fallback; that fallback accepts an optional `nonce`. With strict CSP:
 
 - self-host or allow the pinned CDN origin in `script-src` and `style-src`;
 - serve base CSS as an external stylesheet;
-- for Shadow styles, use the fallback `nonce`, pass a validated same-realm sheet, or use `'preinstalled'` mode when dynamic style creation is forbidden.
+- for Shadow styles, use the fallback `nonce`, pass a validated same-realm sheet, or use `preinstalled`, the no-dynamic-style mode, when dynamic style creation is forbidden.
 
-Custom mark factories are trusted executable JavaScript and can perform any side effect allowed to caller code, including DOM, timer, observer, and event work. Hanamaru does not sandbox factories. It validates and bounds only the returned SVG path data and the geometry handed to the renderer. CSP prevents Hanamaru itself from injecting script/style in the documented modes; it does not make a malicious or careless plugin safe. Serialization resolvers are trusted application callbacks too and should map stable keys rather than evaluate payload contents.
+Custom mark factories are trusted executable JavaScript and can perform any side effect allowed to caller code, including DOM, timer, observer, and event work. Hanamaru does not sandbox factories. It validates and bounds only the returned SVG path data and the geometry handed to the renderer. CSP still applies to the page, but it does not make a malicious or careless plugin safe. Serialization resolvers are trusted application callbacks too and should map stable keys rather than evaluate payload contents.
 
 ## Browser support
 
