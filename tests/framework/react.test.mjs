@@ -682,14 +682,14 @@ test('inherits reduced motion and settles a long system animation synchronously'
       animatingClass: group.classList.contains('hana-is-animating'),
       settlement,
       state: controller.state,
-      strokeDashoffset: path.style.strokeDashoffset,
+      strokeDashoffset: getComputedStyle(path).strokeDashoffset,
     }
   })).toEqual({
     activeAnimations: 0,
     animatingClass: false,
     settlement: 'resolved',
     state: 'visible',
-    strokeDashoffset: '0',
+    strokeDashoffset: '0px',
   })
 })
 
