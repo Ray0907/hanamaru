@@ -104,6 +104,7 @@ test('leads with the Inspector hero and five-second package adoption', async () 
   expect([...hero.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   expect(hero.readUInt32BE(16)).toBe(1280);
   expect(hero.readUInt32BE(20)).toBe(900);
+  expect(hero.length).toBeGreaterThan(100_000);
   expect(readme).not.toContain('docs/assets/hanamaru-demo.png');
 });
 
@@ -238,6 +239,12 @@ test('states accessibility, Inspector keyboard, reduced-motion, and CSP behavior
   expect(safety).toMatch(/nonce/);
   expect(safety).toMatch(/preinstalled/);
   expect(safety).not.toMatch(/injects? inline script/i);
+  expect(safety).toMatch(/custom mark factories are trusted executable JavaScript/i);
+  expect(safety).toMatch(/validates and bounds only[\s\S]*?returned SVG path data/i);
+  expect(safety).toMatch(/does not sandbox/i);
+  expect(safety).not.toMatch(
+    /plugins?[\s\S]{0,120}cannot create (?:DOM|CSS|scripts?|timers?|observers?|events?)/i,
+  );
 });
 
 test('names only the exact browser builds verified by this repository', () => {
@@ -285,7 +292,7 @@ test('documents target, serialization, Shadow, and cross-frame limits without ov
 });
 
 test('prepares the changelog and release notes with exact links and sections', () => {
-  expect(changelog).toContain('## [0.1.0] - 2026-07-23');
+  expect(changelog).toContain('## [0.1.0] - 2026-07-24');
   for (const feature of [
     'six built-in marks',
     'Selection',
@@ -305,8 +312,13 @@ test('prepares the changelog and release notes with exact links and sections', (
     expect(releaseNotes).toMatch(new RegExp(`^## ${title}\\s*$`, 'm'));
   }
   expect(releaseNotes).toContain('npm install hanamaru-annotations@0.1.0');
-  expect(releaseNotes).toContain('[Changelog](../../CHANGELOG.md)');
-  expect(releaseNotes).toContain('[MIT License](../../LICENSE)');
+  expect(releaseNotes).toContain(
+    '[Changelog](https://github.com/Ray0907/hanamaru/blob/v0.1.0/CHANGELOG.md)',
+  );
+  expect(releaseNotes).toContain(
+    '[MIT License](https://github.com/Ray0907/hanamaru/blob/v0.1.0/LICENSE)',
+  );
+  expect(releaseNotes).not.toMatch(/\]\(\.\.\/\.\.\//);
   expect(releaseNotes).not.toMatch(/sha(?:384|512)[-:][A-Za-z0-9+/=]{20,}/i);
 
   expect(readme).toContain('[Repository](https://github.com/Ray0907/hanamaru)');
@@ -314,6 +326,22 @@ test('prepares the changelog and release notes with exact links and sections', (
   expect(readme).toContain('[Changelog](CHANGELOG.md)');
   expect(readme).toContain('[MIT License](LICENSE)');
   expect(readme).not.toMatch(/github\.io\/hanamaru/i);
+});
+
+test('separates the browser package consumer contract from contributor tooling', () => {
+  const development = section(readme, 'Development');
+  expect(Object.hasOwn(pkg, 'engines')).toBe(false);
+  expect(pkg.devEngines).toEqual({
+    runtime: {
+      name: 'node',
+      version: '>=24.13.0 <25',
+      onFail: 'error',
+    },
+  });
+  expect(development).toMatch(/browser package[\s\S]*?no consumer-facing `engines` gate/i);
+  expect(development).toMatch(/contributors?[\s\S]*?`devEngines`[\s\S]*?Node `>=24\.13\.0 <25`/i);
+  expect(development).toMatch(/CI[\s\S]*?24\.13\.0/i);
+  expect(development).not.toMatch(/Hanamaru requires Node `24\.13\.x`/i);
 });
 
 test('records the exact real-Chrome release capture without unsupported publication claims', () => {

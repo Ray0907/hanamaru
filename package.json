@@ -22,8 +22,12 @@
     "dom",
     "javascript"
   ],
-  "engines": {
-    "node": ">=24.13.0 <25"
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=24.13.0 <25",
+      "onFail": "error"
+    }
   },
   "types": "./dist/index.d.ts",
   "exports": {

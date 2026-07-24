@@ -261,6 +261,8 @@ unregister()
 
 Names are lowercase ASCII/hyphen identifiers up to 48 characters and cannot replace built-ins. A factory can return at most 32 valid paths, each at most 16,384 code units. Registration is runtime-local; TypeScript consumers augment `HanamaruMarkMap` separately for custom literal completion.
 
+Custom mark factories are trusted executable JavaScript, not a sandboxed data format. Frozen geometry and deterministic helpers make valid path output repeatable; they do not restrict what caller-provided code can do in its JavaScript realm. Install factories only from code you trust.
+
 ### Versioned serialization
 
 Serialization supports Annotation, Story, and Group:
@@ -411,13 +413,13 @@ Meaningful notes supplement rather than replace essential visible text. Long acc
 
 The demo Annotation Inspector uses an Exit control, a labeled status region, a mark toolbar with a roving tab stop, Arrow-key navigation, Enter or Space activation, and Escape to close the topmost note editor/palette before leaving Inspector mode. Focus returns to the connected opener. Readonly HTML/JavaScript/JSON outputs stay selectable, and copy failure exposes a selected fallback.
 
-Core and plugin rendering use DOM/SVG APIs and do not inject scripts or call `eval`. With strict CSP:
+Hanamaru's core rendering uses DOM/SVG APIs and does not inject scripts or call `eval`. With strict CSP:
 
 - self-host or allow the pinned CDN origin in `script-src` and `style-src`;
 - serve base CSS as an external stylesheet;
 - for Shadow styles, use the fallback `nonce`, pass a validated same-realm sheet, or use `'preinstalled'` mode when dynamic style creation is forbidden.
 
-Plugins return validated SVG path strings; they cannot create DOM, CSS, scripts, timers, observers, or events. Serialization resolvers remain application code and should map trusted stable keys rather than evaluate payload contents.
+Custom mark factories are trusted executable JavaScript and can perform any side effect allowed to caller code, including DOM, timer, observer, and event work. Hanamaru does not sandbox factories. It validates and bounds only the returned SVG path data and the geometry handed to the renderer. CSP prevents Hanamaru itself from injecting script/style in the documented modes; it does not make a malicious or careless plugin safe. Serialization resolvers are trusted application callbacks too and should map stable keys rather than evaluate payload contents.
 
 ## Browser support
 
@@ -478,7 +480,7 @@ Invalid configuration throws `HanamaruConfigError`; missing, ambiguous, disconne
 
 ## Development
 
-Hanamaru requires Node `24.13.x` for repository verification:
+Hanamaru is a browser package and has no consumer-facing `engines` gate, so installing it does not impose the repository's Node toolchain on applications using Node 20, 22, 25, or another npm-supported runtime. Contributors are intentionally stricter: npm `devEngines` requires Node `>=24.13.0 <25` with `onFail: error`, and CI pins Node 24.13.0.
 
 ```sh
 npm install

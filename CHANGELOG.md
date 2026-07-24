@@ -2,7 +2,7 @@
 
 All notable changes to Hanamaru are recorded here. This project follows Semantic Versioning.
 
-## [0.1.0] - 2026-07-23
+## [0.1.0] - 2026-07-24
 
 ### Features
 
@@ -10,7 +10,7 @@ All notable changes to Hanamaru are recorded here. This project follows Semantic
 - Added declarative `data-hana` scanning, imperative Annotation lifecycle control, ordered Story playback, and attached notes with automatic placement.
 - Added the Selection helper for a cloned, single native text selection.
 - Added atomic parallel Group controllers.
-- Added deterministic custom marks through the bounded plugin helper API.
+- Added deterministic custom marks through registration with bounded returned SVG path data; factories remain trusted application JavaScript.
 - Added versioned `hanamaru/v1` serialization, restore, and isolated serialized-target resolution.
 - Added explicit open and retained-closed Shadow DOM scopes with automatic, caller-sheet, and preinstalled style modes.
 - Added thin React, Vue, and Svelte lifecycle adapters over the same framework-free runtime.
@@ -22,7 +22,7 @@ All notable changes to Hanamaru are recorded here. This project follows Semantic
 - Preserved host DOM content while remeasuring after resize, scroll, visual-viewport, and scoped mutation signals.
 - Added reduced-motion behavior that skips interpolation without changing states, promises, events, or final output.
 - Added decorative-by-default notes and owned `aria-describedby` tokens for meaningful notes.
-- Added strict-CSP-safe plugin rendering plus Shadow style nonce, caller-sheet, and preinstalled modes.
+- Added CSP-safe Hanamaru path rendering plus Shadow style nonce, caller-sheet, and preinstalled modes; CSP does not sandbox trusted plugin factories.
 - Added exact-root Shadow ownership, no implicit deep traversal, and deterministic reverse teardown.
 - Added shared ESM singleton state, declarations for every public entry, optional peer adapters, and zero production dependencies.
 

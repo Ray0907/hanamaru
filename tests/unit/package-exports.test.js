@@ -81,6 +81,10 @@ async function packageJson() {
   return JSON.parse(await readFile(path.join(projectRoot, 'package.json'), 'utf8'));
 }
 
+async function packageLock() {
+  return JSON.parse(await readFile(path.join(projectRoot, 'package-lock.json'), 'utf8'));
+}
+
 for (const [relativePath, names] of Object.entries(sourceContracts)) {
   test(`source entry ${relativePath} exports only its public contract`, async () => {
     const module = await import(pathToFileURL(path.join(projectRoot, relativePath)));
@@ -139,6 +143,25 @@ test('peer metadata keeps framework runtimes optional and out of production depe
   assert.equal(manifest.devDependencies.vue, '3.5.40');
   assert.equal(manifest.devDependencies.svelte, '5.56.7');
   assert.equal(manifest.devDependencies.typescript, '5.9.2');
+});
+
+test('runtime metadata gates contributors without constraining package consumers', async () => {
+  const manifest = await packageJson();
+  const lock = await packageLock();
+  const expected = {
+    runtime: {
+      name: 'node',
+      version: '>=24.13.0 <25',
+      onFail: 'error',
+    },
+  };
+
+  assert.equal(Object.hasOwn(manifest, 'engines'), false);
+  assert.deepEqual(manifest.devEngines, expected);
+  assert.equal(Object.hasOwn(lock.packages[''], 'engines'), false);
+  // npm 11 validates root devEngines but intentionally does not copy it into
+  // the lockfile's root package snapshot.
+  assert.equal(Object.hasOwn(lock.packages[''], 'devEngines'), false);
 });
 
 test('metadata defines the fixed ordered verification stages', async () => {

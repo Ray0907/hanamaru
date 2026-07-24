@@ -43,6 +43,7 @@ Annotations appear on responsive prose, headings, controls, inline content, nati
 - Public entry points are data attributes, JavaScript functions, and JSON-compatible story definitions.
 - The runtime redraws after relevant resize, scroll, and scoped content changes.
 - Selection, Group, plugins, and serialization are implemented as optional subpaths over one shared singleton.
+- Custom mark factories are trusted executable JavaScript. Hanamaru bounds their returned SVG path data but does not sandbox application/plugin side effects.
 - Shadow DOM support uses an explicit exact-root scope with open and retained-closed roots, no implicit deep traversal, and CSP-aware style ownership.
 - React, Vue, and Svelte adapters are thin optional-peer lifecycle bindings with no duplicate renderer or runtime.
 - The Annotation Inspector converts real selections into marks and honest HTML/JavaScript/versioned-JSON output without mutating article text.
