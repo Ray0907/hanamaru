@@ -9,6 +9,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { constants, gzipSync } from 'node:zlib';
 import {
   checkDistribution,
@@ -20,6 +21,7 @@ import {
   checkDist,
   checkDryPackShape,
 } from '../../scripts/check-dist.mjs';
+import * as checkDistModule from '../../scripts/check-dist.mjs';
 
 const ENTRY_FILES = Object.freeze({
   main: 'hanamaru.esm.js',
@@ -64,15 +66,30 @@ async function createDistribution(pkg = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-size-'));
   const files = {
     'hanamaru.esm.js': `
-      import "./_chunks/main.js";
-      import "./_chunks/main.js";
-      export const lazy = () => import("./_chunks/dynamic.js");
+      import "./_chunks/main.js?static#entry";
+      export { reexported } from "./_chunks/reexport.js#export";
+      export const lazy = () => import("./_chunks/dynamic.js?lazy#entry");
+      const nonliteral = "./_chunks/missing-nonliteral.js";
+      export const ignoredDynamic = () => import(nonliteral);
+      export const importText = 'import("./_chunks/missing-string.js")';
+      export const templateText = \`export * from "./_chunks/missing-template.js"\`;
+      export const importPattern = /import\\(".\\/_chunks\\/missing-regex\\.js"\\)/;
+      // import "./_chunks/missing-line-comment.js";
+      /* export { missing } from "./_chunks/missing-block-comment.js"; */
       export const VERSION = "fixture";
     `,
     'hanamaru.iife.js': 'var Hanamaru={};',
     'hanamaru.css': '.hana{}',
-    '_chunks/main.js': 'export const singleton = {};',
+    '_chunks/main.js': `
+      import "./cycle.js?cycle";
+      export const singleton = {};
+    `,
+    '_chunks/cycle.js': `
+      import "./main.js#cycle";
+      export const cycle = 1;
+    `,
     '_chunks/dynamic.js': 'export const dynamic = 1;',
+    '_chunks/reexport.js': 'export const reexported = 1;',
     '_chunks/selection.js': 'export const selection = 1;',
     '_chunks/optional-shared.js': 'export const sharedOptional = 1;',
     'selection/index.js': `
@@ -104,25 +121,26 @@ async function createDistribution(pkg = {}) {
 }
 
 function deterministicNoise(length) {
-  const bytes = new Uint8Array(length);
+  const alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let state = 0x12345678;
-  for (let index = 0; index < bytes.length; index += 1) {
+  let output = '';
+  for (let index = 0; index < length; index += 1) {
     state ^= state << 13;
     state ^= state >>> 17;
     state ^= state << 5;
-    bytes[index] = state >>> 0;
+    output += alphabet[(state >>> 0) % alphabet.length];
   }
-  return bytes;
+  return output;
 }
 
 function bytesWithExactGzipLength(target) {
-  for (let length = Math.max(0, target - 100); length <= target; length += 1) {
-    const bytes = deterministicNoise(length);
-    if (gzipSync(bytes, { level: constants.Z_BEST_COMPRESSION }).length === target) {
-      return bytes;
+  for (let length = target; length <= target * 3; length += 1) {
+    const source = `export const fixture="${deterministicNoise(length)}";`;
+    if (gzipSync(source, { level: constants.Z_BEST_COMPRESSION }).length === target) {
+      return source;
     }
   }
-  throw new Error(`fixture could not produce ${target} gzip bytes`);
+  throw new Error(`fixture could not produce ${target} gzip bytes of valid JavaScript`);
 }
 
 test('measureDistribution applies exact graph-closure charging rules', async (t) => {
@@ -135,7 +153,14 @@ test('measureDistribution applies exact graph-closure charging rules', async (t)
   assert.deepEqual(report.entries.map(({ entry }) => entry), Object.keys(ENTRY_FILES));
   assert.deepEqual(
     byName.main.chargedFiles,
-    ['hanamaru.esm.js', '_chunks/main.js', '_chunks/dynamic.js', 'hanamaru.css'],
+    [
+      'hanamaru.esm.js',
+      '_chunks/main.js',
+      '_chunks/cycle.js',
+      '_chunks/reexport.js',
+      '_chunks/dynamic.js',
+      'hanamaru.css',
+    ],
   );
   assert.equal(byName.main.chargedFiles.filter((file) => file === '_chunks/main.js').length, 1);
   assert.deepEqual(
@@ -305,20 +330,30 @@ test('checkDist invokes the four release gates in the exact required order', asy
   const calls = [];
   const value = await checkDist('/fixture', {
     assertNoProductionDependencies: async () => calls.push('dependencies'),
-    checkBuiltExports: async () => calls.push('exports'),
-    checkDryPackShape: async () => calls.push('pack'),
+    checkBuiltExports: async () => {
+      calls.push('exports');
+      return { distFiles: ['hanamaru.esm.js', 'index.d.ts'] };
+    },
+    checkDryPackShape: async (root, options) => {
+      calls.push('pack');
+      assert.equal(root, '/fixture');
+      assert.deepEqual(options, {
+        expectedDistFiles: ['hanamaru.esm.js', 'index.d.ts'],
+      });
+      return 3;
+    },
     checkDistributionSize: async () => calls.push('size'),
   });
   assert.deepEqual(calls, ['dependencies', 'exports', 'pack', 'size']);
   assert.deepEqual(value, {
     dependencies: 1,
-    exports: 2,
+    exports: { distFiles: ['hanamaru.esm.js', 'index.d.ts'] },
     pack: 3,
     size: 4,
   });
 });
 
-test('checkDryPackShape accepts only package metadata, dist, README, and LICENSE', async () => {
+test('checkDryPackShape accepts the exact validated dist tree plus package metadata', async () => {
   const files = [
     { path: 'package/package.json' },
     { path: 'package/README.md' },
@@ -327,6 +362,7 @@ test('checkDryPackShape accepts only package metadata, dist, README, and LICENSE
     { path: 'package/dist/index.d.ts' },
   ];
   const accepted = await checkDryPackShape('/fixture', {
+    expectedDistFiles: ['hanamaru.esm.js', 'index.d.ts'],
     execFileImpl(file, args, options, callback) {
       assert.equal(file, 'npm');
       assert.deepEqual(args, ['pack', '--dry-run', '--json']);
@@ -348,6 +384,7 @@ test('checkDryPackShape rejects source, secrets, changelog, and root tarballs', 
   ]) {
     await assert.rejects(
       checkDryPackShape('/fixture', {
+        expectedDistFiles: ['index.d.ts'],
         execFileImpl(file, args, options, callback) {
           callback(null, JSON.stringify([{
             files: [
@@ -364,5 +401,68 @@ test('checkDryPackShape rejects source, secrets, changelog, and root tarballs', 
       /unexpected packed file/,
       unexpected,
     );
+  }
+});
+
+test('checkDryPackShape rejects packed dist omissions and additions', async () => {
+  const expectedDistFiles = ['hanamaru.esm.js', 'index.d.ts'];
+  for (const [name, packedDistFiles] of [
+    ['omission', ['hanamaru.esm.js']],
+    ['addition', ['hanamaru.esm.js', 'index.d.ts', 'secret.txt']],
+  ]) {
+    await assert.rejects(
+      checkDryPackShape('/fixture', {
+        expectedDistFiles,
+        execFileImpl(file, args, options, callback) {
+          callback(null, JSON.stringify([{
+            files: [
+              { path: 'package/package.json' },
+              { path: 'package/README.md' },
+              { path: 'package/LICENSE' },
+              ...packedDistFiles.map((distFile) => ({ path: `package/dist/${distFile}` })),
+            ],
+          }]), '');
+        },
+        platform: 'linux',
+      }),
+      /dist-check: packed file set does not match validated distribution/u,
+      name,
+    );
+  }
+});
+
+test('CLI project roots decode spaces and Unicode through fileURLToPath', async () => {
+  assert.equal(typeof checkDistModule.projectRootFromModuleUrl, 'function');
+  const scriptPath = path.join(
+    os.tmpdir(),
+    'hanamaru encoded path',
+    '日本語',
+    'scripts',
+    'check-dist.mjs',
+  );
+  const scriptUrl = pathToFileURL(scriptPath);
+  assert.match(scriptUrl.pathname, /%20/u);
+  assert.equal(
+    checkDistModule.projectRootFromModuleUrl(scriptUrl.href),
+    path.resolve(path.dirname(scriptPath), '..'),
+  );
+  assert.equal(
+    checkDistModule.projectRootFromModuleUrl(
+      'file:///C:/Program%20Files/%E6%97%A5%E6%9C%AC/scripts/check-dist.mjs',
+      { windows: true },
+    ),
+    'C:\\Program Files\\日本',
+  );
+  assert.equal(
+    checkDistModule.projectRootFromModuleUrl(
+      'file:///opt/encoded%20path/%E6%97%A5%E6%9C%AC/scripts/check-dist.mjs',
+      { windows: false },
+    ),
+    '/opt/encoded path/日本',
+  );
+  for (const relativePath of ['../../scripts/check-dist.mjs', '../../scripts/check-exports.mjs']) {
+    const source = await readFile(new URL(relativePath, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /new URL\(import\.meta\.url\)\.pathname/u);
+    assert.match(source, /from '\.\/module-url\.mjs'/u);
   }
 });

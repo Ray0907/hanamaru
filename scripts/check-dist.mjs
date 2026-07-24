@@ -6,6 +6,9 @@ import {
   assertNoProductionDependencies,
   checkDistributionSize,
 } from './check-size.mjs';
+import { projectRootFromModuleUrl } from './module-url.mjs';
+
+export { projectRootFromModuleUrl };
 
 function packInvocationFor(platform = process.platform, env = process.env) {
   if (platform === 'win32') {
@@ -35,6 +38,8 @@ function normalizedPackPath(file) {
 
 export async function checkDryPackShape(root = process.cwd(), options = {}) {
   const projectRoot = path.resolve(root);
+  const expectedDistFiles = options.expectedDistFiles
+    ?? (await checkBuiltExports(projectRoot)).distFiles;
   let stdout;
   try {
     stdout = await executePack(
@@ -49,25 +54,25 @@ export async function checkDryPackShape(root = process.cwd(), options = {}) {
   const files = result?.[0]?.files?.map(({ path: file }) => file);
   if (!Array.isArray(files)) throw new Error('dist-check: invalid npm pack dry-run output');
 
-  const normalized = files.map(normalizedPackPath);
-  for (const mandatory of ['package.json', 'README.md', 'LICENSE']) {
-    if (!normalized.includes(mandatory)) {
-      throw new Error(`dist-check: packed files missing ${mandatory}`);
-    }
-  }
-  if (!normalized.some((file) => file.startsWith('dist/'))) {
-    throw new Error('dist-check: packed files missing dist/**');
-  }
-  for (let index = 0; index < normalized.length; index += 1) {
-    const file = normalized[index];
-    if (
-      file !== 'package.json'
-      && file !== 'README.md'
-      && file !== 'LICENSE'
-      && !file.startsWith('dist/')
-    ) {
-      throw new Error(`dist-check: unexpected packed file ${files[index]}`);
-    }
+  const normalized = files.map(normalizedPackPath).sort();
+  const expected = [
+    'package.json',
+    'README.md',
+    'LICENSE',
+    ...expectedDistFiles.map((file) => `dist/${file}`),
+  ].sort();
+  if (JSON.stringify(normalized) !== JSON.stringify(expected)) {
+    const actualSet = new Set(normalized);
+    const expectedSet = new Set(expected);
+    const missing = expected.filter((file) => !actualSet.has(file));
+    const unexpected = normalized.filter((file) => !expectedSet.has(file));
+    const details = [
+      missing.length > 0 ? `missing packed file ${missing.join(', ')}` : '',
+      unexpected.length > 0 ? `unexpected packed file ${unexpected.join(', ')}` : '',
+    ].filter(Boolean).join('; ');
+    throw new Error(
+      `dist-check: packed file set does not match validated distribution (${details})`,
+    );
   }
   return files;
 }
@@ -83,12 +88,14 @@ export async function checkDist(root = process.cwd(), dependencies = {}) {
   const output = {};
   output.dependencies = await gates.assertNoProductionDependencies(root);
   output.exports = await gates.checkBuiltExports(root);
-  output.pack = await gates.checkDryPackShape(root);
+  output.pack = await gates.checkDryPackShape(root, {
+    expectedDistFiles: output.exports.distFiles,
+  });
   output.size = await gates.checkDistributionSize(root, { checkNpmTree: false });
   return output;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const result = await checkDist(path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'));
+  const result = await checkDist(projectRootFromModuleUrl(import.meta.url));
   console.log(`dist-check: pass (${result.size.length} size budgets)`);
 }

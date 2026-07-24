@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { constants, gzipSync } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readEsmGraph } from './esm-graph.mjs';
 
 export const HARD_BUDGETS = Object.freeze({
   main: 28_672,
@@ -42,54 +43,6 @@ const ENTRIES = Object.freeze([
   ['vue', 'vue/index.js'],
   ['svelte', 'svelte/index.js'],
 ]);
-
-function localEsmSpecifiers(source) {
-  const specifiers = [];
-  const staticPattern = /\b(?:import|export)\s*(?:[^;"']*?\bfrom\s*)?["'](\.[^"']+)["']/gu;
-  const dynamicPattern = /\bimport\s*\(\s*["'](\.[^"']+)["']\s*\)/gu;
-  for (const pattern of [staticPattern, dynamicPattern]) {
-    for (const match of source.matchAll(pattern)) {
-      specifiers.push({ index: match.index, specifier: match[1] });
-    }
-  }
-  return specifiers
-    .sort((left, right) => left.index - right.index)
-    .map(({ specifier }) => specifier);
-}
-
-function relativeFile(distributionDirectory, filePath) {
-  return path.relative(distributionDirectory, filePath).split(path.sep).join('/');
-}
-
-async function readEsmGraph(entryPath, distributionDirectory) {
-  const members = [];
-  const seen = new Set();
-  const resolvedDistributionDirectory = path.resolve(distributionDirectory);
-
-  async function visit(filePath) {
-    const resolvedPath = path.resolve(filePath);
-    const relativePath = path.relative(resolvedDistributionDirectory, resolvedPath);
-    if (
-      relativePath === '..'
-      || relativePath.startsWith(`..${path.sep}`)
-      || path.isAbsolute(relativePath)
-    ) {
-      throw new Error(`dist-check: ESM import leaves dist (${relativePath})`);
-    }
-    if (seen.has(resolvedPath)) return;
-    seen.add(resolvedPath);
-
-    const source = await readFile(resolvedPath);
-    members.push({ file: relativeFile(resolvedDistributionDirectory, resolvedPath), source });
-    for (const specifier of localEsmSpecifiers(source.toString('utf8'))) {
-      const cleanSpecifier = specifier.split(/[?#]/u, 1)[0];
-      await visit(path.resolve(path.dirname(resolvedPath), cleanSpecifier));
-    }
-  }
-
-  await visit(entryPath);
-  return members;
-}
 
 function measuredMember(file, source) {
   return {

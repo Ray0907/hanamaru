@@ -114,6 +114,14 @@ test('build uses semantics-preserving minification without property or private-s
   );
 });
 
+test('size and export gates share the lexer-backed ESM graph reader', async () => {
+  for (const relativePath of ['../../scripts/check-size.mjs', '../../scripts/check-exports.mjs']) {
+    const source = await readFile(new URL(relativePath, import.meta.url), 'utf8');
+    assert.match(source, /from '\.\/esm-graph\.mjs'/u);
+    assert.doesNotMatch(source, /staticPattern|dynamicPattern|matchAll\(pattern\)/u);
+  }
+});
+
 async function writeFixture(root) {
   await symlink(
     path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'node_modules'),
@@ -365,7 +373,7 @@ test('a parallel-stage failure awaits delayed peers, preserves its cause, and le
   await assert.rejects(readFile(path.join(root, 'dist', 'hanamaru.css')), { code: 'ENOENT' });
 });
 
-test('checkBuiltExports rejects every non-single-level JavaScript chunk artifact', async (t) => {
+test('checkBuiltExports rejects unexpected files and unreachable chunk artifacts', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-chunk-tree-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFixture(root);
@@ -375,13 +383,15 @@ test('checkBuiltExports rejects every non-single-level JavaScript chunk artifact
     '_chunks/nested/extra.js',
     '_chunks/extra.js.map',
     '_chunks/README',
+    '_chunks/orphan.js',
+    'secret.txt',
   ]) {
     const target = path.join(root, 'dist', unexpected);
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, 'unexpected');
     await assert.rejects(
       checkBuiltExports(root),
-      /dist-check: invalid _chunks artifact/u,
+      /dist-check: (?:invalid _chunks|unexpected dist) artifact/u,
       unexpected,
     );
     await rm(
@@ -389,6 +399,19 @@ test('checkBuiltExports rejects every non-single-level JavaScript chunk artifact
       { recursive: unexpected.includes('/nested/'), force: true },
     );
   }
+});
+
+test('checkBuiltExports rejects a missing fixed distribution artifact', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-missing-dist-file-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFixture(root);
+  await buildDistribution(root);
+  await rm(path.join(root, 'dist', 'plugins', 'index.d.ts'));
+
+  await assert.rejects(
+    checkBuiltExports(root),
+    /dist-check: missing dist artifact plugins\/index\.d\.ts/u,
+  );
 });
 
 test('package exports route every public entry and stylesheet to the normative tree', async () => {
