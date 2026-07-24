@@ -249,7 +249,6 @@ test('five-second path authors one real annotation and closes without disturbing
 
   const existingStory = page.locator('[data-demo-story-tray]');
   const existingStoryControls = existingStory.locator('[data-demo-story-controls]');
-  const initialAnnotations = await page.locator('.hana-annotation').count();
   const open = page.getByRole('button', { name: 'Open Annotation Inspector' });
   const inspector = page.locator('[data-inspector-root]');
 
@@ -262,12 +261,25 @@ test('five-second path authors one real annotation and closes without disturbing
   await selectInspectorWord(page);
   await expect(inspector).toHaveAttribute('data-inspector-state', 'selected');
   await expect(page.getByRole('toolbar', { name: 'Annotation marks' })).toBeVisible();
+  const existingAnnotationIds = await page.locator('.hana-annotation').evaluateAll(
+    (groups) => groups.map((group) => group.getAttribute('data-hana-id')),
+  );
 
   await page.getByRole('button', { name: 'Underline', exact: true }).click();
   await expect(inspector).toHaveAttribute('data-inspector-state', 'editing');
-  await expect.poll(() => page.locator('.hana-annotation').count()).toBe(initialAnnotations + 1);
-  await expect(page.locator('.hana-annotation[data-hana-mark="underline"]:not([hidden])'))
-    .not.toHaveCount(0);
+  const inspectorAnnotationIds = await page.locator('.hana-annotation').evaluateAll(
+    (groups, existingIds) => groups
+      .map((group) => group.getAttribute('data-hana-id'))
+      .filter((id) => !existingIds.includes(id)),
+    existingAnnotationIds,
+  );
+  expect(inspectorAnnotationIds).toHaveLength(1);
+  const [inspectorAnnotationId] = inspectorAnnotationIds;
+  const inspectorAnnotation = page.locator(
+    `.hana-annotation[data-hana-id="${inspectorAnnotationId}"]`,
+  );
+  await expect(inspectorAnnotation).toHaveAttribute('data-hana-mark', 'underline');
+  await expect(inspectorAnnotation).toBeVisible();
 
   await page.getByRole('button', { name: 'Apply annotation' }).click();
   await expect(inspector).toHaveAttribute('data-inspector-state', 'applied');
@@ -285,7 +297,7 @@ test('five-second path authors one real annotation and closes without disturbing
   await page.getByRole('button', { name: 'Exit Inspector' }).click();
   await expect(inspector).toBeHidden();
   await expect(open).toBeFocused();
-  await expect.poll(() => page.locator('.hana-annotation').count()).toBe(initialAnnotations);
+  await expect(inspectorAnnotation).toHaveCount(0);
   expect(await page.evaluate(() => getSelection()?.toString())).toBe(selectedText);
   await expect(existingStoryControls).toBeVisible();
   await expect(existingStory.getByRole('button', { name: 'Play story', exact: true })).toBeEnabled();
