@@ -589,6 +589,7 @@ async function readRegularFileBound(candidate, label, options = {}) {
     throw new Error(`pack-verify: ${label} identity changed`);
   }
 
+  let hasPrimary = false;
   let primary;
   let result;
   try {
@@ -622,22 +623,35 @@ async function readRegularFileBound(candidate, label, options = {}) {
       identity: fileIdentity(opened),
     };
   } catch (error) {
+    hasPrimary = true;
     primary = error;
   }
 
+  let hasCleanup = false;
   let cleanup;
   try {
     await handle.close();
   } catch (error) {
+    hasCleanup = true;
     cleanup = error;
   }
-  if (primary && cleanup) throw combineFailures(primary, cleanup);
-  if (primary) throw primary;
-  if (cleanup) throw cleanup;
+  if (hasPrimary && hasCleanup) throw combineFailures(primary, cleanup);
+  if (hasPrimary) throw primary;
+  if (hasCleanup) throw cleanup;
   return result;
 }
 
 async function verifyBoundOutputFiles(directory, binding, options = {}) {
+  let entries;
+  try {
+    entries = (await readdir(directory)).sort();
+  } catch {
+    throw new Error('pack-verify: output directory entries changed');
+  }
+  const expectedEntries = [binding.filename, 'sha512.txt'].sort();
+  if (JSON.stringify(entries) !== JSON.stringify(expectedEntries)) {
+    throw new Error('pack-verify: output directory entries changed');
+  }
   const artifact = await readRegularFileBound(
     path.join(directory, binding.filename),
     'artifact',
@@ -673,7 +687,7 @@ function assertNoProductionFields(manifest) {
   }
 }
 
-function assertProductionTree(dependencyTree) {
+function assertProductionTree(dependencyTree, expectedIdentity) {
   const dependencies = dependencyTree?.dependencies;
   const rootNames = dependencies && typeof dependencies === 'object'
     ? Object.keys(dependencies)
@@ -694,12 +708,22 @@ function assertProductionTree(dependencyTree) {
       + `dependency-free ${EXPECTED_PACKAGE_NAME}`,
     );
   }
+  if (hanamaru.version !== expectedIdentity.version) {
+    throw new Error('pack-verify: production dependency tree does not match source identity');
+  }
 }
 
 export async function verifyInstalledPackage(artifact, installRoot, options = {}) {
   const execFileImpl = options.execFileImpl ?? execFile;
   const runtimePath = options.execPath ?? process.execPath;
   const invocationOptions = [options.npmCliPath, runtimePath];
+  const expectedIdentity = options.expectedIdentity;
+  if (
+    expectedIdentity?.name !== EXPECTED_PACKAGE_NAME
+    || !isValidSemver(expectedIdentity?.version)
+  ) {
+    throw new Error('pack-verify: expected source package identity is invalid');
+  }
   await writeFile(path.join(installRoot, 'package.json'), JSON.stringify({
     name: 'hanamaru-pack-verification',
     private: true,
@@ -753,10 +777,10 @@ export async function verifyInstalledPackage(artifact, installRoot, options = {}
     throw new Error('pack-verify: installed package manifest could not be read');
   }
   if (
-    installedPackageManifest.name !== EXPECTED_PACKAGE_NAME
-    || !isValidSemver(installedPackageManifest.version)
+    installedPackageManifest.name !== expectedIdentity.name
+    || installedPackageManifest.version !== expectedIdentity.version
   ) {
-    throw new Error('pack-verify: installed package identity is invalid');
+    throw new Error('pack-verify: installed package identity does not match source');
   }
   assertNoProductionFields(installedPackageManifest);
 
@@ -775,8 +799,8 @@ export async function verifyInstalledPackage(artifact, installRoot, options = {}
     }
     const packagePath = fileURLToPath(import.meta.resolve('hanamaru-annotations/package.json'));
     const manifest = JSON.parse(await readFile(packagePath, 'utf8'));
-    assert.equal(manifest.name, 'hanamaru-annotations');
-    assert.equal(typeof manifest.version, 'string');
+    assert.equal(manifest.name, ${JSON.stringify(expectedIdentity.name)});
+    assert.equal(manifest.version, ${JSON.stringify(expectedIdentity.version)});
     for (const field of ${JSON.stringify(FORBIDDEN_PRODUCTION_FIELDS)}) {
       assert.equal(Object.hasOwn(manifest, field), false, field);
     }
@@ -804,7 +828,7 @@ export async function verifyInstalledPackage(artifact, installRoot, options = {}
   } catch {
     throw new Error('pack-verify: production dependency check failed');
   }
-  assertProductionTree(dependencyTree);
+  assertProductionTree(dependencyTree, expectedIdentity);
   const installedManifest = JSON.parse(
     await readFile(path.join(installRoot, 'package.json'), 'utf8'),
   );
@@ -838,6 +862,10 @@ export async function verifyPack(root, outputDirectory, options = {}) {
   await assertOutputDirectoryIdentity(initialOutputIdentity);
 
   const manifest = await readManifest(projectRoot);
+  const sourceIdentity = Object.freeze({
+    name: manifest.name,
+    version: manifest.version,
+  });
   const expectedFilename = cleanFilename(manifest.name, manifest.version);
   safeArtifactPath(initialOutputIdentity.finalPath, expectedFilename);
   const built = await (options.checkBuiltExportsImpl ?? checkBuiltExports)(projectRoot);
@@ -848,7 +876,9 @@ export async function verifyPack(root, outputDirectory, options = {}) {
   });
   let outputIdentity;
   let digestHandle;
+  let hasOperationError = false;
   let operationError;
+  let hasRestorationError = false;
   let restorationError;
   let completed;
   let binding;
@@ -873,7 +903,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
     await assertOutputIdentityImpl(outputIdentity, 'after-digest-open');
 
     const invocation = npmInvocation(
-      ['pack', '--json', '--pack-destination', artifactDirectory],
+      ['pack', '--ignore-scripts', '--json', '--pack-destination', artifactDirectory],
       npmCliPath,
       options.execPath ?? process.execPath,
     );
@@ -892,6 +922,12 @@ export async function verifyPack(root, outputDirectory, options = {}) {
 
     const result = parsePackResult(stdout);
     safeArtifactPath(artifactDirectory, result.filename);
+    if (
+      result.name !== sourceIdentity.name
+      || result.version !== sourceIdentity.version
+    ) {
+      throw new Error('pack-verify: npm pack package identity mismatch');
+    }
     if (result.filename !== expectedFilename) {
       throw new Error(`pack-verify: unexpected tarball filename ${String(result.filename)}`);
     }
@@ -953,6 +989,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
     const rmImpl = options.rmImpl ?? rm;
     const installRoot = await mkdtempImpl(path.join(os.tmpdir(), 'hanamaru-pack-install-'));
     let verification;
+    let hasVerificationError = false;
     let verificationError;
     try {
       await assertOutputIdentityImpl(outputIdentity, 'before-install');
@@ -969,24 +1006,37 @@ export async function verifyPack(root, outputDirectory, options = {}) {
           env: options.env,
           execFileImpl: options.execFileImpl ?? execFile,
           execPath: options.execPath ?? process.execPath,
+          expectedIdentity: sourceIdentity,
           npmCliPath,
         },
       );
+      if (
+        !verification
+        || typeof verification !== 'object'
+        || verification.entries !== Object.keys(PACKAGE_ENTRY_EXPORTS).length
+        || verification.css !== CSS_EXPORTS.length
+        || verification.productionDependencies !== 0
+      ) {
+        throw new Error('pack-verify: install verification returned an invalid result');
+      }
       await assertOutputIdentityImpl(outputIdentity, 'after-install');
     } catch (error) {
+      hasVerificationError = true;
       verificationError = error;
     } finally {
+      let hasCleanupError = false;
       let cleanupError;
       try {
         await rmImpl(installRoot, { recursive: true, force: true });
       } catch (error) {
+        hasCleanupError = true;
         cleanupError = error;
       }
-      if (verificationError && cleanupError) {
+      if (hasVerificationError && hasCleanupError) {
         throw combineFailures(verificationError, cleanupError);
       }
-      if (verificationError) throw verificationError;
-      if (cleanupError) throw cleanupError;
+      if (hasVerificationError) throw verificationError;
+      if (hasCleanupError) throw cleanupError;
     }
     await assertOutputIdentityImpl(outputIdentity, 'before-return');
     await verifyBoundOutputFiles(artifactDirectory, binding, { openImpl });
@@ -1000,30 +1050,34 @@ export async function verifyPack(root, outputDirectory, options = {}) {
       verification,
     };
   } catch (error) {
+    hasOperationError = true;
     operationError = error;
   } finally {
     try {
       await digestHandle?.close();
     } catch (error) {
-      operationError = operationError
+      operationError = hasOperationError
         ? combineFailures(operationError, error)
         : error;
+      hasOperationError = true;
     }
     if (outputIdentity) {
-      if (!operationError && binding) {
+      if (!hasOperationError && binding) {
         try {
           await assertOutputIdentityImpl(outputIdentity, 'before-restore');
           await verifyBoundOutputFiles(outputIdentity.path, binding, { openImpl });
         } catch (error) {
+          hasOperationError = true;
           operationError = error;
         }
       }
       try {
-        await restoreOutputDirectory(outputIdentity);
+        await (options.restoreOutputImpl ?? restoreOutputDirectory)(outputIdentity);
       } catch (error) {
+        hasRestorationError = true;
         restorationError = error;
       }
-      if (!operationError && !restorationError && binding) {
+      if (!hasOperationError && !hasRestorationError && binding) {
         const restoredIdentity = Object.freeze({
           ...outputIdentity,
           path: outputIdentity.finalPath,
@@ -1032,17 +1086,18 @@ export async function verifyPack(root, outputDirectory, options = {}) {
           await assertOutputIdentityImpl(restoredIdentity, 'after-restore');
           await verifyBoundOutputFiles(restoredIdentity.path, binding, { openImpl });
         } catch (error) {
+          hasOperationError = true;
           operationError = error;
         }
       }
     }
   }
 
-  if (operationError && restorationError) {
+  if (hasOperationError && hasRestorationError) {
     throw combineFailures(operationError, restorationError);
   }
-  if (operationError) throw operationError;
-  if (restorationError) throw restorationError;
+  if (hasOperationError) throw operationError;
+  if (hasRestorationError) throw restorationError;
   return completed;
 }
 

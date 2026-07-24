@@ -57,6 +57,10 @@ const ARTIFACT_BYTES = Buffer.from('fixture tarball bytes');
 const ARTIFACT_INTEGRITY = `sha512-${
   createHash('sha512').update(ARTIFACT_BYTES).digest('base64')
 }`;
+const SOURCE_IDENTITY = Object.freeze({
+  name: 'hanamaru-annotations',
+  version: '0.1.0',
+});
 
 function tarString(header, offset, length, value) {
   Buffer.from(value).copy(header, offset, 0, length);
@@ -152,6 +156,8 @@ function packJson(overrides = {}) {
       filename: 'hanamaru-annotations-0.1.0.tgz',
       files: PACK_FILES.map((file) => ({ path: file })),
       integrity: ARTIFACT_INTEGRITY,
+      name: 'hanamaru-annotations',
+      version: '0.1.0',
       ...overrides,
     },
   ]);
@@ -553,6 +559,7 @@ test('verifyPack packs exactly once to the canonical external directory', async 
   assert.equal(path.basename(calls[0].args[0]), 'npm-cli.js');
   assert.deepEqual(calls[0].args.slice(1, -1), [
     'pack',
+    '--ignore-scripts',
     '--json',
     '--pack-destination',
   ]);
@@ -849,7 +856,7 @@ test('verifyPack binds install and return verification to exact artifact identit
             : 'sha512.txt';
           const target = path.join(identity.path, filename);
           if (mutation.replacement) {
-            await rename(target, `${target}.original`);
+            await rename(target, path.join(root, `${filename}.original`));
           }
           await writeFile(target, `mutated ${mutation.target}`);
         };
@@ -875,6 +882,85 @@ test('verifyPack binds install and return verification to exact artifact identit
         );
       },
     );
+  }
+});
+
+test('verifyPack seals every final output directory stage to two expected files', async (t) => {
+  for (const scenario of [
+    { phase: 'during-pack', type: 'regular' },
+    { phase: 'before-install', type: 'tgz' },
+    { phase: 'before-return', type: 'symlink' },
+    { phase: 'before-return', type: 'nested-secret' },
+    { phase: 'after-restore', type: 'secret' },
+  ]) {
+    await t.test(`${scenario.phase} ${scenario.type}`, async (child) => {
+      const { output, root } = await fixture(child);
+      const calls = [];
+      let installCalls = 0;
+      let added = false;
+      const addExtra = async (directory) => {
+        if (added) return;
+        added = true;
+        if (scenario.type === 'tgz') {
+          await writeFile(path.join(directory, 'unexpected-1.0.0.tgz'), 'extra tarball');
+        } else if (scenario.type === 'symlink') {
+          await symlink(path.join(root, 'package.json'), path.join(directory, 'extra-link'));
+        } else if (scenario.type === 'nested-secret') {
+          await mkdir(path.join(directory, 'nested'));
+          await writeFile(path.join(directory, 'nested', 'secret.pem'), 'secret');
+        } else {
+          await writeFile(
+            path.join(directory, scenario.type === 'secret' ? '.env' : 'extra.txt'),
+            'unexpected',
+          );
+        }
+      };
+      const assertOutputIdentityImpl = async (identity, phase) => {
+        const currentPath = await realpath(identity.path);
+        const current = await stat(identity.path);
+        if (
+          currentPath !== identity.path
+          || current.dev !== identity.dev
+          || current.ino !== identity.ino
+        ) {
+          throw new Error('pack-verify: output directory identity changed');
+        }
+        if (phase === scenario.phase) await addExtra(identity.path);
+      };
+      const overrides = {
+        assertOutputIdentityImpl,
+        verifyInstallImpl: async (artifact, installRoot) => {
+          installCalls += 1;
+          assert.equal(path.dirname(artifact), installRoot);
+          assert.deepEqual(await readFile(artifact), ARTIFACT_BYTES);
+          return { entries: 9, css: 2, productionDependencies: 0 };
+        },
+      };
+      if (scenario.phase === 'during-pack') {
+        overrides.execFileImpl = (file, args, execOptions, callback) => {
+          calls.push({ args, file, options: execOptions });
+          void (async () => {
+            const destination = args.at(-1);
+            await writeFile(
+              path.join(destination, 'hanamaru-annotations-0.1.0.tgz'),
+              ARTIFACT_BYTES,
+            );
+            await addExtra(destination);
+            callback(null, packJson(), '');
+          })().catch(callback);
+        };
+      }
+
+      await assert.rejects(
+        verifyPack(root, output, successfulOptions(output, calls, overrides)),
+        /pack-verify: output directory entries changed/u,
+      );
+      assert.equal(calls.length, 1);
+      assert.equal(
+        installCalls,
+        ['during-pack', 'before-install'].includes(scenario.phase) ? 0 : 1,
+      );
+    });
   }
 });
 
@@ -963,6 +1049,26 @@ test('verifyPack rejects wrong filenames and multiple npm pack results', async (
       'NUL filename',
       packJson({ filename: 'hanamaru-annotations-0.1.0.tgz\0escape' }),
       /pack-verify: npm pack returned an unsafe tarball filename/u,
+    ],
+    [
+      'missing name metadata',
+      packJson({ name: undefined }),
+      /pack-verify: npm pack package identity mismatch/u,
+    ],
+    [
+      'wrong name metadata',
+      packJson({ name: 'other-package' }),
+      /pack-verify: npm pack package identity mismatch/u,
+    ],
+    [
+      'missing version metadata',
+      packJson({ version: undefined }),
+      /pack-verify: npm pack package identity mismatch/u,
+    ],
+    [
+      'wrong version metadata',
+      packJson({ version: '0.1.1' }),
+      /pack-verify: npm pack package identity mismatch/u,
     ],
     [
       'multiple results',
@@ -1127,6 +1233,102 @@ test('verifyPack preserves primary failures when artifact close or install clean
     );
     assert.equal(calls.length, 1);
   });
+
+  await t.test('falsy artifact read plus falsy close', async (child) => {
+    const { output, root } = await fixture(child);
+    const calls = [];
+    const openImpl = async (candidate, flags, mode) => {
+      const handle = await open(candidate, flags, mode);
+      if (!candidate.endsWith('.tgz')) return handle;
+      return {
+        close: async () => {
+          await handle.close();
+          throw false;
+        },
+        readFile: async () => {
+          throw undefined;
+        },
+        stat: (...args) => handle.stat(...args),
+      };
+    };
+    await assert.rejects(
+      verifyPack(root, output, successfulOptions(output, calls, { openImpl })),
+      (error) => (
+        error instanceof AggregateError
+        && error.errors.length === 2
+        && error.errors[0] === undefined
+        && error.errors[1] === false
+      ),
+    );
+  });
+
+  await t.test('falsy install primary plus falsy cleanup', async (child) => {
+    const { container, output, root } = await fixture(child);
+    const calls = [];
+    const installRoot = path.join(container, 'falsy-install-root');
+    await mkdir(installRoot);
+    await assert.rejects(
+      verifyPack(
+        root,
+        output,
+        successfulOptions(output, calls, {
+          mkdtempImpl: async () => installRoot,
+          rmImpl: async () => {
+            throw false;
+          },
+          verifyInstallImpl: async () => {
+            throw 0;
+          },
+        }),
+      ),
+      (error) => (
+        error instanceof AggregateError
+        && error.errors.length === 2
+        && error.errors[0] === 0
+        && error.errors[1] === false
+      ),
+    );
+  });
+
+  await t.test('falsy operation plus falsy restoration', async (child) => {
+    const { output, root } = await fixture(child);
+    const calls = [];
+    await assert.rejects(
+      verifyPack(
+        root,
+        output,
+        successfulOptions(output, calls, {
+          restoreOutputImpl: async () => {
+            throw null;
+          },
+          verifyInstallImpl: async () => {
+            throw undefined;
+          },
+        }),
+      ),
+      (error) => (
+        error instanceof AggregateError
+        && error.errors.length === 2
+        && error.errors[0] === undefined
+        && error.errors[1] === null
+      ),
+    );
+  });
+
+  await t.test('undefined verification result is not success', async (child) => {
+    const { output, root } = await fixture(child);
+    const calls = [];
+    await assert.rejects(
+      verifyPack(
+        root,
+        output,
+        successfulOptions(output, calls, {
+          verifyInstallImpl: async () => undefined,
+        }),
+      ),
+      /pack-verify: install verification returned an invalid result/u,
+    );
+  });
 });
 
 test('installed verifier rejects every production dependency field even when empty', async (t) => {
@@ -1146,12 +1348,54 @@ test('installed verifier rejects every production dependency field even when emp
             packedManifest: { [field]: field.includes('bundle') ? [] : {} },
           }),
           execPath: '/verified/node',
+          expectedIdentity: SOURCE_IDENTITY,
           npmCliPath: '/verified/npm-cli.js',
         }),
         new RegExp(
           `pack-verify: installed package declares forbidden production field ${field}`,
           'u',
         ),
+      );
+    });
+  }
+});
+
+test('installed verifier binds installed manifest and production tree to source identity', async (t) => {
+  for (const [name, options, pattern] of [
+    [
+      'manifest name',
+      { packedManifest: { name: 'other-package' } },
+      /pack-verify: installed package identity does not match source/u,
+    ],
+    [
+      'manifest version',
+      { packedManifest: { version: '0.1.1' } },
+      /pack-verify: installed package identity does not match source/u,
+    ],
+    [
+      'tree version',
+      {
+        productionTree: {
+          dependencies: {
+            'hanamaru-annotations': { version: '0.1.1' },
+          },
+        },
+      },
+      /pack-verify: production dependency tree does not match source identity/u,
+    ],
+  ]) {
+    await t.test(name, async (child) => {
+      const installRoot = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-identity-check-'));
+      child.after(() => rm(installRoot, { recursive: true, force: true }));
+      const calls = [];
+      await assert.rejects(
+        verifyInstalledPackage('/artifacts/hanamaru-annotations-0.1.0.tgz', installRoot, {
+          execFileImpl: installedVerifierExec(installRoot, calls, options),
+          execPath: '/verified/node',
+          expectedIdentity: SOURCE_IDENTITY,
+          npmCliPath: '/verified/npm-cli.js',
+        }),
+        pattern,
       );
     });
   }
@@ -1191,6 +1435,7 @@ test('installed verifier requires exactly one dependency-free Hanamaru productio
         verifyInstalledPackage('/artifacts/hanamaru-annotations-0.1.0.tgz', installRoot, {
           execFileImpl: installedVerifierExec(installRoot, calls, { productionTree }),
           execPath: '/verified/node',
+          expectedIdentity: SOURCE_IDENTITY,
           npmCliPath: '/verified/npm-cli.js',
         }),
         /pack-verify: production dependency tree must contain only dependency-free hanamaru-annotations/u,
@@ -1207,6 +1452,7 @@ test('installed verifier uses one explicit runtime and separates prod package fr
   const result = await verifyInstalledPackage(artifact, installRoot, {
     execFileImpl: installedVerifierExec(installRoot, calls),
     execPath: '/verified/node',
+    expectedIdentity: SOURCE_IDENTITY,
     npmCliPath: '/verified/npm-cli.js',
   });
   assert.deepEqual(result, {
@@ -1272,6 +1518,21 @@ test('real pack integration builds, packs, installs, resolves, and verifies exte
     for (const file of ['package.json', 'README.md', 'LICENSE']) {
       await cp(path.join(PROJECT_ROOT, file), path.join(fixtureRoot, file));
     }
+    const fixtureManifestPath = path.join(fixtureRoot, 'package.json');
+    const fixtureManifest = JSON.parse(await readFile(fixtureManifestPath, 'utf8'));
+    fixtureManifest.scripts = {
+      ...fixtureManifest.scripts,
+      prepack: 'node prepack-mutation.cjs',
+    };
+    await writeFile(fixtureManifestPath, JSON.stringify(fixtureManifest, null, 2));
+    await writeFile(path.join(fixtureRoot, 'prepack-mutation.cjs'), `
+      const fs = require('node:fs');
+      const manifest = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+      manifest.version = '9.9.9';
+      fs.writeFileSync('package.json', JSON.stringify(manifest, null, 2));
+      fs.appendFileSync('dist/hanamaru.css', '\\n/* prepack mutation */\\n');
+      fs.writeFileSync('prepack-sentinel', 'ran');
+    `);
     for (const directory of ['src', 'types']) {
       await cp(
         path.join(PROJECT_ROOT, directory),
@@ -1281,8 +1542,24 @@ test('real pack integration builds, packs, installs, resolves, and verifies exte
     }
     await symlink(path.join(PROJECT_ROOT, 'node_modules'), path.join(fixtureRoot, 'node_modules'));
     await buildDistribution(fixtureRoot);
+    const manifestBeforePack = await readFile(fixtureManifestPath, 'utf8');
+    const cssPath = path.join(fixtureRoot, 'dist', 'hanamaru.css');
+    const cssBeforePack = await readFile(cssPath);
+    let realPackCalls = 0;
 
-    const result = await verifyPack(fixtureRoot, output);
+    const result = await verifyPack(fixtureRoot, output, {
+      execFileImpl(file, args, options, callback) {
+        if (args[1] === 'pack') realPackCalls += 1;
+        execFile(file, args, options, callback);
+      },
+    });
+    assert.equal(realPackCalls, 1);
+    assert.equal(
+      await access(path.join(fixtureRoot, 'prepack-sentinel')).then(() => true, () => false),
+      false,
+    );
+    assert.equal(await readFile(fixtureManifestPath, 'utf8'), manifestBeforePack);
+    assert.deepEqual(await readFile(cssPath), cssBeforePack);
     assert.equal(path.basename(result.artifact), 'hanamaru-annotations-0.1.0.tgz');
     assert.equal(result.fileCount, 33);
     assert.deepEqual(result.verification, {
