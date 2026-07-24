@@ -13,6 +13,8 @@ import {
   type SerializedStory,
   type SerializedTarget,
 } from 'hanamaru-annotations/serialize'
+// @ts-expect-error AnnotationOptions belongs to the root package entry
+import type { AnnotationOptions } from 'hanamaru-annotations/serialize'
 
 declare const annotation: AnnotationController
 declare const walkthrough: StoryController
@@ -84,3 +86,4 @@ void resolved
 void narrow
 void wrongSchema
 void wrongWithin
+void (null as unknown as AnnotationOptions)

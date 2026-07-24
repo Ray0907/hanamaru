@@ -4,25 +4,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
+import { orderTypeFixtures } from './fixtures.mjs';
+
 const testsDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(testsDirectory, '..', '..');
-const discoveredFixtures = new Set((await readdir(testsDirectory))
+const discoveredFixtures = (await readdir(testsDirectory))
   .filter((name) => name.endsWith('.ts') || name.endsWith('.tsx'))
-);
-const fixtureNames = [
-  'main.ts',
-  'selection.ts',
-  'group.ts',
-  'plugins.ts',
-  'serialize.ts',
-  'shadow.ts',
-  'adapters.tsx',
-].filter((name) => discoveredFixtures.delete(name));
-fixtureNames.push(...[...discoveredFixtures].sort());
-
-if (fixtureNames.length === 0) {
-  throw new Error('type contract runner requires at least one fixture');
-}
+;
+const fixtureNames = orderTypeFixtures(discoveredFixtures);
 
 const declarationPaths = {
   'hanamaru-annotations': ['types/index.d.ts'],

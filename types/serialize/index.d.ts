@@ -1,6 +1,5 @@
 import type {
   AnnotationController,
-  AnnotationOptions,
   MarkName,
   Motion,
   Placement,
@@ -189,5 +188,3 @@ export function resolveSerializedTarget(
   target: SerializedTarget,
   context?: ResolveSerializedTargetContext,
 ): Element | Range
-
-export type { AnnotationOptions }
