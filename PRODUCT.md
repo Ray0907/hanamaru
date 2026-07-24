@@ -6,6 +6,10 @@
 
 web
 
+## Release Status
+
+Hanamaru `0.1.0` is implemented as a typed, modular release candidate. The repository includes the complete runtime, optional ESM subpaths, declarations, Inspector, documentation, independent package verification, and least-privilege CI/release workflows. Public GitHub/npm availability remains a publication step, not a claim made by the prepared source tree.
+
 ## Users
 
 Hanamaru primarily serves frontend developers building landing pages, documentation, tutorials, product education, and editorial experiences. They want to emphasize or explain live DOM content without hand-positioning decorative SVGs or adopting a framework.
@@ -26,23 +30,26 @@ Unlike a visual CSS snippet collection, Hanamaru owns target resolution, measure
 
 ## Operating Context
 
-Developers evaluate Hanamaru in a repository README and proof-led demo, then consume the locally built ESM or browser-ready assets. A later publication may add npm/CDN distribution, but V1 makes no registry-availability claim. Developers use it on ordinary framework-free HTML as well as framework-rendered DOM, while the runtime itself has no framework dependency.
+Developers evaluate Hanamaru in a repository README and proof-led demo, use the Annotation Inspector on real text, then consume the package through its core or optional ESM exports. The prepared npm package is `hanamaru-annotations@0.1.0`; a version-pinned CDN example points directly at published `dist` ESM/CSS files without inventing UMD behavior. Until the publication task succeeds, documentation describes these as release instructions rather than registry-availability evidence.
 
-Annotations appear on responsive prose, headings, controls, and inline content. Authors may trigger them manually, on load, or when content enters the viewport.
+Annotations appear on responsive prose, headings, controls, inline content, native Ranges, and explicitly scoped Shadow DOM. Authors may trigger core annotations manually, on load, or when content enters the viewport. React, Vue, and Svelte adapters own manual Annotation lifecycle only.
 
 ## Capabilities and Constraints
 
-- V1 targets DOM elements, CSS selectors, `Range` objects, and scoped exact-text locators.
-- V1 marks are underline, highlight, circle, box, strike, and bracket.
+- `0.1.0` targets DOM elements, CSS selectors, `Range` objects, and scoped exact-text locators.
+- The six built-in marks are underline, highlight, circle, box, strike, and bracket.
 - Notes connect to targets with an arrow and automatic top/right/bottom/left placement.
 - Stories support ordered playback, pause, resume, replay, cancellation, and completion state.
 - Public entry points are data attributes, JavaScript functions, and JSON-compatible story definitions.
 - The runtime redraws after relevant resize, scroll, and scoped content changes.
-- The runtime ships with zero production dependencies as ESM plus browser-ready JavaScript and CSS.
-- The local package name is `hanamaru-annotations`; package publication is outside V1.
-- Each complete ESM-plus-base-CSS and IIFE-plus-base-CSS distribution must be at most 20,480 bytes under gzip level 9. A combined 18,432-byte target is reported as a non-blocking stretch goal.
-- V1 excludes browser extensions, arbitrary-site persistence, accounts, cloud sync, collaboration, framework wrappers, image/canvas annotation, and AI or QA rule engines.
-- `Hanamaru` is the working brand. Package publication and registry naming are outside the local implementation scope.
+- Selection, Group, plugins, and serialization are implemented as optional subpaths over one shared singleton.
+- Shadow DOM support uses an explicit exact-root scope with open and retained-closed roots, no implicit deep traversal, and CSP-aware style ownership.
+- React, Vue, and Svelte adapters are thin optional-peer lifecycle bindings with no duplicate renderer or runtime.
+- The Annotation Inspector converts real selections into marks and honest HTML/JavaScript/versioned-JSON output without mutating article text.
+- The runtime ships with zero production dependencies as split ESM, a self-contained core IIFE, base/Shadow CSS, and declarations for every public entry.
+- Schema-v2 size checks enforce closure-specific hard caps: main ESM 28,672 bytes, IIFE 24,576 bytes, and separate 3,072–21,504-byte optional budgets under gzip level 9.
+- Accounts, cloud sync, collaboration, arbitrary-site persistence, browser extensions, image/canvas/freehand annotation, drag-position editing, and AI/QA rule engines remain outside `0.1.0`.
+- `Hanamaru` is the release brand and `hanamaru-annotations` is the package name.
 
 ## Brand Commitments
 
@@ -55,7 +62,8 @@ The approved primary call to action is **Open Live Playground**.
 - The user referenced Neat Annotations and Rough Notation as neighboring open-source projects.
 - Product-direction, ecosystem, first-principles, and runtime-experience mockups exist in the ignored `.superpowers/brainstorm/` workspace.
 - An Impeccable critique snapshot exists in the ignored `.impeccable/critique/` workspace and scored the concept 22/36, with four P1 findings accepted into V1.
-- A bundle audit measured the implemented annotation runtime at roughly 14.2 KB combined and projected the complete V1 artifact at 16.7–19.6 KB; even an Element-only build without observers was roughly 9.17 KB. This disproved the original 8 KiB ceiling, which would require cutting roughly 43% of the implemented runtime; the replacement budget measures the complete shipped artifact instead of preserving an estimate by deleting promised behavior.
+- The current schema-v2 report measures the complete main ESM closure at 28,156 gzip bytes and the core IIFE closure at 24,069; both pass their release hard caps. Every optional closure also passes its dedicated hard cap. This replaces historical estimates with reproducible graph-aware measurements.
+- Automated suites cover unit/type/build/package contracts, full Chromium behavior, Firefox/WebKit smoke, and isolated framework endpoints. Real-Chrome Inspector evidence covers desktop and 390-pixel mobile states, keyboard operation, reduced motion, bounds, focus return, and horizontal overflow.
 - There are no production users, testimonials, benchmarks, published package metrics, or customer claims. Future surfaces must not fabricate them.
 
 ## Product Principles

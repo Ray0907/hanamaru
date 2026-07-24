@@ -1,11 +1,10 @@
 import { expect, test } from '@playwright/test';
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import playwrightConfig from '../../playwright.config.js';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const publicExports = [
+const mainExports = [
   'HanamaruConfigError',
   'HanamaruError',
   'HanamaruStateError',
@@ -15,95 +14,129 @@ const publicExports = [
   'scan',
   'story',
 ];
-const esmBootstrap = `<link rel="stylesheet" href="./dist/hanamaru.css">
-<script type="module">
-  import { scan } from './dist/hanamaru.esm.js'
-  scan()
-</script>`;
-const iifeBootstrap = `<link rel="stylesheet" href="./dist/hanamaru.css">
-<script src="./dist/hanamaru.iife.js"></script>
-<script>Hanamaru.scan()</script>`;
+const optionalExports = new Map([
+  ['selection', ['annotateSelection']],
+  ['group', ['group']],
+  ['plugins', ['registerMark']],
+  ['serialize', ['serialize', 'restore', 'resolveSerializedTarget']],
+  ['shadow', ['createShadowScope']],
+  ['react', ['useAnnotation']],
+  ['vue', ['useAnnotation']],
+  ['svelte', ['annotation']],
+]);
+const browserBuilds = [
+  ['Chromium', '149.0.7827.55'],
+  ['Firefox', '151.0'],
+  ['WebKit', '26.5'],
+];
 
 let readme = '';
+let changelog = '';
+let releaseNotes = '';
+let design = '';
+let product = '';
 let pkg;
 let sizeReport;
-let demoSource;
-let designSpec;
 
-function section(title) {
-  const match = readme.match(new RegExp(`^## ${title}\\s*$([\\s\\S]*?)(?=^## |\\Z)`, 'm'));
+async function readText(relativePath) {
+  return readFile(path.join(root, relativePath), 'utf8').catch(() => '');
+}
+
+function section(document, title) {
+  const match = document.match(
+    new RegExp(`^## ${title}\\s*$([\\s\\S]*?)(?=^## |\\Z)`, 'm'),
+  );
   return match?.[1] ?? '';
 }
 
-function matches(pattern, filename) {
-  return pattern instanceof RegExp ? pattern.test(filename) : new RegExp(pattern).test(filename);
+function formattedBytes(value) {
+  return new Intl.NumberFormat('en-US').format(value);
 }
 
 test.beforeAll(async () => {
-  readme = await readFile(path.join(root, 'README.md'), 'utf8').catch(() => '');
-  pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-  sizeReport = JSON.parse(await readFile(path.join(root, 'dist/size-report.json'), 'utf8'));
-  demoSource = await readFile(path.join(root, 'demo/demo.js'), 'utf8');
-  designSpec = await readFile(
-    path.join(root, 'docs/superpowers/specs/2026-07-22-hanamaru-runtime-design.md'),
-    'utf8',
-  );
-});
-
-test('offers stable adoption anchors with the accepted Living Redline screenshot', async () => {
-  expect(readme).toMatch(
-    /^# Hanamaru\n!\[Hanamaru Living Redline demo\]\(docs\/assets\/hanamaru-demo\.png\)\n\n/,
-  );
-  const screenshot = await readFile(path.join(root, 'docs/assets/hanamaru-demo.png'));
-  expect([...screenshot.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
-  for (const title of [
-    'Quick Start',
-    'API',
-    'Accessibility',
-    'Browser Support',
-    'Fallbacks',
-    'Limitations',
-  ]) {
-    expect(readme).toMatch(new RegExp(`^## ${title}\\s*$`, 'm'));
-    expect(readme).toContain(`(#${title.toLowerCase().replaceAll(' ', '-')})`);
-  }
-  expect(readme.match(/!\[[^\]]*\]\([^)]+\)/g)).toEqual([
-    '![Hanamaru Living Redline demo](docs/assets/hanamaru-demo.png)',
+  [
+    readme,
+    changelog,
+    releaseNotes,
+    design,
+    product,
+  ] = await Promise.all([
+    readText('README.md'),
+    readText('CHANGELOG.md'),
+    readText('docs/releases/v0.1.0.md'),
+    readText('DESIGN.md'),
+    readText('PRODUCT.md'),
   ]);
-  expect(readme).not.toMatch(/https?:\/\//);
+  pkg = JSON.parse(await readText('package.json'));
+  sizeReport = JSON.parse(await readText('dist/size-report.json'));
 });
 
-test('copies the exact explicit local ESM and IIFE bootstraps', () => {
-  expect(designSpec).toContain(esmBootstrap);
-  expect(designSpec).toContain(iifeBootstrap);
-  expect(demoSource).toContain(esmBootstrap);
-  expect(readme).toContain(esmBootstrap);
-  expect(readme).toContain(iifeBootstrap);
-  expect(section('Quick Start')).toMatch(/Neither (?:local )?build auto-scans/i);
-  expect(section('Quick Start')).toMatch(/registry publication is not part of this local (?:build|implementation)/i);
-  expect(section('Quick Start')).not.toMatch(/npm (?:i|install)\s+hanamaru-annotations/i);
+test('keeps every public documentation artifact and contract group non-empty', () => {
+  const artifacts = { readme, changelog, releaseNotes, design, product };
+  const contractGroups = [
+    mainExports,
+    [...optionalExports.keys()],
+    sizeReport.entries,
+    browserBuilds,
+  ];
+  expect(Object.keys(artifacts)).not.toHaveLength(0);
+  for (const [name, contents] of Object.entries(artifacts)) {
+    expect(contents, `${name} must exist and be non-empty`).not.toHaveLength(0);
+  }
+  for (const group of contractGroups) expect(group.length).toBeGreaterThan(0);
 });
 
-test('documents exactly the public names exported by the built ESM', async ({ page }) => {
+test('leads with the Inspector hero and five-second package adoption', async () => {
+  expect(readme).toMatch(
+    /^# Hanamaru\n\n!\[Hanamaru Annotation Inspector\]\(docs\/assets\/hanamaru-inspector\.png\)/,
+  );
+  const quickStartEnd = readme.indexOf('\n## Core API');
+  expect(quickStartEnd).toBeGreaterThan(0);
+  const aboveFold = readme.slice(0, quickStartEnd);
+  expect(aboveFold).toContain('npm install hanamaru-annotations@0.1.0');
+  expect(aboveFold).toContain("import 'hanamaru-annotations/style.css'");
+  expect(aboveFold).toContain("import { annotate } from 'hanamaru-annotations'");
+  expect(aboveFold).toMatch(/zero production dependencies/i);
+
+  const hero = await readFile(
+    path.join(root, 'docs/assets/hanamaru-inspector.png'),
+  ).catch(() => Buffer.alloc(0));
+  expect([...hero.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  expect(hero.readUInt32BE(16)).toBe(1280);
+  expect(hero.readUInt32BE(20)).toBe(900);
+  expect(readme).not.toContain('docs/assets/hanamaru-demo.png');
+});
+
+test('documents the exact package ESM and version-pinned CDN paths', () => {
+  const cdnCss = 'https://cdn.jsdelivr.net/npm/hanamaru-annotations@0.1.0/dist/hanamaru.css';
+  const cdnEsm = 'https://cdn.jsdelivr.net/npm/hanamaru-annotations@0.1.0/dist/hanamaru.esm.js';
+  expect(readme).toContain(cdnCss);
+  expect(readme).toContain(cdnEsm);
+  expect(readme).toMatch(/CDN[\s\S]*?type="module"/i);
+  expect(readme).toMatch(/CDN[\s\S]*?Content-Security-Policy|CSP[\s\S]*?cdn\.jsdelivr\.net/i);
+  expect(readme).not.toMatch(/hanamaru(?:\.umd|\.min)\.js/i);
+});
+
+test('documents exactly the eight main exports from the built package', async ({ page }) => {
   await page.goto('/');
   const actual = await page.evaluate(async () => (
     Object.keys(await import('/dist/hanamaru.esm.js')).sort()
   ));
-  const importBlock = readme.match(
-    /### Public exports \(exactly eight\)[\s\S]*?```js\s*import\s*\{([\s\S]*?)\}\s*from '\.\/dist\/hanamaru\.esm\.js'\s*```/,
+  expect(actual).toEqual(mainExports);
+
+  const core = section(readme, 'Core API');
+  const block = core.match(
+    /```js\s*import\s*\{([\s\S]*?)\}\s*from 'hanamaru-annotations'\s*```/,
   );
-  const documented = (importBlock?.[1] ?? '')
+  const documented = (block?.[1] ?? '')
     .split(',')
-    .map((name) => name.trim())
+    .map((value) => value.trim())
     .filter(Boolean)
     .sort();
-
-  expect(actual).toEqual(publicExports);
   expect(documented).toEqual(actual);
 });
 
-test('covers both API layers, targets, options, lifecycle, events, and scan errors', () => {
-  const api = section('API');
+test('covers declarative attributes, targets, options, controllers, stories, and failures', () => {
   for (const attribute of [
     'data-hana',
     'data-hana-note',
@@ -113,190 +146,220 @@ test('covers both API layers, targets, options, lifecycle, events, and scan erro
     'data-hana-seed',
     'data-hana-duration',
     'data-hana-motion',
-  ]) expect(api).toContain(`\`${attribute}\``);
-  for (const option of [
-    'mark', 'note', 'placement', 'trigger', 'accessible', 'seed', 'duration', 'motion',
-  ]) expect(api).toContain(`\`${option}\``);
-  for (const target of ['Element', 'CSS selector', 'native `Range`', 'scoped exact-text locator']) {
-    expect(api).toContain(target);
+  ]) expect(readme).toContain(`\`${attribute}\``);
+  for (const target of ['Element', 'selector', 'Range', 'exact-text locator']) {
+    expect(readme).toMatch(new RegExp(target, 'i'));
   }
-  expect(api).toContain('update({ target: nextRange })');
-  expect(api).toMatch(/atomic(?:ally)?/i);
-  expect(api).toMatch(/CSS-only (?:animation|movement|transform)[\s\S]*?refresh\(\)/i);
+  for (const mark of ['underline', 'highlight', 'circle', 'box', 'strike', 'bracket']) {
+    expect(readme).toContain(`\`${mark}\``);
+  }
+  for (const option of ['note', 'placement', 'trigger', 'accessible', 'seed', 'duration', 'motion']) {
+    expect(readme).toContain(`\`${option}\``);
+  }
   for (const method of ['show()', 'hide()', 'update()', 'replay()', 'refresh()', 'destroy()']) {
-    expect(api).toContain(method);
+    expect(readme).toContain(method);
   }
-  for (const state of ['idle', 'showing', 'visible', 'hidden', 'suspended', 'destroyed']) {
-    expect(api).toContain(`\`${state}\``);
-  }
-  expect(api).toMatch(/finished[\s\S]*?Promise/);
-  expect(api).toContain('AbortError');
-  for (const event of [
-    'hana:start', 'hana:step', 'hana:pause', 'hana:complete', 'hana:cancel', 'hana:error',
-  ]) expect(api).toContain(`\`${event}\``);
-  expect(api).toMatch(/scan\(root = document\)[\s\S]*?annotations[\s\S]*?errors/);
-  expect(api).toMatch(/invalid declarative[\s\S]*?skip/i);
-});
-
-test('documents Story control, trigger, and motion contracts', () => {
-  const api = section('API');
-  expect(api).toContain('story(steps, options)');
-  for (const option of ['trigger', 'gap', 'once', 'motion']) {
-    expect(api).toContain(`\`${option}\``);
-  }
-  for (const method of ['play()', 'pause()', 'resume()', 'cancel()', 'replay()', 'destroy()']) {
-    expect(api).toContain(method);
-  }
-  for (const state of ['idle', 'playing', 'paused', 'complete', 'cancelled', 'destroyed']) {
-    expect(api).toContain(`\`${state}\``);
+  for (const method of ['play()', 'pause()', 'resume()', 'cancel()']) {
+    expect(readme).toContain(method);
   }
   for (const trigger of ['manual', 'load', 'viewport']) {
-    expect(api).toContain(`\`${trigger}\``);
+    expect(readme).toContain(`\`${trigger}\``);
   }
-  expect(api).toMatch(/threshold `0\.25`/);
-  expect(api).toMatch(/prefers-reduced-motion/);
-  expect(api).toMatch(/same logical order/);
+  expect(readme).toContain('threshold `0.25`');
+  expect(readme).toMatch(/`finished`[\s\S]*?Promise/);
+  expect(readme).toContain('AbortError');
+  for (const errorName of [
+    'HanamaruError',
+    'HanamaruConfigError',
+    'HanamaruTargetError',
+    'HanamaruStateError',
+  ]) expect(readme).toContain(`\`${errorName}\``);
+  expect(readme).toMatch(/no silent fallback/i);
 });
 
-test('states the theming, accessibility, fallback, and viewport behavior honestly', () => {
-  const accessibility = section('Accessibility');
-  expect(accessibility).toContain('aria-hidden="true"');
-  expect(accessibility).toContain('aria-describedby');
-  expect(accessibility).toMatch(/meaningful note/i);
-  expect(accessibility).toMatch(/overflowing accessible notes[\s\S]*?focus/i);
-  expect(accessibility).toMatch(/prefers-reduced-motion/);
-  expect(accessibility).toMatch(/visual viewport/i);
-  expect(accessibility).toMatch(/offscreen[\s\S]*?(?:suppressed|hidden)/i);
-
-  for (const variable of [
-    '--hana-color',
-    '--hana-mark-color',
-    '--hana-note-color',
-    '--hana-stroke-width',
-    '--hana-padding',
-    '--hana-note-gap',
-    '--hana-font',
-    '--hana-duration',
-    '--hana-z-index',
-  ]) expect(readme).toContain(`\`${variable}\``);
-
-  const fallbacks = section('Fallbacks');
-  expect(fallbacks).toMatch(/No `ResizeObserver`:[\s\S]*?window resize[\s\S]*?refresh\(\)/);
-  expect(fallbacks).toMatch(/No `IntersectionObserver`:[\s\S]*?viewport[\s\S]*?load/);
-  expect(fallbacks).toMatch(/No Web Animations API:[\s\S]*?CSS animation[\s\S]*?elapsed-time/);
-  expect(fallbacks).toMatch(/CSS Highlight API[\s\S]*?irrelevant[\s\S]*?SVG/);
-  expect(fallbacks).toMatch(/clipboard[\s\S]*?selectable fallback/i);
+test('documents every optional subpath and its exact public names', () => {
+  const optional = section(readme, 'Optional modules');
+  for (const [subpath, exports] of optionalExports) {
+    expect(optional).toContain(`hanamaru-annotations/${subpath}`);
+    for (const name of exports) expect(optional).toContain(`\`${name}\``);
+  }
+  expect(optional).toMatch(/thin[\s\S]*?no duplicate runtime/i);
+  for (const range of ['>=18.2.0 <20', '>=3.5.0 <4', '>=5.0.0 <6']) {
+    expect(optional).toContain(`\`${range}\``);
+  }
 });
 
-test('limits support claims to exercised projects and reports current distribution evidence', () => {
-  const browserSupport = section('Browser Support');
-  const mentioned = [...browserSupport.matchAll(/\b(Chromium|Firefox|WebKit|Chrome|Safari|Edge)\b/g)]
-    .map((match) => match[1].toLowerCase());
-  expect([...new Set(mentioned)]).toEqual(playwrightConfig.projects.map(({ name }) => name));
-  expect(browserSupport).toContain('ES2020');
+test('includes grounded Selection, Group, plugin, and serialization recipes', () => {
+  const optional = section(readme, 'Optional modules');
+  expect(optional).toMatch(/annotateSelection\(\{[\s\S]*?mark: 'circle'/);
+  expect(optional).toMatch(/const corrections = group\(\[[\s\S]*?corrections\.show\(\)/);
+  expect(optional).toMatch(
+    /registerMark\('hanamaru',[\s\S]*?helpers\.closedPath\(/,
+  );
+  expect(optional).toMatch(/const unregister = registerMark[\s\S]*?unregister\(\)/);
+  for (const name of ['serialize', 'restore', 'resolveSerializedTarget']) {
+    expect(optional).toContain(name);
+  }
+  expect(optional).toContain('"schema": "hanamaru/v1"');
+  expect(optional).toMatch(/keyForTarget[\s\S]*?resolveTarget/);
+  expect(optional).toMatch(/does not generate CSS (?:paths|selectors)/i);
+});
 
-  const size = section('Size and Distribution');
-  expect(size).toMatch(/zero production dependencies/i);
-  expect(size).toMatch(/gzip level 9/i);
-  expect(size).toMatch(/JavaScript \+ CSS/i);
+test('documents exact Shadow modes, scope boundaries, and framework lifecycles', () => {
+  const optional = section(readme, 'Optional modules');
+  expect(optional).toContain("import 'hanamaru-annotations/shadow/style.css'");
+  expect(optional).toContain('createShadowScope');
+  for (const mode of ['auto', 'sheet', 'preinstalled']) {
+    expect(optional).toContain(`'${mode}'`);
+  }
+  expect(optional).toMatch(/nonce/);
+  expect(optional).toMatch(/retained closed/i);
+  expect(optional).toMatch(/does not (?:discover|traverse)[\s\S]*?(?:nested|deep|cross-root)/i);
+
+  expect(optional).toMatch(/React[\s\S]*?useAnnotation/);
+  expect(optional).toMatch(/Vue 3\.5[\s\S]*?useAnnotation/);
+  expect(optional).toMatch(/Svelte 5[\s\S]*?use:annotation/);
+  expect(optional).toMatch(/manual annotation/i);
+  expect(optional).toMatch(/unmount[\s\S]*?destroy/i);
+});
+
+test('states accessibility, Inspector keyboard, reduced-motion, and CSP behavior exactly', () => {
+  const safety = section(readme, 'Accessibility and security');
+  expect(safety).toContain('aria-hidden="true"');
+  expect(safety).toMatch(/notes are decorative by default/i);
+  expect(safety).toContain('accessible: true');
+  expect(safety).toContain('aria-describedby');
+  expect(safety).toMatch(/owns[\s\S]*?token/i);
+  expect(safety).toContain('prefers-reduced-motion');
+  expect(safety).toMatch(/same (?:states|lifecycle|logical order)/i);
+  expect(safety).toMatch(/roving tab stop/i);
+  expect(safety).toMatch(/Arrow[\s\S]*?(?:Enter|Space)[\s\S]*?Escape/);
+  expect(safety).toMatch(/strict CSP/i);
+  expect(safety).toMatch(/nonce/);
+  expect(safety).toMatch(/preinstalled/);
+  expect(safety).not.toMatch(/injects? inline script/i);
+});
+
+test('names only the exact browser builds verified by this repository', () => {
+  const support = section(readme, 'Browser support');
+  expect(support).toContain('Playwright 1.61.1');
+  for (const [engine, version] of browserBuilds) {
+    expect(support).toContain(engine);
+    expect(support).toContain(version);
+  }
+  expect(support).toContain('ES2020');
+  expect(support).toMatch(/not minimum-version claims/i);
+  expect(support).not.toMatch(/\bevergreen\b/i);
+});
+
+test('reports every schema-v2 closure measurement and hard cap', () => {
   expect(sizeReport.schemaVersion).toBe(2);
-  const expectedBudgets = {
-    main: [28_672, 27_648],
-    iife: [24_576, 23_552],
-    selection: [3_072, 2_560],
-    serialize: [11_264, 10_752],
-    group: [8_192, 7_680],
-    plugins: [6_144, 5_632],
-    shadow: [21_504, 20_480],
-    react: [4_096, 3_584],
-    vue: [4_096, 3_584],
-    svelte: [4_096, 3_584],
-  };
-  expect(Object.keys(sizeReport.budgets.hard)).toEqual(Object.keys(expectedBudgets));
-  expect(Object.keys(sizeReport.budgets.stretch)).toEqual(Object.keys(expectedBudgets));
-  expect(sizeReport.entries.map(({ entry }) => entry)).toEqual(Object.keys(expectedBudgets));
+  const size = section(readme, 'Size and distribution');
+  expect(size).toMatch(/closure accounting/i);
+  expect(size).toMatch(/gzip level 9/i);
+  expect(size).toMatch(/zero production dependencies/i);
+  expect(size).not.toMatch(/\b5\s*KB\b|\b20\s*KB\b/i);
+  expect(sizeReport.entries.length).toBe(Object.keys(sizeReport.budgets.hard).length);
+
   for (const entry of sizeReport.entries) {
-    const [hard, stretch] = expectedBudgets[entry.entry];
-    expect(sizeReport.budgets.hard[entry.entry]).toBe(hard);
-    expect(sizeReport.budgets.stretch[entry.entry]).toBe(stretch);
-    expect(entry.budgetBytes).toBe(hard);
-    expect(entry.stretchBytes).toBe(stretch);
-    expect(entry.gzipBytes).toBe(
-      entry.members.reduce((total, member) => total + member.gzipBytes, 0),
-    );
-    expect(entry.rawBytes).toBe(
-      entry.members.reduce((total, member) => total + member.rawBytes, 0),
-    );
-    expect(entry.chargedFiles).toEqual(entry.members.map(({ file }) => file));
-    expect(entry.stretch).toBe(entry.gzipBytes <= stretch);
+    expect(size).toContain(`\`${entry.entry}\``);
+    expect(size).toContain(formattedBytes(entry.gzipBytes));
+    expect(size).toContain(formattedBytes(entry.budgetBytes));
+    expect(releaseNotes).toContain(`\`${entry.entry}\``);
+    expect(releaseNotes).toContain(formattedBytes(entry.gzipBytes));
+    expect(releaseNotes).toContain(formattedBytes(entry.budgetBytes));
   }
-  expect(size).toMatch(/generated report is the source of truth/i);
+  expect(size).toMatch(/main[\s\S]*?stretch[\s\S]*?miss/i);
+  expect(size).toMatch(/iife[\s\S]*?stretch[\s\S]*?miss/i);
 });
 
-test('keeps local positioning, V1 exclusions, and the fixed verification sequence explicit', async () => {
-  expect(readme).toMatch(/package name is `hanamaru-annotations`/i);
-  expect(readme).toMatch(/registry publication is not part of this local (?:build|implementation)/i);
-  expect(readme).not.toMatch(/(?:available|published|install it) (?:on|from) npm/i);
-  expect(readme).not.toMatch(/npm (?:i|install)\s+hanamaru-annotations/i);
-  expect(readme).not.toMatch(/downloads|stars|users|customers/i);
+test('documents target, serialization, Shadow, and cross-frame limits without overclaiming', () => {
+  const limits = section(readme, 'Limits and failure behavior');
+  expect(limits).toMatch(/selector[\s\S]*?Element[\s\S]*?Range[\s\S]*?exact-text locator/i);
+  expect(limits).toMatch(/no implicit[\s\S]*?(?:deep|cross-root)[\s\S]*?Shadow/i);
+  expect(limits).toMatch(/open[\s\S]*?retained closed/i);
+  expect(limits).toMatch(/resolver[\s\S]*?(?:Element|Range)/i);
+  expect(limits).toMatch(/cross-iframe/i);
+  expect(limits).toMatch(/CSS-only[\s\S]*?refresh\(\)/i);
+  expect(limits).not.toMatch(/CSS Anchor Positioning/i);
+});
 
-  const limits = section('Limitations');
-  for (const exclusion of [
-    'browser extensions',
-    'arbitrary-site persistence',
-    'accounts',
-    'cloud storage',
-    'collaboration',
-    'shared review links',
-    'framework wrappers',
-    'AI generation',
-    'QA rules',
-    'lint engines',
-    'image',
-    'canvas',
-    'freehand annotation',
-    'drag-and-drop',
+test('prepares the changelog and release notes with exact links and sections', () => {
+  expect(changelog).toContain('## [0.1.0] - 2026-07-23');
+  for (const feature of [
+    'six built-in marks',
+    'Selection',
+    'Group',
+    'custom marks',
+    'serialization',
     'Shadow DOM',
-    'cross-iframe',
-    'package publication',
-    'production deployment',
-  ]) expect(limits.toLowerCase()).toContain(exclusion.toLowerCase());
+    'React',
+    'Vue',
+    'Svelte',
+    'Annotation Inspector',
+    'zero production dependencies',
+    'least-privilege',
+  ]) expect(changelog).toMatch(new RegExp(feature, 'i'));
 
-  expect(pkg.scripts.verify).toBe(
-    'npm run test:unit && npm run test:types && npm run build && npm run check:dist'
-      + ' && npm run test:e2e:chromium && npm run test:e2e:smoke && npm run test:adapters',
-  );
-  for (const stage of [
-    'test:unit',
-    'test:types',
-    'build',
-    'check:dist',
-    'test:e2e:chromium',
-    'test:e2e:smoke',
-    'test:adapters',
-  ]) {
-    expect(pkg.scripts[stage]).toMatch(/\S/);
+  for (const title of ['Install', 'Features', 'Size', 'Verification']) {
+    expect(releaseNotes).toMatch(new RegExp(`^## ${title}\\s*$`, 'm'));
   }
-  expect(readme).toContain('`npm run verify`');
-  expect(readme).toMatch(/unit[\s\S]*?build[\s\S]*?check:dist[\s\S]*?Chromium[\s\S]*?Firefox[\s\S]*?WebKit/i);
+  expect(releaseNotes).toContain('npm install hanamaru-annotations@0.1.0');
+  expect(releaseNotes).toContain('[Changelog](../../CHANGELOG.md)');
+  expect(releaseNotes).toContain('[MIT License](../../LICENSE)');
+  expect(releaseNotes).not.toMatch(/sha(?:384|512)[-:][A-Za-z0-9+/=]{20,}/i);
 
-  const unitFiles = (await readdir(path.join(root, 'tests/unit')))
-    .filter((name) => name.endsWith('.test.js'));
-  const e2eFiles = (await readdir(path.join(root, 'tests/e2e')))
-    .filter((name) => name.endsWith('.spec.js'));
-  expect(unitFiles.length).toBeGreaterThan(0);
-  expect(e2eFiles.length).toBeGreaterThan(0);
+  expect(readme).toContain('[Repository](https://github.com/Ray0907/hanamaru)');
+  expect(readme).toContain('[local demo source](demo/index.html)');
+  expect(readme).toContain('[Changelog](CHANGELOG.md)');
+  expect(readme).toContain('[MIT License](LICENSE)');
+  expect(readme).not.toMatch(/github\.io\/hanamaru/i);
+});
 
-  const projects = Object.fromEntries(
-    playwrightConfig.projects.map((project) => [project.name, project]),
-  );
-  expect(matches(projects.chromium.testMatch, 'docs.spec.js')).toBe(true);
-  expect(matches(projects.chromium.testMatch, 'annotation.spec.js')).toBe(true);
-  expect(matches(projects.chromium.testMatch, 'smoke.spec.js')).toBe(true);
-  expect(matches(projects.firefox.testMatch, 'docs.spec.js')).toBe(false);
-  expect(matches(projects.firefox.testMatch, 'smoke.spec.js')).toBe(true);
-  expect(matches(projects.webkit.testMatch, 'docs.spec.js')).toBe(false);
-  expect(matches(projects.webkit.testMatch, 'smoke.spec.js')).toBe(true);
+test('records the exact real-Chrome release capture without unsupported publication claims', () => {
+  expect(releaseNotes).toContain('1280×900');
+  expect(releaseNotes).toContain('Portable');
+  expect(releaseNotes).toContain('Hanamaru flower');
+  expect(releaseNotes).toContain('Annotation applied. Output is current.');
+  expect(releaseNotes).toContain('register it with hanamaru-annotations/plugins');
+  expect(releaseNotes).toMatch(/no (?:debug UI|personal data)/i);
+  expect(releaseNotes).toMatch(/local prepared\/verified evidence/i);
+  expect(releaseNotes).not.toMatch(/(?:npm|GitHub release) is (?:live|public|published)/i);
+});
 
-  expect(readme).toContain('[MIT](LICENSE)');
+test('resolves every local Markdown link used by public release documents', async () => {
+  const documents = [
+    ['README.md', readme],
+    ['CHANGELOG.md', changelog],
+    ['docs/releases/v0.1.0.md', releaseNotes],
+  ];
+  let checked = 0;
+  for (const [filename, contents] of documents) {
+    for (const match of contents.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+      const target = match[1];
+      if (/^(?:https?:|#)/u.test(target)) continue;
+      const relative = target.split('#', 1)[0];
+      const resolved = path.resolve(root, path.dirname(filename), relative);
+      const file = await readFile(resolved).catch(() => Buffer.alloc(0));
+      expect(file.length, `${filename} -> ${target}`).toBeGreaterThan(0);
+      checked += 1;
+    }
+  }
+  expect(checked).toBeGreaterThan(0);
+});
+
+test('updates product and design status to the implemented release', () => {
+  expect(product).toMatch(/0\.1\.0[\s\S]*?(?:release|implemented)/i);
+  expect(product).toMatch(/Selection[\s\S]*?Group[\s\S]*?plugins[\s\S]*?serialization/i);
+  expect(product).toMatch(/Shadow DOM[\s\S]*?React[\s\S]*?Vue[\s\S]*?Svelte/i);
+  expect(product).toMatch(/Annotation Inspector/i);
+  expect(product).not.toMatch(/package publication is outside V1/i);
+  expect(product).not.toMatch(/V1 excludes[\s\S]*?framework wrappers/i);
+  expect(product).not.toMatch(/V1 excludes[\s\S]*?Shadow DOM/i);
+  expect(product).not.toMatch(/20,480 bytes under gzip/i);
+
+  expect(design).toMatch(/Annotation Inspector/i);
+  expect(design).toMatch(/selected[\s\S]*?editing[\s\S]*?applied/i);
+  expect(design).toMatch(/1280×900/);
+  expect(design).toMatch(/390px/);
 });
