@@ -17,6 +17,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { checkBuiltExports } from './check-exports.mjs';
+import { isValidSemver } from './check-release-tag.mjs';
+
+const EXPECTED_PACKAGE_NAME = 'hanamaru-annotations';
+const FORBIDDEN_PRODUCTION_FIELDS = Object.freeze([
+  'dependencies',
+  'optionalDependencies',
+  'bundleDependencies',
+  'bundledDependencies',
+]);
 
 const PACKAGE_ENTRY_EXPORTS = Object.freeze({
   'hanamaru-annotations': Object.freeze([
@@ -334,6 +343,21 @@ function parseOctal(buffer) {
   return Number.parseInt(value, 8);
 }
 
+function tarHeaderFormat(header) {
+  const checksum = parseOctal(header.subarray(148, 156));
+  const checksumHeader = Buffer.from(header);
+  checksumHeader.fill(0x20, 148, 156);
+  const actual = checksumHeader.reduce((sum, byte) => sum + byte, 0);
+  if (checksum !== actual) {
+    throw new Error('pack-verify: tarball header checksum mismatch');
+  }
+  const magic = header.subarray(257, 263).toString('latin1');
+  const version = header.subarray(263, 265).toString('latin1');
+  if (magic === 'ustar\0' && version === '00') return 'ustar';
+  if (magic === 'ustar ' && version === ' \0') return 'gnu';
+  throw new Error('pack-verify: tarball has an unsupported header format');
+}
+
 function assertSafeTarPath(value, label, options = {}) {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
     throw new Error(`pack-verify: tarball ${label} is unsafe`);
@@ -426,8 +450,11 @@ export function inspectTarball(buffer) {
       terminated = true;
       break;
     }
+    const format = tarHeaderFormat(header);
     const rawName = tarText(header.subarray(0, 100), 'entry path');
-    const prefix = tarText(header.subarray(345, 500), 'entry path');
+    const prefix = format === 'ustar'
+      ? tarText(header.subarray(345, 500), 'entry path')
+      : '';
     const name = prefix ? `${prefix}/${rawName}` : rawName;
     const size = parseOctal(header.subarray(124, 136));
     const dataStart = offset + 512;
@@ -491,13 +518,11 @@ async function readManifest(root) {
   } catch {
     throw new Error('pack-verify: cannot read package.json');
   }
-  if (
-    typeof manifest.name !== 'string'
-    || manifest.name.length === 0
-    || typeof manifest.version !== 'string'
-    || manifest.version.length === 0
-  ) {
-    throw new Error('pack-verify: package identity is incomplete');
+  if (manifest.name !== EXPECTED_PACKAGE_NAME) {
+    throw new Error(`pack-verify: package name must be ${EXPECTED_PACKAGE_NAME}`);
+  }
+  if (!isValidSemver(manifest.version)) {
+    throw new Error('pack-verify: package version is not valid SemVer 2.0.0');
   }
   return manifest;
 }
@@ -506,9 +531,175 @@ function cleanFilename(name, version) {
   return `${name.replace(/^@/u, '').replaceAll('/', '-')}-${version}.tgz`;
 }
 
+function safeArtifactPath(directory, filename) {
+  if (
+    typeof filename !== 'string'
+    || filename.length === 0
+    || filename.includes('\0')
+    || filename.includes('/')
+    || filename.includes('\\')
+    || path.basename(filename) !== filename
+  ) {
+    throw new Error('pack-verify: npm pack returned an unsafe tarball filename');
+  }
+  const candidate = path.resolve(directory, filename);
+  if (path.dirname(candidate) !== directory) {
+    throw new Error('pack-verify: npm pack returned an unsafe tarball filename');
+  }
+  return candidate;
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function combineFailures(primary, cleanup) {
+  return new AggregateError(
+    [primary, cleanup],
+    `${errorMessage(primary)}; ${errorMessage(cleanup)}`,
+  );
+}
+
+function fileIdentity(stats) {
+  return Object.freeze({
+    dev: stats.dev,
+    ino: stats.ino,
+  });
+}
+
+async function readRegularFileBound(candidate, label, options = {}) {
+  const openImpl = options.openImpl ?? open;
+  let before;
+  try {
+    before = await lstat(candidate);
+  } catch {
+    throw new Error(`pack-verify: ${label} identity changed`);
+  }
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error(`pack-verify: ${label} identity changed`);
+  }
+
+  let handle;
+  try {
+    handle = await openImpl(
+      candidate,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+  } catch {
+    throw new Error(`pack-verify: ${label} identity changed`);
+  }
+
+  let primary;
+  let result;
+  try {
+    const opened = await handle.stat();
+    const expected = options.expectedIdentity;
+    if (
+      !opened.isFile()
+      || opened.dev !== before.dev
+      || opened.ino !== before.ino
+      || (
+        expected
+        && (opened.dev !== expected.dev || opened.ino !== expected.ino)
+      )
+    ) {
+      throw new Error(`pack-verify: ${label} identity changed`);
+    }
+    await options.afterOpen?.();
+    const bytes = await handle.readFile();
+    await options.afterRead?.();
+    const after = await lstat(candidate);
+    if (
+      !after.isFile()
+      || after.isSymbolicLink()
+      || after.dev !== opened.dev
+      || after.ino !== opened.ino
+    ) {
+      throw new Error(`pack-verify: ${label} identity changed`);
+    }
+    result = {
+      bytes,
+      identity: fileIdentity(opened),
+    };
+  } catch (error) {
+    primary = error;
+  }
+
+  let cleanup;
+  try {
+    await handle.close();
+  } catch (error) {
+    cleanup = error;
+  }
+  if (primary && cleanup) throw combineFailures(primary, cleanup);
+  if (primary) throw primary;
+  if (cleanup) throw cleanup;
+  return result;
+}
+
+async function verifyBoundOutputFiles(directory, binding, options = {}) {
+  const artifact = await readRegularFileBound(
+    path.join(directory, binding.filename),
+    'artifact',
+    {
+      expectedIdentity: binding.artifactIdentity,
+      openImpl: options.openImpl,
+    },
+  );
+  const artifactHash = createHash('sha512').update(artifact.bytes).digest('hex');
+  if (artifactHash !== binding.digestHex) {
+    throw new Error('pack-verify: artifact content changed');
+  }
+  const digest = await readRegularFileBound(
+    path.join(directory, 'sha512.txt'),
+    'digest',
+    {
+      expectedIdentity: binding.digestIdentity,
+      openImpl: options.openImpl,
+    },
+  );
+  if (digest.bytes.toString('utf8') !== binding.digestText) {
+    throw new Error('pack-verify: digest content changed');
+  }
+}
+
+function assertNoProductionFields(manifest) {
+  for (const field of FORBIDDEN_PRODUCTION_FIELDS) {
+    if (Object.hasOwn(manifest, field)) {
+      throw new Error(
+        `pack-verify: installed package declares forbidden production field ${field}`,
+      );
+    }
+  }
+}
+
+function assertProductionTree(dependencyTree) {
+  const dependencies = dependencyTree?.dependencies;
+  const rootNames = dependencies && typeof dependencies === 'object'
+    ? Object.keys(dependencies)
+    : [];
+  const hanamaru = dependencies?.[EXPECTED_PACKAGE_NAME];
+  const childNames = hanamaru?.dependencies
+    && typeof hanamaru.dependencies === 'object'
+    ? Object.keys(hanamaru.dependencies)
+    : [];
+  if (
+    rootNames.length !== 1
+    || rootNames[0] !== EXPECTED_PACKAGE_NAME
+    || !hanamaru
+    || childNames.length !== 0
+  ) {
+    throw new Error(
+      'pack-verify: production dependency tree must contain only '
+      + `dependency-free ${EXPECTED_PACKAGE_NAME}`,
+    );
+  }
+}
+
 export async function verifyInstalledPackage(artifact, installRoot, options = {}) {
   const execFileImpl = options.execFileImpl ?? execFile;
-  const invocationOptions = [options.npmCliPath, options.execPath ?? process.execPath];
+  const runtimePath = options.execPath ?? process.execPath;
+  const invocationOptions = [options.npmCliPath, runtimePath];
   await writeFile(path.join(installRoot, 'package.json'), JSON.stringify({
     name: 'hanamaru-pack-verification',
     private: true,
@@ -518,12 +709,24 @@ export async function verifyInstalledPackage(artifact, installRoot, options = {}
     await execute(
       npmInvocation([
         'install',
-        '--save-dev',
+        '--save-prod',
         '--ignore-scripts',
         '--no-audit',
         '--no-fund',
         '--package-lock=false',
         artifact,
+      ], ...invocationOptions),
+      installRoot,
+      execFileImpl,
+    );
+    await execute(
+      npmInvocation([
+        'install',
+        '--save-dev',
+        '--ignore-scripts',
+        '--no-audit',
+        '--no-fund',
+        '--package-lock=false',
         'react@19.2.8',
         'vue@3.5.40',
         'svelte@5.56.7',
@@ -550,11 +753,12 @@ export async function verifyInstalledPackage(artifact, installRoot, options = {}
     throw new Error('pack-verify: installed package manifest could not be read');
   }
   if (
-    Object.hasOwn(installedPackageManifest, 'dependencies')
-    || Object.keys(installedPackageManifest.dependencies ?? {}).length > 0
+    installedPackageManifest.name !== EXPECTED_PACKAGE_NAME
+    || !isValidSemver(installedPackageManifest.version)
   ) {
-    throw new Error('pack-verify: installed package declares production dependencies');
+    throw new Error('pack-verify: installed package identity is invalid');
   }
+  assertNoProductionFields(installedPackageManifest);
 
   const verificationScript = `
     import assert from 'node:assert/strict';
@@ -573,14 +777,15 @@ export async function verifyInstalledPackage(artifact, installRoot, options = {}
     const manifest = JSON.parse(await readFile(packagePath, 'utf8'));
     assert.equal(manifest.name, 'hanamaru-annotations');
     assert.equal(typeof manifest.version, 'string');
-    assert.equal(Object.hasOwn(manifest, 'dependencies'), false);
-    assert.deepEqual(Object.keys(manifest.dependencies ?? {}), []);
+    for (const field of ${JSON.stringify(FORBIDDEN_PRODUCTION_FIELDS)}) {
+      assert.equal(Object.hasOwn(manifest, field), false, field);
+    }
   `;
   const verificationPath = path.join(installRoot, 'verify-imports.mjs');
   await writeFile(verificationPath, verificationScript);
   try {
     await execute(
-      { file: process.execPath, args: [verificationPath] },
+      { file: runtimePath, args: [verificationPath] },
       installRoot,
       execFileImpl,
     );
@@ -599,17 +804,17 @@ export async function verifyInstalledPackage(artifact, installRoot, options = {}
   } catch {
     throw new Error('pack-verify: production dependency check failed');
   }
-  const productionDependencies = Object.keys(dependencyTree.dependencies ?? {});
-  if (productionDependencies.length > 0) {
-    throw new Error(
-      `pack-verify: production dependency tree is not empty (${productionDependencies.join(', ')})`,
-    );
-  }
+  assertProductionTree(dependencyTree);
   const installedManifest = JSON.parse(
     await readFile(path.join(installRoot, 'package.json'), 'utf8'),
   );
-  if (Object.keys(installedManifest.dependencies ?? {}).length > 0) {
-    throw new Error('pack-verify: clean-room manifest has production dependencies');
+  if (
+    Object.keys(installedManifest.dependencies ?? {}).length !== 1
+    || !Object.hasOwn(installedManifest.dependencies ?? {}, EXPECTED_PACKAGE_NAME)
+  ) {
+    throw new Error(
+      `pack-verify: clean-room manifest must depend only on ${EXPECTED_PACKAGE_NAME}`,
+    );
   }
   return {
     entries: Object.keys(PACKAGE_ENTRY_EXPORTS).length,
@@ -634,6 +839,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
 
   const manifest = await readManifest(projectRoot);
   const expectedFilename = cleanFilename(manifest.name, manifest.version);
+  safeArtifactPath(initialOutputIdentity.finalPath, expectedFilename);
   const built = await (options.checkBuiltExportsImpl ?? checkBuiltExports)(projectRoot);
   const npmCliPath = await (options.resolveNpmCliImpl ?? resolveNpmCli)({
     env: options.env,
@@ -645,6 +851,8 @@ export async function verifyPack(root, outputDirectory, options = {}) {
   let operationError;
   let restorationError;
   let completed;
+  let binding;
+  const openImpl = options.openImpl ?? open;
   try {
     outputIdentity = await pinOutputDirectory(
       initialOutputIdentity,
@@ -653,7 +861,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
     await assertOutputIdentityImpl(outputIdentity, 'after-pin');
     const artifactDirectory = outputIdentity.path;
     const pinnedDigestPath = path.join(artifactDirectory, 'sha512.txt');
-    digestHandle = await open(
+    digestHandle = await openImpl(
       pinnedDigestPath,
       constants.O_RDWR | constants.O_CREAT | constants.O_EXCL,
       0o600,
@@ -683,6 +891,7 @@ export async function verifyPack(root, outputDirectory, options = {}) {
     await assertOutputIdentityImpl(outputIdentity, 'after-pack');
 
     const result = parsePackResult(stdout);
+    safeArtifactPath(artifactDirectory, result.filename);
     if (result.filename !== expectedFilename) {
       throw new Error(`pack-verify: unexpected tarball filename ${String(result.filename)}`);
     }
@@ -690,37 +899,14 @@ export async function verifyPack(root, outputDirectory, options = {}) {
       result.files?.map(({ path: file }) => file),
       built.distFiles,
     );
-    const artifact = path.join(artifactDirectory, expectedFilename);
+    const artifact = safeArtifactPath(artifactDirectory, expectedFilename);
     await assertOutputIdentityImpl(outputIdentity, 'before-artifact-read');
-    let artifactHandle;
-    let artifactBytes;
-    try {
-      let artifactStats;
-      try {
-        artifactStats = await lstat(artifact);
-        artifactHandle = await open(
-          artifact,
-          constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-        );
-      } catch {
-        throw new Error('pack-verify: npm pack did not create a safe reported tarball');
-      }
-      const openedStats = await artifactHandle.stat();
-      if (
-        !artifactStats.isFile()
-        || artifactStats.isSymbolicLink()
-        || !openedStats.isFile()
-        || openedStats.dev !== artifactStats.dev
-        || openedStats.ino !== artifactStats.ino
-      ) {
-        throw new Error('pack-verify: reported tarball is not a regular file');
-      }
-      await assertOutputIdentityImpl(outputIdentity, 'after-artifact-open');
-      artifactBytes = await artifactHandle.readFile();
-      await assertOutputIdentityImpl(outputIdentity, 'after-artifact-read');
-    } finally {
-      await artifactHandle?.close();
-    }
+    const artifactRead = await readRegularFileBound(artifact, 'artifact', {
+      afterOpen: () => assertOutputIdentityImpl(outputIdentity, 'after-artifact-open'),
+      afterRead: () => assertOutputIdentityImpl(outputIdentity, 'after-artifact-read'),
+      openImpl,
+    });
+    const artifactBytes = artifactRead.bytes;
 
     const digestBuffer = createHash('sha512').update(artifactBytes).digest();
     const integrity = `sha512-${digestBuffer.toString('base64')}`;
@@ -754,15 +940,30 @@ export async function verifyPack(root, outputDirectory, options = {}) {
       throw new Error('pack-verify: generated SHA-512 digest could not be verified');
     }
     await assertOutputIdentityImpl(outputIdentity, 'after-digest-write');
+    const digestIdentity = fileIdentity(await digestHandle.stat());
+    binding = Object.freeze({
+      artifactIdentity: artifactRead.identity,
+      digestHex: digestBuffer.toString('hex'),
+      digestIdentity,
+      digestText,
+      filename: expectedFilename,
+    });
 
     const mkdtempImpl = options.mkdtempImpl ?? mkdtemp;
     const rmImpl = options.rmImpl ?? rm;
     const installRoot = await mkdtempImpl(path.join(os.tmpdir(), 'hanamaru-pack-install-'));
     let verification;
+    let verificationError;
     try {
       await assertOutputIdentityImpl(outputIdentity, 'before-install');
+      await verifyBoundOutputFiles(artifactDirectory, binding, { openImpl });
+      const privateArtifact = path.join(installRoot, expectedFilename);
+      await writeFile(privateArtifact, artifactBytes, {
+        flag: 'wx',
+        mode: 0o600,
+      });
       verification = await (options.verifyInstallImpl ?? verifyInstalledPackage)(
-        artifact,
+        privateArtifact,
         installRoot,
         {
           env: options.env,
@@ -772,10 +973,23 @@ export async function verifyPack(root, outputDirectory, options = {}) {
         },
       );
       await assertOutputIdentityImpl(outputIdentity, 'after-install');
+    } catch (error) {
+      verificationError = error;
     } finally {
-      await rmImpl(installRoot, { recursive: true, force: true });
+      let cleanupError;
+      try {
+        await rmImpl(installRoot, { recursive: true, force: true });
+      } catch (error) {
+        cleanupError = error;
+      }
+      if (verificationError && cleanupError) {
+        throw combineFailures(verificationError, cleanupError);
+      }
+      if (verificationError) throw verificationError;
+      if (cleanupError) throw cleanupError;
     }
     await assertOutputIdentityImpl(outputIdentity, 'before-return');
+    await verifyBoundOutputFiles(artifactDirectory, binding, { openImpl });
 
     completed = {
       artifact: path.join(initialOutputIdentity.finalPath, expectedFilename),
@@ -791,22 +1005,41 @@ export async function verifyPack(root, outputDirectory, options = {}) {
     try {
       await digestHandle?.close();
     } catch (error) {
-      operationError ??= error;
+      operationError = operationError
+        ? combineFailures(operationError, error)
+        : error;
     }
     if (outputIdentity) {
+      if (!operationError && binding) {
+        try {
+          await assertOutputIdentityImpl(outputIdentity, 'before-restore');
+          await verifyBoundOutputFiles(outputIdentity.path, binding, { openImpl });
+        } catch (error) {
+          operationError = error;
+        }
+      }
       try {
         await restoreOutputDirectory(outputIdentity);
       } catch (error) {
         restorationError = error;
       }
+      if (!operationError && !restorationError && binding) {
+        const restoredIdentity = Object.freeze({
+          ...outputIdentity,
+          path: outputIdentity.finalPath,
+        });
+        try {
+          await assertOutputIdentityImpl(restoredIdentity, 'after-restore');
+          await verifyBoundOutputFiles(restoredIdentity.path, binding, { openImpl });
+        } catch (error) {
+          operationError = error;
+        }
+      }
     }
   }
 
   if (operationError && restorationError) {
-    throw new AggregateError(
-      [operationError, restorationError],
-      `${operationError.message}; ${restorationError.message}`,
-    );
+    throw combineFailures(operationError, restorationError);
   }
   if (operationError) throw operationError;
   if (restorationError) throw restorationError;

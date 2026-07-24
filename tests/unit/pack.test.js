@@ -6,6 +6,7 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -20,7 +21,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { gzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { buildDistribution } from '../../scripts/build.mjs';
 import {
   expectedPackFiles,
@@ -65,6 +66,12 @@ function tarOctal(header, offset, length, value) {
   tarString(header, offset, length, `${value.toString(8).padStart(length - 1, '0')}\0`);
 }
 
+function writeTarChecksum(header) {
+  header.fill(0x20, 148, 156);
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  tarString(header, 148, 8, `${checksum.toString(8).padStart(6, '0')}\0 `);
+}
+
 function tarArchive(entries, { trailingZeroBlocks = true } = {}) {
   const blocks = [];
   for (const entry of entries) {
@@ -77,8 +84,18 @@ function tarArchive(entries, { trailingZeroBlocks = true } = {}) {
     tarOctal(header, 124, 12, entry.size ?? body.length);
     header[156] = (entry.type ?? '0').charCodeAt(0);
     if (entry.linkname) tarString(header, 157, 100, entry.linkname);
-    tarString(header, 257, 6, 'ustar\0');
-    tarString(header, 263, 2, '00');
+    if (entry.format === 'gnu') {
+      tarString(header, 257, 6, 'ustar ');
+      tarString(header, 263, 2, ' \0');
+    } else if (entry.format === 'unknown') {
+      tarString(header, 257, 6, 'weird!');
+      tarString(header, 263, 2, '00');
+    } else {
+      tarString(header, 257, 6, 'ustar\0');
+      tarString(header, 263, 2, '00');
+    }
+    if (entry.prefix) tarString(header, 345, 155, entry.prefix);
+    writeTarChecksum(header);
     blocks.push(header);
     if (body.length > 0) {
       blocks.push(body);
@@ -89,6 +106,12 @@ function tarArchive(entries, { trailingZeroBlocks = true } = {}) {
   const zeroBlockCount = trailingZeroBlocks === true ? 2 : (trailingZeroBlocks || 0);
   if (zeroBlockCount > 0) blocks.push(Buffer.alloc(512 * zeroBlockCount));
   return gzipSync(Buffer.concat(blocks));
+}
+
+function mutateTarHeader(tarball, mutate, headerOffset = 0) {
+  const archive = gunzipSync(tarball);
+  mutate(archive.subarray(headerOffset, headerOffset + 512));
+  return gzipSync(archive);
 }
 
 function paxRecord(key, value) {
@@ -149,12 +172,65 @@ function successfulOptions(_output, calls, overrides = {}) {
     },
     inspectTarballImpl: async () => [...PACK_FILES],
     resolveNpmCliImpl: async () => path.resolve('/verified/npm-cli.js'),
-    verifyInstallImpl: async (_artifact, installRoot) => {
+    verifyInstallImpl: async (artifact, installRoot) => {
       assert.equal(path.dirname(installRoot), os.tmpdir());
+      assert.equal(path.dirname(artifact), installRoot);
+      assert.deepEqual(await readFile(artifact), ARTIFACT_BYTES);
       await access(installRoot);
       return { entries: 9, css: 2, productionDependencies: 0 };
     },
     ...overrides,
+  };
+}
+
+function installedVerifierExec(installRoot, calls, options = {}) {
+  const packedManifest = {
+    name: 'hanamaru-annotations',
+    version: '0.1.0',
+    ...(options.packedManifest ?? {}),
+  };
+  const productionTree = options.productionTree ?? {
+    dependencies: {
+      'hanamaru-annotations': {
+        version: '0.1.0',
+      },
+    },
+  };
+  let installCalls = 0;
+  return (file, args, execOptions, callback) => {
+    calls.push({ args, file, options: execOptions });
+    void (async () => {
+      if (args[1] === 'install') {
+        installCalls += 1;
+        if (installCalls === 1) {
+          const packageDirectory = path.join(
+            installRoot,
+            'node_modules',
+            'hanamaru-annotations',
+          );
+          await mkdir(packageDirectory, { recursive: true });
+          await writeFile(
+            path.join(packageDirectory, 'package.json'),
+            JSON.stringify(packedManifest),
+          );
+          await writeFile(path.join(installRoot, 'package.json'), JSON.stringify({
+            name: 'hanamaru-pack-verification',
+            private: true,
+            type: 'module',
+            dependencies: {
+              'hanamaru-annotations': 'file:hanamaru-annotations-0.1.0.tgz',
+            },
+          }));
+        }
+        callback(null, '', '');
+        return;
+      }
+      if (args[1] === 'ls') {
+        callback(null, JSON.stringify(productionTree), '');
+        return;
+      }
+      callback(null, '', '');
+    })().catch(callback);
   };
 }
 
@@ -296,6 +372,39 @@ test('tar inspection accepts safe directories and path metadata for regular file
     { name: 'package/placeholder', body: 'readme' },
   ]);
   assert.deepEqual(inspectTarball(tarball), ['LICENSE', 'README.md']);
+});
+
+test('tar inspection validates checksums and recognized archive layouts', () => {
+  assert.deepEqual(inspectTarball(tarArchive([
+    {
+      name: 'LICENSE',
+      prefix: 'package',
+      body: 'ustar-prefix',
+    },
+    {
+      name: 'package/README.md',
+      prefix: '../../ignored-for-gnu',
+      format: 'gnu',
+      body: 'gnu-name',
+    },
+  ])), ['LICENSE', 'README.md']);
+
+  const checksumMutation = mutateTarHeader(
+    tarArchive([{ name: 'package/LICENSE', body: 'license' }]),
+    (header) => {
+      header[0] ^= 1;
+    },
+  );
+  assert.throws(
+    () => inspectTarball(checksumMutation),
+    /pack-verify: tarball header checksum mismatch/u,
+  );
+  assert.throws(
+    () => inspectTarball(tarArchive([
+      { name: 'package/LICENSE', format: 'unknown', body: 'license' },
+    ])),
+    /pack-verify: tarball has an unsupported header format/u,
+  );
 });
 
 test('tar inspection rejects links even when their entry names look safe', () => {
@@ -498,6 +607,31 @@ test('verifyPack rejects unsafe output paths before invoking npm', async (t) => 
   assert.equal(calls.length, 0);
 });
 
+test('verifyPack rejects unsafe release identities before invoking npm pack', async (t) => {
+  const { output, root } = await fixture(t);
+  const calls = [];
+  const invalidManifests = [
+    { name: '../../../hanamaru-annotations', version: '0.1.0' },
+    { name: 'hanamaru/annotations', version: '0.1.0' },
+    { name: 'hanamaru\\annotations', version: '0.1.0' },
+    { name: 'other-package', version: '0.1.0' },
+    { name: 'hanamaru-annotations', version: '../../../0.1.0' },
+    { name: 'hanamaru-annotations', version: '0.1.0/../../escape' },
+    { name: 'hanamaru-annotations', version: '0.1.0\\escape' },
+    { name: 'hanamaru-annotations', version: '01.0.0' },
+    { name: 'hanamaru-annotations', version: '0.1.0\0escape' },
+  ];
+  for (const manifest of invalidManifests) {
+    await writeFile(path.join(root, 'package.json'), JSON.stringify(manifest));
+    await assert.rejects(
+      verifyPack(root, output, successfulOptions(output, calls)),
+      /pack-verify: package (?:name must be hanamaru-annotations|version is not valid SemVer 2\.0\.0)/u,
+      JSON.stringify(manifest),
+    );
+  }
+  assert.equal(calls.length, 0);
+});
+
 test('verifyPack detects an output directory swapped during npm pack', async (t) => {
   const { output, root } = await fixture(t);
   const trap = path.join(root, 'trap');
@@ -681,6 +815,69 @@ test('verifyPack writes digest content only through its identity-bound handle', 
   );
 });
 
+test('verifyPack binds install and return verification to exact artifact identities and bytes', async (t) => {
+  for (const mutation of [
+    { phase: 'before-install', target: 'artifact', replacement: true },
+    { phase: 'before-install', target: 'digest', replacement: true },
+    { phase: 'before-install', target: 'artifact', replacement: false },
+    { phase: 'before-return', target: 'digest', replacement: false },
+    { phase: 'after-restore', target: 'artifact', replacement: false },
+  ]) {
+    await t.test(
+      `${mutation.phase} ${mutation.target} ${
+        mutation.replacement ? 'replacement' : 'in-place mutation'
+      }`,
+      async (child) => {
+        const { output, root } = await fixture(child);
+        const calls = [];
+        let installCalls = 0;
+        let mutated = false;
+        const assertOutputIdentityImpl = async (identity, phase) => {
+          const currentPath = await realpath(identity.path);
+          const current = await stat(identity.path);
+          if (
+            currentPath !== identity.path
+            || current.dev !== identity.dev
+            || current.ino !== identity.ino
+          ) {
+            throw new Error('pack-verify: output directory identity changed');
+          }
+          if (phase !== mutation.phase || mutated) return;
+          mutated = true;
+          const filename = mutation.target === 'artifact'
+            ? 'hanamaru-annotations-0.1.0.tgz'
+            : 'sha512.txt';
+          const target = path.join(identity.path, filename);
+          if (mutation.replacement) {
+            await rename(target, `${target}.original`);
+          }
+          await writeFile(target, `mutated ${mutation.target}`);
+        };
+        const options = successfulOptions(output, calls, {
+          assertOutputIdentityImpl,
+          verifyInstallImpl: async (artifact, installRoot) => {
+            installCalls += 1;
+            assert.equal(path.dirname(artifact), installRoot);
+            assert.deepEqual(await readFile(artifact), ARTIFACT_BYTES);
+            return { entries: 9, css: 2, productionDependencies: 0 };
+          },
+        });
+
+        await assert.rejects(
+          verifyPack(root, output, options),
+          /pack-verify: (?:artifact|digest) (?:identity|content) changed/u,
+        );
+        assert.equal(calls.length, 1);
+        assert.equal(
+          installCalls,
+          mutation.phase === 'before-install' ? 0 : 1,
+          'caller bytes are never installed after a pre-install mutation',
+        );
+      },
+    );
+  }
+});
+
 test('verifyPack never overwrites an occupied caller path while restoring', async (t) => {
   const { output, root } = await fixture(t);
   const calls = [];
@@ -746,6 +943,26 @@ test('verifyPack rejects wrong filenames and multiple npm pack results', async (
       'wrong filename',
       packJson({ filename: 'other-0.1.0.tgz' }),
       /pack-verify: unexpected tarball filename other-0\.1\.0\.tgz/u,
+    ],
+    [
+      'traversal filename',
+      packJson({ filename: '../../../hanamaru-annotations-0.1.0.tgz' }),
+      /pack-verify: npm pack returned an unsafe tarball filename/u,
+    ],
+    [
+      'slash filename',
+      packJson({ filename: 'nested/hanamaru-annotations-0.1.0.tgz' }),
+      /pack-verify: npm pack returned an unsafe tarball filename/u,
+    ],
+    [
+      'backslash filename',
+      packJson({ filename: 'nested\\hanamaru-annotations-0.1.0.tgz' }),
+      /pack-verify: npm pack returned an unsafe tarball filename/u,
+    ],
+    [
+      'NUL filename',
+      packJson({ filename: 'hanamaru-annotations-0.1.0.tgz\0escape' }),
+      /pack-verify: npm pack returned an unsafe tarball filename/u,
     ],
     [
       'multiple results',
@@ -846,41 +1063,182 @@ test('verifyPack always cleans internal install roots and retains caller artifac
   }
 });
 
-test('installed verifier rejects a dependency key before importing the package', async (t) => {
-  const installRoot = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-install-check-'));
+test('verifyPack preserves primary failures when artifact close or install cleanup also fails', async (t) => {
+  await t.test('artifact read plus close', async (child) => {
+    const { output, root } = await fixture(child);
+    const calls = [];
+    const readError = new Error('fixture artifact read failure');
+    const closeError = new Error('fixture artifact close failure');
+    const openImpl = async (candidate, flags, mode) => {
+      const handle = await open(candidate, flags, mode);
+      if (!candidate.endsWith('.tgz')) return handle;
+      return {
+        close: async () => {
+          await handle.close();
+          throw closeError;
+        },
+        readFile: async () => {
+          throw readError;
+        },
+        stat: (...args) => handle.stat(...args),
+      };
+    };
+    await assert.rejects(
+      verifyPack(
+        root,
+        output,
+        successfulOptions(output, calls, { openImpl }),
+      ),
+      (error) => (
+        error instanceof AggregateError
+        && error.errors[0] === readError
+        && error.errors[1] === closeError
+      ),
+    );
+    assert.equal(calls.length, 1);
+  });
+
+  await t.test('install verification plus temp cleanup', async (child) => {
+    const { container, output, root } = await fixture(child);
+    const calls = [];
+    const verifyError = new Error('fixture install verify failure');
+    const cleanupError = new Error('fixture install cleanup failure');
+    const installRoot = path.join(container, 'install-root');
+    await mkdir(installRoot);
+    await assert.rejects(
+      verifyPack(
+        root,
+        output,
+        successfulOptions(output, calls, {
+          mkdtempImpl: async () => installRoot,
+          rmImpl: async () => {
+            throw cleanupError;
+          },
+          verifyInstallImpl: async () => {
+            throw verifyError;
+          },
+        }),
+      ),
+      (error) => (
+        error instanceof AggregateError
+        && error.errors[0] === verifyError
+        && error.errors[1] === cleanupError
+      ),
+    );
+    assert.equal(calls.length, 1);
+  });
+});
+
+test('installed verifier rejects every production dependency field even when empty', async (t) => {
+  for (const field of [
+    'dependencies',
+    'optionalDependencies',
+    'bundleDependencies',
+    'bundledDependencies',
+  ]) {
+    await t.test(field, async (child) => {
+      const installRoot = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-install-check-'));
+      child.after(() => rm(installRoot, { recursive: true, force: true }));
+      const calls = [];
+      await assert.rejects(
+        verifyInstalledPackage('/artifacts/hanamaru-annotations-0.1.0.tgz', installRoot, {
+          execFileImpl: installedVerifierExec(installRoot, calls, {
+            packedManifest: { [field]: field.includes('bundle') ? [] : {} },
+          }),
+          execPath: '/verified/node',
+          npmCliPath: '/verified/npm-cli.js',
+        }),
+        new RegExp(
+          `pack-verify: installed package declares forbidden production field ${field}`,
+          'u',
+        ),
+      );
+    });
+  }
+});
+
+test('installed verifier requires exactly one dependency-free Hanamaru production root', async (t) => {
+  for (const [name, productionTree] of [
+    ['missing root', { dependencies: {} }],
+    [
+      'extra root',
+      {
+        dependencies: {
+          'hanamaru-annotations': { version: '0.1.0' },
+          unexpected: { version: '1.0.0' },
+        },
+      },
+    ],
+    [
+      'hidden child',
+      {
+        dependencies: {
+          'hanamaru-annotations': {
+            version: '0.1.0',
+            dependencies: {
+              hidden: { version: '1.0.0' },
+            },
+          },
+        },
+      },
+    ],
+  ]) {
+    await t.test(name, async (child) => {
+      const installRoot = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-tree-check-'));
+      child.after(() => rm(installRoot, { recursive: true, force: true }));
+      const calls = [];
+      await assert.rejects(
+        verifyInstalledPackage('/artifacts/hanamaru-annotations-0.1.0.tgz', installRoot, {
+          execFileImpl: installedVerifierExec(installRoot, calls, { productionTree }),
+          execPath: '/verified/node',
+          npmCliPath: '/verified/npm-cli.js',
+        }),
+        /pack-verify: production dependency tree must contain only dependency-free hanamaru-annotations/u,
+      );
+    });
+  }
+});
+
+test('installed verifier uses one explicit runtime and separates prod package from dev peers', async (t) => {
+  const installRoot = await mkdtemp(path.join(os.tmpdir(), 'hanamaru-runtime-check-'));
   t.after(() => rm(installRoot, { recursive: true, force: true }));
   const calls = [];
-  await assert.rejects(
-    verifyInstalledPackage('/artifacts/hanamaru-annotations-0.1.0.tgz', installRoot, {
-      execFileImpl(file, args, options, callback) {
-        calls.push({ args, file, options });
-        void (async () => {
-          const packageDirectory = path.join(
-            installRoot,
-            'node_modules',
-            'hanamaru-annotations',
-          );
-          await mkdir(packageDirectory, { recursive: true });
-          await writeFile(path.join(packageDirectory, 'package.json'), JSON.stringify({
-            name: 'hanamaru-annotations',
-            version: '0.1.0',
-            dependencies: {},
-          }));
-          callback(null, '', '');
-        })().catch(callback);
-      },
-      execPath: process.execPath,
-      npmCliPath: '/verified/npm-cli.js',
-    }),
-    /pack-verify: installed package declares production dependencies/u,
-  );
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].file, process.execPath);
+  const artifact = '/artifacts/hanamaru-annotations-0.1.0.tgz';
+  const result = await verifyInstalledPackage(artifact, installRoot, {
+    execFileImpl: installedVerifierExec(installRoot, calls),
+    execPath: '/verified/node',
+    npmCliPath: '/verified/npm-cli.js',
+  });
+  assert.deepEqual(result, {
+    css: 2,
+    entries: 9,
+    productionDependencies: 0,
+  });
+  assert.equal(calls.length, 4);
+  assert.equal(calls.every(({ file }) => file === '/verified/node'), true);
   assert.deepEqual(calls[0].args.slice(0, 4), [
+    '/verified/npm-cli.js',
+    'install',
+    '--save-prod',
+    '--ignore-scripts',
+  ]);
+  assert.equal(calls[0].args.includes(artifact), true);
+  assert.deepEqual(calls[1].args.slice(0, 4), [
     '/verified/npm-cli.js',
     'install',
     '--save-dev',
     '--ignore-scripts',
+  ]);
+  assert.equal(calls[1].args.includes('react@19.2.8'), true);
+  assert.equal(calls[1].args.includes('vue@3.5.40'), true);
+  assert.equal(calls[1].args.includes('svelte@5.56.7'), true);
+  assert.equal(calls[2].args.length, 1);
+  assert.match(calls[2].args[0], /verify-imports\.mjs$/u);
+  assert.deepEqual(calls[3].args, [
+    '/verified/npm-cli.js',
+    'ls',
+    '--omit=dev',
+    '--json',
   ]);
 });
 
