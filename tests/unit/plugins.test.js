@@ -50,6 +50,7 @@ test('runtime state is one exact module-local singleton with the scheduler docum
 test('scheduler acquisition stores and reference-counts resources in runtimeState.documents', () => {
   function node() {
     return {
+      attributes: new Map(),
       children: [],
       parent: null,
       append(...children) {
@@ -66,7 +67,12 @@ test('scheduler acquisition stores and reference-counts resources in runtimeStat
         if (index !== -1) this.parent.children.splice(index, 1);
         this.parent = null;
       },
-      setAttribute() {},
+      getAttribute(name) {
+        return this.attributes.get(name) ?? null;
+      },
+      setAttribute(name, value) {
+        this.attributes.set(name, String(value));
+      },
     };
   }
   const body = node();
@@ -87,6 +93,11 @@ test('scheduler acquisition stores and reference-counts resources in runtimeStat
   const second = acquireDocumentResources(doc);
   assert.equal(runtimeState.documents.get(doc).shared, first.shared);
   assert.equal(first.shared, second.shared);
+  assert.equal(first.shared.noteLayer.getAttribute('role'), 'region');
+  assert.equal(
+    first.shared.noteLayer.getAttribute('aria-label'),
+    'Hanamaru annotation notes',
+  );
   first.release();
   assert.equal(runtimeState.documents.has(doc), true);
   second.release();

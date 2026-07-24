@@ -56,6 +56,13 @@ function sameRange(first, second) {
     && first.endOffset === second.endOffset;
 }
 
+function rectsIntersect(first, second) {
+  return first.left < second.right
+    && first.right > second.left
+    && first.top < second.bottom
+    && first.bottom > second.top;
+}
+
 function ownerNode(boundary) {
   return boundary?.nodeType === Node.TEXT_NODE ? boundary.parentElement : boundary;
 }
@@ -299,14 +306,45 @@ export function createAnnotationInspector(root = document) {
     return viewport.width <= COMPACT_VISUAL_WIDTH;
   }
 
-  function syncOutputDisclosure(viewport = visualViewportSnapshot()) {
-    const compact = isCompactVisualViewport(viewport);
+  function syncOutputDisclosure(
+    viewport = visualViewportSnapshot(),
+    compact = isCompactVisualViewport(viewport),
+  ) {
     const expanded = !compact || outputExpanded;
     outputToggle.hidden = !compact;
     outputToggle.setAttribute('aria-expanded', String(expanded));
     outputToggle.textContent = expanded ? 'Collapse output' : 'Expand output';
     outputBody.hidden = !expanded;
     output.dataset.expanded = String(expanded);
+  }
+
+  function measureRailCandidates() {
+    const previousSide = output.getAttribute('data-inspector-side');
+    output.dataset.inspectorSide = 'left';
+    const left = output.getBoundingClientRect();
+    output.dataset.inspectorSide = 'right';
+    const right = output.getBoundingClientRect();
+    if (previousSide === null) output.removeAttribute('data-inspector-side');
+    else output.setAttribute('data-inspector-side', previousSide);
+    return { left, right };
+  }
+
+  function chooseGlyphSafeRail(viewport) {
+    const glyphRects = [...activeRange.getClientRects()]
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+    const candidates = measureRailCandidates();
+    const safe = Object.fromEntries(Object.entries(candidates).map(([side, candidate]) => [
+      side,
+      glyphRects.every((glyph) => !rectsIntersect(candidate, glyph)),
+    ]));
+    const rangeRect = activeRange.getBoundingClientRect();
+    const preferred = rangeRect.left + (rangeRect.width / 2)
+      > viewport.left + (viewport.width / 2)
+      ? 'left'
+      : 'right';
+    if (safe[preferred]) return preferred;
+    const alternative = preferred === 'left' ? 'right' : 'left';
+    return safe[alternative] ? alternative : null;
   }
 
   function setOutputExpanded(expanded) {
@@ -370,7 +408,7 @@ export function createAnnotationInspector(root = document) {
     const viewportChanged = visualViewportSignature !== ''
       && visualViewportSignature !== nextViewportSignature;
     visualViewportSignature = nextViewportSignature;
-    const compact = isCompactVisualViewport(viewport);
+    const baseCompact = isCompactVisualViewport(viewport);
     inspector.style.setProperty('--inspector-vv-bottom', `${viewport.bottomInset}px`);
     inspector.style.setProperty(
       '--inspector-vv-center-x',
@@ -386,26 +424,28 @@ export function createAnnotationInspector(root = document) {
     inspector.style.setProperty('--inspector-vv-scale', String(viewport.scale));
     inspector.style.setProperty('--inspector-vv-top', `${viewport.top}px`);
     inspector.style.setProperty('--inspector-vv-width', `${viewport.width}px`);
-    inspector.dataset.inspectorCompact = String(compact);
+    inspector.dataset.inspectorCompact = String(baseCompact);
     inspector.dataset.inspectorNarrow = String(viewport.width <= NARROW_VISUAL_WIDTH);
-    syncOutputDisclosure(viewport);
+    syncOutputDisclosure(viewport, baseCompact);
 
+    let compact = baseCompact;
     let outputSide = 'none';
     if (!output.hidden && activeRange !== null) {
-      const rangeRect = activeRange.getBoundingClientRect();
-      outputSide = compact
-        ? 'sheet'
-        : rangeRect.left + (rangeRect.width / 2)
-          > viewport.left + (viewport.width / 2)
-          ? 'left'
-          : 'right';
+      if (baseCompact) {
+        outputSide = 'sheet';
+      } else {
+        outputSide = chooseGlyphSafeRail(viewport) ?? 'sheet';
+        compact = outputSide === 'sheet';
+      }
     }
+    inspector.dataset.inspectorCompact = String(compact);
     inspector.dataset.inspectorOutputSide = outputSide;
     if (outputSide === 'left' || outputSide === 'right') {
       output.dataset.inspectorSide = outputSide;
     } else {
       output.removeAttribute('data-inspector-side');
     }
+    syncOutputDisclosure(viewport, compact);
 
     const inspectorHeader = inspector.querySelector(':scope > header');
     if (inspector.isConnected && inspectorHeader !== null) {

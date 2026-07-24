@@ -419,6 +419,8 @@ function createOverlay(doc) {
     const noteLayer = doc.createElement('div');
     noteLayer.className = 'hana-note-layer';
     noteLayer.setAttribute('data-hana-note-layer', '');
+    noteLayer.setAttribute('role', 'region');
+    noteLayer.setAttribute('aria-label', 'Hanamaru annotation notes');
 
     overlay.append(svgLayer, noteLayer);
     (doc.body ?? doc.documentElement).append(overlay);

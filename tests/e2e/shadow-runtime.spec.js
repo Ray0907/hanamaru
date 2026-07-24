@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 
 const browserErrors = new WeakMap();
@@ -124,6 +125,65 @@ test.beforeEach(async ({ page }) => {
 test.afterEach(async ({ page }) => {
   expect(browserErrors.get(page)).toEqual([]);
   expect(await page.evaluate(() => window.__shadowRuntimeUnhandled)).toEqual([]);
+});
+
+test('Document and Shadow note portals expose the same named landmark semantics', async ({
+  page,
+}) => {
+  const semantics = await page.evaluate(async () => {
+    const { acquireDocumentResources } = await import('/src/scheduler.js');
+    const { acquireShadowResources } = await import('/src/shadow-resources.js');
+    const { acquireShadowStyles } = await import('/src/shadow-styles.js');
+    const state = window.__shadowRuntime;
+    document.querySelector('#foreign-frame').remove();
+    const main = document.createElement('main');
+    const heading = document.createElement('h1');
+    heading.textContent = 'Shadow note landmark proof';
+    main.append(heading, ...document.body.children);
+    document.body.append(main);
+
+    const documentLease = acquireDocumentResources(document);
+    const openStyles = acquireShadowStyles(state.openRoot);
+    const otherStyles = acquireShadowStyles(state.otherRoot);
+    const openLease = acquireShadowResources(state.openRoot, openStyles);
+    const otherLease = acquireShadowResources(state.otherRoot, otherStyles);
+    window.__releaseNoteLandmarkProof = () => {
+      otherLease.release();
+      openLease.release();
+      otherStyles.release();
+      openStyles.release();
+      documentLease.release();
+    };
+    const read = (node) => ({
+      label: node.getAttribute('aria-label'),
+      role: node.getAttribute('role'),
+    });
+    return {
+      document: read(documentLease.shared.noteLayer),
+      open: {
+        ...read(openLease.environment.noteLayer),
+        rootId: openLease.environment.rootId,
+      },
+      other: {
+        ...read(otherLease.environment.noteLayer),
+        rootId: otherLease.environment.rootId,
+      },
+    };
+  });
+
+  expect(semantics.document).toEqual({
+    label: 'Hanamaru annotation notes',
+    role: 'region',
+  });
+  for (const shadow of [semantics.open, semantics.other]) {
+    expect(shadow.role).toBe('region');
+    expect(shadow.rootId).toMatch(/^hana-shadow-root-\d+$/u);
+    expect(shadow.label).toBe(`Hanamaru annotation notes (${shadow.rootId})`);
+  }
+  expect(semantics.open.label).not.toBe(semantics.other.label);
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+  await page.evaluate(() => window.__releaseNoteLandmarkProof());
 });
 
 test('resource portals are one per open or retained closed root and escape clipped hosts', async ({ page }) => {

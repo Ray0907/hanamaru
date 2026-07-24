@@ -79,6 +79,8 @@ function createPortal(document, root, rootId) {
   const noteLayer = document.createElement('div');
   noteLayer.className = 'hana-note-layer';
   noteLayer.setAttribute('data-hana-note-layer', '');
+  noteLayer.setAttribute('role', 'region');
+  noteLayer.setAttribute('aria-label', `Hanamaru annotation notes (${rootId})`);
 
   overlay.append(svgLayer, noteLayer);
   const parent = document.body ?? document.documentElement;

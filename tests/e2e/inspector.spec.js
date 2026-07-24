@@ -86,9 +86,17 @@ async function readInspectorVisualGeometry(page) {
       }];
     });
     const selection = getSelection();
-    const range = selection !== null && selection.rangeCount === 1
-      ? toRect(selection.getRangeAt(0).getBoundingClientRect())
+    const selectedRange = selection !== null && selection.rangeCount === 1
+      ? selection.getRangeAt(0)
       : null;
+    const range = selectedRange === null
+      ? null
+      : toRect(selectedRange.getBoundingClientRect());
+    const rangeRects = selectedRange === null
+      ? []
+      : [...selectedRange.getClientRects()]
+        .filter((rect) => rect.width > 0 && rect.height > 0)
+        .map(toRect);
     const inspector = document.querySelector('[data-inspector-root]');
     return {
       body: {
@@ -98,6 +106,7 @@ async function readInspectorVisualGeometry(page) {
       compact: inspector?.dataset.inspectorCompact,
       layers,
       range,
+      rangeRects,
       variables: {
         height: inspector?.style.getPropertyValue('--inspector-vv-height'),
         left: inspector?.style.getPropertyValue('--inspector-vv-left'),
@@ -210,6 +219,28 @@ async function selectFarthestInspectorCharacter(page) {
   return selected;
 }
 
+async function selectFirstInspectorParagraph(page) {
+  const rects = await page.evaluate(() => {
+    const paragraph = document.querySelector('#inspector-document p');
+    const range = document.createRange();
+    range.selectNodeContents(paragraph);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+    return [...range.getClientRects()]
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .map((rect) => ({
+        bottom: rect.bottom,
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+      }));
+  });
+  expect(new Set(rects.map(({ top }) => Math.round(top))).size).toBeGreaterThan(1);
+  return rects;
+}
+
 test('five-second path authors one real annotation and closes without disturbing the demo', async ({
   page,
 }) => {
@@ -292,9 +323,7 @@ test('seven marks include six built-ins and render the visible example flower pl
     .toHaveValue(unavailable);
   await expect(page.locator('[data-inspector-output-value="json"]')).toHaveValue(unavailable);
 
-  const results = await new AxeBuilder({ page })
-    .include('[data-inspector-root]')
-    .analyze();
+  const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
   expect(failures).toEqual([]);
 });
@@ -933,6 +962,41 @@ test('600x900 Inspector uses a compact non-occluding visual viewport layout', as
   )).toBe(true);
 });
 
+test('721px and 800px multiline Ranges fall back when neither rail is glyph-safe', async ({
+  page,
+}) => {
+  for (const width of [721, 800]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/');
+    const inspector = await openInspector(page);
+    const rangeRects = await selectFirstInspectorParagraph(page);
+    await expect(inspector).toHaveAttribute('data-inspector-state', 'selected');
+
+    const railWidth = Math.min(22 * 16, width - 32);
+    const candidates = [
+      { bottom: 884, left: 16, right: 16 + railWidth, top: 16 },
+      { bottom: 884, left: width - 16 - railWidth, right: width - 16, top: 16 },
+    ];
+    for (const candidate of candidates) {
+      expect(
+        rangeRects.some((rect) => rectsIntersect(candidate, rect)),
+        `${width}px candidate is blocked by a real Range client rect`,
+      ).toBe(true);
+    }
+
+    await inspector.getByRole('button', { name: 'Underline', exact: true }).click();
+    await expect(inspector).toHaveAttribute('data-inspector-compact', 'true');
+    await expect(inspector).toHaveAttribute('data-inspector-output-side', 'sheet');
+    const geometry = await readInspectorVisualGeometry(page);
+    const outputRect = geometry.layers.find(({ name }) => name === 'output').rect;
+    for (const rect of geometry.rangeRects) {
+      expect(rectsIntersect(outputRect, rect), 'sheet avoids every glyph line rect').toBe(false);
+    }
+    expectInspectorGeometryContained(geometry);
+    await inspector.getByRole('button', { name: 'Exit Inspector' }).click();
+  }
+});
+
 test('far-right Range makes the desktop output rail choose the opposite side', async ({
   page,
 }) => {
@@ -1466,11 +1530,7 @@ test('axe finds no Inspector violations in idle selected editing and applied sta
   const inspector = await openInspector(page);
   const analyze = async (state) => {
     await expect(inspector).toHaveAttribute('data-inspector-state', state);
-    const results = await new AxeBuilder({ page })
-      .include('[data-inspector-root]')
-      .include('.hana-annotation:not([hidden])')
-      .include('.hana-note-layer')
-      .analyze();
+    const results = await new AxeBuilder({ page }).analyze();
     expect(results.violations, `axe violations in ${state}`).toEqual([]);
   };
 
@@ -1507,11 +1567,7 @@ test('mobile bottom sheet axe state remains valid when collapsed and expanded', 
   await page.goto('/');
   const inspector = await beginUnderlinePreview(page);
   const analyze = async (state) => {
-    const results = await new AxeBuilder({ page })
-      .include('[data-inspector-root]')
-      .include('.hana-annotation:not([hidden])')
-      .include('.hana-note-layer')
-      .analyze();
+    const results = await new AxeBuilder({ page }).analyze();
     expect(results.violations, `mobile sheet ${state}`).toEqual([]);
   };
 
