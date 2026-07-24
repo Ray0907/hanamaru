@@ -1,6 +1,6 @@
 name: Release artifact
 
-on:
+"on":
   push:
     tags:
       - 'v*'
@@ -30,10 +30,11 @@ jobs:
       - name: Run the complete verification gate
         run: npm run verify
       - name: Create and verify the tagged release candidate
-        run: |
-          rm -rf -- "$RUNNER_TEMP/hanamaru-pack"
-          mkdir -- "$RUNNER_TEMP/hanamaru-pack"
-          node scripts/verify-pack.mjs "$RUNNER_TEMP/hanamaru-pack"
+        run: |-
+          pack_dir="${RUNNER_TEMP:?}/hanamaru-pack"
+          rm -rf -- "$pack_dir"
+          mkdir -p -- "$pack_dir"
+          node scripts/verify-pack.mjs "$pack_dir"
       - name: Upload the tagged release candidate
         uses: actions/upload-artifact@v4
         with:

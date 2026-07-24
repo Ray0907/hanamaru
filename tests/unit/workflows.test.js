@@ -3,6 +3,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parseDocument } from 'yaml';
 
 const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -11,71 +12,251 @@ const ROOT = path.resolve(
 );
 const WORKFLOW_DIRECTORY = path.join(ROOT, '.github', 'workflows');
 const EXPECTED_WORKFLOWS = Object.freeze(['ci.yml', 'release.yml']);
+const MAIN_CONDITION =
+  "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+const PACK_SCRIPT = [
+  'pack_dir="${RUNNER_TEMP:?}/hanamaru-pack"',
+  'rm -rf -- "$pack_dir"',
+  'mkdir -p -- "$pack_dir"',
+  'node scripts/verify-pack.mjs "$pack_dir"',
+].join('\n');
+const PLAYWRIGHT_INSTALL =
+  'npx --no-install playwright install --with-deps chromium firefox webkit';
+const APPROVED_ACTIONS = new Set([
+  'actions/checkout@v4',
+  'actions/setup-node@v4',
+  'actions/upload-artifact@v4',
+]);
+const FORBIDDEN_TEXT =
+  /(?:pull_request_target|(?:un)?publish|gh\s+release|npm\s+config|\.npmrc|registry-url|always-auth|auth|token|secret|write)/iu;
+
+const map = (entries) => new Map(entries);
+const step = (entries) => map(entries);
+
+const CHECKOUT_STEP = step([
+  ['name', 'Check out the exact commit'],
+  ['uses', 'actions/checkout@v4'],
+  ['with', map([['persist-credentials', false]])],
+]);
+const TAG_CHECKOUT_STEP = step([
+  ['name', 'Check out the exact tag commit'],
+  ['uses', 'actions/checkout@v4'],
+  ['with', map([['persist-credentials', false]])],
+]);
+const SETUP_STEP = step([
+  ['name', 'Use the release Node runtime'],
+  ['uses', 'actions/setup-node@v4'],
+  ['with', map([
+    ['node-version', '24.13.0'],
+    ['cache', 'npm'],
+  ])],
+]);
+const INSTALL_STEP = step([
+  ['name', 'Install locked dependencies'],
+  ['run', 'npm ci'],
+]);
+const BROWSER_STEP = step([
+  ['name', 'Install locked browser engines'],
+  ['run', PLAYWRIGHT_INSTALL],
+]);
+const VERIFY_STEP = step([
+  ['name', 'Run the complete verification gate'],
+  ['run', 'npm run verify'],
+]);
+
+const EXPECTED = Object.freeze({
+  'ci.yml': map([
+    ['name', 'CI'],
+    ['on', map([
+      ['push', null],
+      ['pull_request', null],
+    ])],
+    ['permissions', map([['contents', 'read']])],
+    ['jobs', map([
+      ['verify', map([
+        ['runs-on', 'ubuntu-latest'],
+        ['steps', [
+          CHECKOUT_STEP,
+          SETUP_STEP,
+          INSTALL_STEP,
+          BROWSER_STEP,
+          VERIFY_STEP,
+          step([
+            ['name', 'Create and verify the main release candidate'],
+            ['if', MAIN_CONDITION],
+            ['run', PACK_SCRIPT],
+          ]),
+          step([
+            ['name', 'Upload the main release candidate'],
+            ['if', MAIN_CONDITION],
+            ['uses', 'actions/upload-artifact@v4'],
+            ['with', map([
+              ['name', 'hanamaru-main-${{ github.sha }}'],
+              ['path', '${{ runner.temp }}/hanamaru-pack'],
+              ['if-no-files-found', 'error'],
+              ['retention-days', 14],
+            ])],
+          ]),
+        ]],
+      ])],
+    ])],
+  ]),
+  'release.yml': map([
+    ['name', 'Release artifact'],
+    ['on', map([
+      ['push', map([
+        ['tags', ['v*']],
+      ])],
+    ])],
+    ['permissions', map([['contents', 'read']])],
+    ['jobs', map([
+      ['verify', map([
+        ['runs-on', 'ubuntu-latest'],
+        ['steps', [
+          TAG_CHECKOUT_STEP,
+          SETUP_STEP,
+          step([
+            ['name', 'Validate the tag against package metadata'],
+            ['run', 'node scripts/check-release-tag.mjs'],
+          ]),
+          INSTALL_STEP,
+          BROWSER_STEP,
+          VERIFY_STEP,
+          step([
+            ['name', 'Create and verify the tagged release candidate'],
+            ['run', PACK_SCRIPT],
+          ]),
+          step([
+            ['name', 'Upload the tagged release candidate'],
+            ['uses', 'actions/upload-artifact@v4'],
+            ['with', map([
+              ['name', 'hanamaru-${{ github.ref_name }}'],
+              ['path', '${{ runner.temp }}/hanamaru-pack'],
+              ['if-no-files-found', 'error'],
+              ['retention-days', 30],
+            ])],
+          ]),
+        ]],
+      ])],
+    ])],
+  ]),
+});
 
 async function workflow(name) {
   return readFile(path.join(WORKFLOW_DIRECTORY, name), 'utf8');
 }
 
-function occurrences(text, pattern) {
-  return [...text.matchAll(pattern)].length;
-}
-
-function indexOfRequired(text, snippet) {
-  const index = text.indexOf(snippet);
-  assert.notEqual(index, -1, `missing workflow contract: ${snippet}`);
-  return index;
-}
-
-function assertInOrder(text, snippets) {
-  let previous = -1;
-  for (const snippet of snippets) {
-    const current = indexOfRequired(text, snippet);
-    assert.ok(
-      current > previous,
-      `workflow step must occur after its predecessor: ${snippet}`,
+function assertExactTree(actual, expected, location = 'workflow') {
+  if (expected instanceof Map) {
+    assert.equal(actual instanceof Map, true, `${location} must be a map`);
+    assert.deepEqual(
+      [...actual.keys()],
+      [...expected.keys()],
+      `${location} keys must match the exact allowlist and order`,
     );
-    previous = current;
+    for (const [key, value] of expected) {
+      assertExactTree(actual.get(key), value, `${location}.${String(key)}`);
+    }
+    return;
+  }
+  if (Array.isArray(expected)) {
+    assert.equal(Array.isArray(actual), true, `${location} must be a sequence`);
+    assert.equal(actual.length, expected.length, `${location} length must be exact`);
+    expected.forEach((value, index) => {
+      assertExactTree(actual[index], value, `${location}[${index}]`);
+    });
+    return;
+  }
+  assert.equal(actual, expected, `${location} must match exactly`);
+}
+
+function scanForbidden(value, location = 'workflow') {
+  if (value instanceof Map) {
+    for (const [key, child] of value) {
+      assert.equal(
+        FORBIDDEN_TEXT.test(String(key)),
+        false,
+        `${location} contains forbidden key ${String(key)}`,
+      );
+      if (key === 'uses') {
+        assert.equal(
+          APPROVED_ACTIONS.has(child),
+          true,
+          `${location}.uses must be an approved pinned action`,
+        );
+      }
+      scanForbidden(child, `${location}.${String(key)}`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => scanForbidden(child, `${location}[${index}]`));
+    return;
+  }
+  if (typeof value === 'string') {
+    assert.equal(
+      FORBIDDEN_TEXT.test(value),
+      false,
+      `${location} contains forbidden workflow capability`,
+    );
   }
 }
 
-function assertSharedSecurityContract(text) {
-  assert.match(text, /^permissions:\n  contents: read$/mu);
-  assert.equal(occurrences(text, /uses: actions\/checkout@v4$/gmu), 1);
-  assert.equal(occurrences(text, /uses: actions\/setup-node@v4$/gmu), 1);
-  assert.equal(occurrences(text, /uses: actions\/upload-artifact@v4$/gmu), 1);
-  assert.equal(occurrences(text, /persist-credentials: false$/gmu), 1);
-  assert.equal(occurrences(text, /node-version: 24\.13\.0$/gmu), 1);
-  assert.equal(occurrences(text, /run: npm ci$/gmu), 1);
+export function validateWorkflowContract(name, text) {
+  assert.equal(
+    Object.hasOwn(EXPECTED, name),
+    true,
+    `workflow contract is not defined for ${name}`,
+  );
+  const document = parseDocument(text, {
+    maxAliasCount: 0,
+    uniqueKeys: true,
+    version: '1.2',
+  });
+  assert.deepEqual(
+    document.errors.map((error) => error.message),
+    [],
+    `${name} must be valid duplicate-free YAML 1.2`,
+  );
+  const parsed = document.toJS({
+    mapAsMap: true,
+    maxAliasCount: 0,
+  });
+  assert.equal(parsed instanceof Map, true, `${name} root must be a map`);
+  assert.equal(
+    [...text.matchAll(/^"on":$/gmu)].length,
+    1,
+    `${name} must quote the root "on" key exactly once`,
+  );
+  assert.equal(parsed.has('on'), true, `${name} must retain on as a string key`);
+  assert.equal(parsed.has(true), false, `${name} must never coerce on to boolean true`);
+  scanForbidden(parsed, name);
+  assertExactTree(parsed, EXPECTED[name], name);
 
-  assert.doesNotMatch(text, /\bpull_request_target\b/u);
-  assert.doesNotMatch(text, /\bid-token\s*:/u);
-  assert.doesNotMatch(text, /\bpackages\s*:/u);
-  assert.doesNotMatch(text, /\bsecrets\s*:/u);
-  assert.doesNotMatch(text, /(?:NODE_AUTH_TOKEN|NPM_TOKEN|npm-token|registry-url|always-auth)/iu);
-  assert.doesNotMatch(text, /(?:\$\{\{\s*secrets\.|\.npmrc|\bpublish\b|gh\s+release)/iu);
-  assert.doesNotMatch(text, /^\s+[a-z][a-z-]*:\s*write$/gmu);
-  assert.doesNotMatch(text, /(?:git\s+config|credential\.helper|git-credentials)/iu);
-  assert.equal(occurrences(text, /uses: actions\/[^@\s]+@v4$/gmu), 3);
-  assert.equal(occurrences(text, /uses: /gmu), 3);
+  const steps = parsed.get('jobs').get('verify').get('steps');
+  const verifierSteps = steps.filter(
+    (candidate) => candidate.get('run')?.includes('scripts/verify-pack.mjs'),
+  );
+  assert.equal(verifierSteps.length, 1, `${name} must invoke verify-pack exactly once`);
+  const packLines = verifierSteps[0].get('run').split('\n');
+  assert.equal(
+    packLines.at(-1),
+    'node scripts/verify-pack.mjs "$pack_dir"',
+    `${name} verifier must be the final pack command`,
+  );
+  assert.equal(
+    packLines.filter((line) => line.includes('scripts/verify-pack.mjs')).length,
+    1,
+    `${name} pack body must invoke verify-pack exactly once`,
+  );
+  return parsed;
 }
 
-function assertFreshPackDirectory(text) {
-  assertInOrder(text, [
-    'rm -rf -- "$RUNNER_TEMP/hanamaru-pack"',
-    'mkdir -- "$RUNNER_TEMP/hanamaru-pack"',
-    'node scripts/verify-pack.mjs "$RUNNER_TEMP/hanamaru-pack"',
-  ]);
-  assert.equal(
-    occurrences(
-      text,
-      /node scripts\/verify-pack\.mjs "\$RUNNER_TEMP\/hanamaru-pack"/gu,
-    ),
-    1,
-  );
-  assert.doesNotMatch(
-    text,
-    /verify-pack\.mjs\s+(?:"|')?(?:\.|dist|artifacts?|package)(?:\/|\s|"|')/u,
-  );
+function replaceOnce(text, before, after) {
+  const first = text.indexOf(before);
+  assert.notEqual(first, -1, `mutation source missing: ${before}`);
+  assert.equal(text.indexOf(before, first + before.length), -1, `mutation source not unique: ${before}`);
+  return `${text.slice(0, first)}${after}${text.slice(first + before.length)}`;
 }
 
 test('workflow discovery is exact and cannot pass with zero matching workflows', async () => {
@@ -86,80 +267,136 @@ test('workflow discovery is exact and cannot pass with zero matching workflows',
   assert.deepEqual(discovered, EXPECTED_WORKFLOWS);
 });
 
-test('CI is read-only, verifies once, and packs only an exact main push', async () => {
-  const text = await workflow('ci.yml');
-  let assertions = 0;
-  const prove = (condition, message) => {
-    assertions += 1;
-    assert.ok(condition, message);
-  };
+for (const name of EXPECTED_WORKFLOWS) {
+  test(`${name} parses as its exact least-privilege workflow contract`, async () => {
+    validateWorkflowContract(name, await workflow(name));
+  });
+}
 
-  assertSharedSecurityContract(text);
-  assert.match(text, /^on:\n  push:\n  pull_request:$/mu);
-  assert.equal(occurrences(text, /^  [a-z][a-z-]*:\n    runs-on: ubuntu-latest$/gmu), 1);
-  assertInOrder(text, [
-    'uses: actions/checkout@v4',
-    'uses: actions/setup-node@v4',
-    'run: npm ci',
-    'run: npx --no-install playwright install --with-deps chromium firefox webkit',
-    'run: npm run verify',
-    'node scripts/verify-pack.mjs "$RUNNER_TEMP/hanamaru-pack"',
-    'uses: actions/upload-artifact@v4',
-  ]);
-  assert.equal(occurrences(text, /run: npm run verify$/gmu), 1);
-  assert.equal(
-    occurrences(
-      text,
-      /if: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}$/gmu,
-    ),
-    2,
+test('workflow parser rejects syntax errors, duplicate keys, and on coercion', async () => {
+  const source = await workflow('ci.yml');
+  assert.throws(
+    () => validateWorkflowContract('ci.yml', `${source}\njobs: {}\n`),
+    /duplicate-free YAML 1\.2/u,
   );
-  assertFreshPackDirectory(text);
-  assert.match(text, /name: hanamaru-main-\$\{\{ github\.sha \}\}/u);
-  assert.match(text, /path: \$\{\{ runner\.temp \}\}\/hanamaru-pack/u);
-  assert.match(text, /if-no-files-found: error/u);
-  assert.match(text, /retention-days: (?:[1-9]|[12]\d|30)$/mu);
-  assert.doesNotMatch(text, /github\.event_name == 'pull_request'/u);
-
-  prove(occurrences(text, /^      - name: /gmu) >= 7, 'CI must discover its expected steps');
-  prove(text.includes("github.event_name == 'push'"), 'CI artifact must require a push event');
-  prove(text.includes("github.ref == 'refs/heads/main'"), 'CI artifact must require main');
-  assert.equal(assertions, 3, 'zero-test guard: all CI condition proofs ran');
+  assert.throws(
+    () => validateWorkflowContract('ci.yml', replaceOnce(source, 'jobs:', 'jobs: [')),
+    /duplicate-free YAML 1\.2/u,
+  );
+  assert.throws(
+    () => validateWorkflowContract('ci.yml', replaceOnce(source, '"on":', 'true:')),
+    /quote the root "on" key|string key|keys must match/u,
+  );
+  assert.throws(
+    () => validateWorkflowContract('ci.yml', replaceOnce(source, '"on":', 'on:')),
+    /quote the root "on" key/u,
+  );
 });
 
-test('release validates the tag before installs and produces one read-only tag artifact', async () => {
-  const text = await workflow('release.yml');
-  let assertions = 0;
-  const prove = (condition, message) => {
-    assertions += 1;
-    assert.ok(condition, message);
-  };
+test('exact workflow allowlists reject every release-safety mutation', async () => {
+  const ci = await workflow('ci.yml');
+  const release = await workflow('release.yml');
+  const mutations = [
+    [
+      'post-pack command',
+      'ci.yml',
+      replaceOnce(
+        ci,
+        'node scripts/verify-pack.mjs "$pack_dir"',
+        'node scripts/verify-pack.mjs "$pack_dir"\nprintf unsafe > "$pack_dir/extra"',
+      ),
+    ],
+    [
+      'extra step',
+      'ci.yml',
+      replaceOnce(
+        ci,
+        '      - name: Install locked dependencies',
+        '      - name: Unexpected step\n        run: node --version\n      - name: Install locked dependencies',
+      ),
+    ],
+    [
+      'duplicate action',
+      'ci.yml',
+      replaceOnce(ci, 'actions/setup-node@v4', 'actions/checkout@v4'),
+    ],
+    [
+      'changed action',
+      'ci.yml',
+      replaceOnce(ci, 'actions/upload-artifact@v4', 'actions/upload-artifact@v3'),
+    ],
+    [
+      'npm unpublish',
+      'release.yml',
+      replaceOnce(release, 'npm run verify', 'npm unpublish hanamaru-annotations'),
+    ],
+    [
+      'wrong condition',
+      'ci.yml',
+      replaceOnce(
+        ci,
+        `      - name: Create and verify the main release candidate
+        if: ${MAIN_CONDITION}`,
+        `      - name: Create and verify the main release candidate
+        if: \${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}`,
+      ),
+    ],
+    [
+      'wrong path',
+      'release.yml',
+      replaceOnce(
+        release,
+        '${{ runner.temp }}/hanamaru-pack',
+        './hanamaru-pack',
+      ),
+    ],
+    [
+      'wrong order',
+      'release.yml',
+      replaceOnce(
+        release,
+        '      - name: Install locked dependencies\n        run: npm ci\n      - name: Install locked browser engines\n        run: npx --no-install playwright install --with-deps chromium firefox webkit',
+        '      - name: Install locked browser engines\n        run: npx --no-install playwright install --with-deps chromium firefox webkit\n      - name: Install locked dependencies\n        run: npm ci',
+      ),
+    ],
+  ];
 
-  assertSharedSecurityContract(text);
-  assert.match(text, /^on:\n  push:\n    tags:\n      - 'v\*'$/mu);
-  assert.doesNotMatch(text, /\bworkflow_dispatch\b/u);
-  assert.equal(occurrences(text, /^  [a-z][a-z-]*:\n    runs-on: ubuntu-latest$/gmu), 1);
-  assertInOrder(text, [
-    'uses: actions/checkout@v4',
-    'uses: actions/setup-node@v4',
-    'run: node scripts/check-release-tag.mjs',
-    'run: npm ci',
-    'run: npx --no-install playwright install --with-deps chromium firefox webkit',
-    'run: npm run verify',
-    'node scripts/verify-pack.mjs "$RUNNER_TEMP/hanamaru-pack"',
-    'uses: actions/upload-artifact@v4',
-  ]);
-  assert.equal(occurrences(text, /run: node scripts\/check-release-tag\.mjs$/gmu), 1);
-  assert.equal(occurrences(text, /run: npm run verify$/gmu), 1);
-  assertFreshPackDirectory(text);
-  assert.match(text, /name: hanamaru-\$\{\{ github\.ref_name \}\}/u);
-  assert.match(text, /path: \$\{\{ runner\.temp \}\}\/hanamaru-pack/u);
-  assert.match(text, /if-no-files-found: error/u);
-  assert.match(text, /retention-days: (?:[1-9]|[12]\d|30)$/mu);
-  assert.doesNotMatch(text, /\bif:/u);
+  assert.equal(mutations.length, 8, 'zero-test guard: all safety mutations exist');
+  for (const [label, name, mutation] of mutations) {
+    assert.throws(
+      () => validateWorkflowContract(name, mutation),
+      undefined,
+      label,
+    );
+  }
+});
 
-  prove(occurrences(text, /^      - name: /gmu) >= 8, 'release must discover its expected steps');
-  prove(text.includes("      - 'v*'"), 'release must discover the v-prefixed tag filter');
-  prove(!text.includes('branches:'), 'release must not run on branch pushes');
-  assert.equal(assertions, 3, 'zero-test guard: all release trigger proofs ran');
+test('recursive security scan rejects forbidden triggers, permissions, env, and commands', async () => {
+  const ci = await workflow('ci.yml');
+  const mutations = [
+    replaceOnce(ci, 'pull_request:', 'pull_request_target:'),
+    replaceOnce(ci, 'contents: read', 'contents: write'),
+    replaceOnce(
+      ci,
+      '    runs-on: ubuntu-latest',
+      `    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: \${{ secrets.NPM_TOKEN }}`,
+    ),
+    replaceOnce(ci, 'npm run verify', 'gh release create v0.1.0'),
+  ];
+
+  assert.equal(mutations.length, 4, 'zero-test guard: all forbidden scans exist');
+  for (const mutation of mutations) {
+    assert.throws(
+      () => validateWorkflowContract('ci.yml', mutation),
+      /forbidden workflow|forbidden key/u,
+    );
+  }
+});
+
+test('workflow parser dependency is exact and remains development-only', async () => {
+  const manifest = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
+  assert.equal(manifest.devDependencies.yaml, '2.9.0');
+  assert.equal(Object.hasOwn(manifest, 'dependencies'), false);
 });
