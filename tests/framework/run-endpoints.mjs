@@ -437,6 +437,22 @@ async function installDependencies(directory, dependencies, supervisor) {
   })
 }
 
+async function installBrowserFixture(directory, supervisor) {
+  await runCommand(
+    process.execPath,
+    [
+      join(directory, 'node_modules', '@playwright', 'test', 'cli.js'),
+      'install',
+      'chromium',
+    ],
+    {
+      cwd: directory,
+      label: 'Playwright browser install',
+      supervisor,
+    },
+  )
+}
+
 function syntheticPackageManifest(framework) {
   const adapterPath = `./src/adapters/${framework}.js`
   const adapterTypes = `./types/${framework}/index.d.ts`
@@ -562,6 +578,7 @@ async function executeEndpoint(directory, endpoint, fixtures, supervisor) {
     [...harnessDependencies, ...endpoint.dependencies],
     supervisor,
   )
+  await installBrowserFixture(directory, supervisor)
   supervisor?.throwIfTerminating()
   await createSyntheticPackage(directory, endpoint.framework)
   const copiedFixtures = await copyFixtures(directory, fixtures)
